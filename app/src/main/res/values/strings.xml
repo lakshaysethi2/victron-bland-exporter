@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Victron BLE Exporter</string>
+    <string name="notification_channel_name">Victron Exporter</string>
+    <string name="notification_title">Victron BLE Exporter running</string>
+    <string name="notification_text">Serving %1$d devices | Tunnel: %2$s</string>
+    <string name="how_to_get_key_title">How to get Encryption Key</string>
+    <string name="how_to_get_key">1. Install VictronConnect\n2. Connect to your MPPT\n3. Settings → Product Info\n4. Enable Instant Readout\n5. Tap Encryption data / Show key\n6. Copy the 32 hex chars</string>
+</resources>

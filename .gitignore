@@ -1,0 +1,38 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Android Studio
+.idea/
+*.iml
+*.hprof
+
+# Binary for cloudflared (too big + licensing)
+app/src/main/jniLibs/**/*.so
+!app/src/main/jniLibs/.gitkeep
+
+# Generated
+app/release/
+app/debug/
+
+# Keystore
+*.jks
+*.keystore
+
+# Logs
+*.log
+
+# Cloudflare token (never commit!)
+*.token
+cloudflared-token.txt
+
+# Misc
+.DS_Store
+*.swp
+*.swo
