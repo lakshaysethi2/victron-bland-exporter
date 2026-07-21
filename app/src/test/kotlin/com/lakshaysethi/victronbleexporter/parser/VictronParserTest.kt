@@ -58,7 +58,9 @@ class VictronParserTest {
         val data = parsed.data
         assertEquals(12.53, data["battery_voltage"] as Double, 0.01)
         assertEquals(50.0, data["soc_percent"] as Double, 0.1)
-        // Add more assertions as needed from the fixture
+        // Per reference convention, consumed is negative for discharge
+        assertEquals(-50.0, data["consumed_ah"] as Double, 0.1)
+        assertEquals(0, data["aux_mode"]) // typical for voltage aux in fixture
     }
 
     @Test

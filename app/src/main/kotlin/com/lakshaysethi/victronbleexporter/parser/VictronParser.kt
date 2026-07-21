@@ -4,8 +4,6 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-private const val TAG = "VictronParser"
-
 /**
  * Parsed device data returned by the parser.
  */
