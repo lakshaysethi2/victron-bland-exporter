@@ -13,20 +13,25 @@ private const val VICTRON_MFG_ID = 0x02E1
  * Full port of Victron Instant Readout BLE advertisement parser.
  * Supports Solar Charger (MPPT) record type 0x01 and basic SmartShunt.
  */
+/**
+ * Parsed device data returned by the parser.
+ * Moved to top-level so it can be imported cleanly from other packages.
+ */
+data class ParsedDevice(
+    val mac: String,
+    val modelId: Int,
+    val recordType: Int,
+    val data: Map<String, Any?>,
+    val rssi: Int
+)
+
 object VictronParser {
 
-    data class ParsedDevice(
-        val mac: String,
-        val modelId: Int,
-        val recordType: Int,
-        val data: Map<String, Any?>,
-        val rssi: Int
-    )
-
     fun isVictronAdvertisement(manufacturerData: ByteArray?): Boolean {
-        if (manufacturerData == null || manufacturerData.size < 3) return false
-        val mfgId = ((manufacturerData[1].toInt() and 0xFF) shl 8) or (manufacturerData[0].toInt() and 0xFF)
-        return mfgId == VICTRON_MFG_ID && manufacturerData[2].toInt() and 0xFF == 0x10
+        // Android's getManufacturerSpecificData() already strips the 2-byte company ID.
+        // The data starts directly with the record prefix (0x10).
+        if (manufacturerData == null || manufacturerData.size < 1) return false
+        return (manufacturerData[0].toInt() and 0xFF) == 0x10
     }
 
     fun parseAdvertisement(
@@ -37,13 +42,15 @@ object VictronParser {
     ): ParsedDevice? {
         if (!isVictronAdvertisement(manufacturerData)) return null
 
-        if (manufacturerData.size < 8) return null
+        if (manufacturerData.size < 7) return null
 
-        val modelId = ((manufacturerData[4].toInt() and 0xFF) shl 8) or (manufacturerData[3].toInt() and 0xFF)
-        val recordType = manufacturerData[5].toInt() and 0xFF
-        val iv = manufacturerData.copyOfRange(6, 8) // 2 bytes
-        val keyCheck = manufacturerData[8].toInt() and 0xFF
-        val encrypted = manufacturerData.copyOfRange(9, manufacturerData.size)
+        // Layout when company ID is stripped by Android:
+        // [0]=0x10, [1-2]=model LE, [3]=recordType, [4-5]=IV, [6]=keyCheck, [7+]=encrypted
+        val modelId = ((manufacturerData[2].toInt() and 0xFF) shl 8) or (manufacturerData[1].toInt() and 0xFF)
+        val recordType = manufacturerData[3].toInt() and 0xFF
+        val iv = manufacturerData.copyOfRange(4, 6)
+        val keyCheck = manufacturerData[6].toInt() and 0xFF
+        val encrypted = manufacturerData.copyOfRange(7, manufacturerData.size)
 
         if (encryptionKeyHex.isNullOrBlank() || encryptionKeyHex.length != 32) {
             Log.w(TAG, "No or invalid encryption key for $mac")
@@ -57,16 +64,19 @@ object VictronParser {
             return null
         }
 
+        // Critical: Victron protocol requires first byte of encrypted payload to match first byte of key
+        // (this is the "key check" / advertisement key mismatch guard)
+        if (encrypted.isNotEmpty() && (encrypted[0].toInt() and 0xFF) != (key[0].toInt() and 0xFF)) {
+            Log.w(TAG, "Key check failed for $mac (wrong encryption key?)")
+            return null
+        }
+
         val decrypted = try {
             decryptAESCTR(encrypted, key, iv)
         } catch (e: Exception) {
             Log.e(TAG, "Decryption failed for $mac", e)
             return null
         }
-
-        // Verify key check (first byte of decrypted should match keyCheck after XOR or as per protocol)
-        // In practice many implementations just parse after successful decrypt.
-        // We keep simple: assume success if decrypt didn't throw.
 
         val parsedData = when (recordType) {
             0x01 -> parseSolarCharger(decrypted)
