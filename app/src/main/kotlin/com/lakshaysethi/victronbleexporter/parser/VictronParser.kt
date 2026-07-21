@@ -1,6 +1,5 @@
 package com.lakshaysethi.victronbleexporter.parser
 
-import android.util.Log
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -48,27 +47,23 @@ object VictronParser {
         val encrypted = manufacturerData.copyOfRange(8, manufacturerData.size)
 
         if (encryptionKeyHex.isNullOrBlank() || encryptionKeyHex.length != 32) {
-            Log.w(TAG, "No or invalid encryption key for $mac")
             return null
         }
 
         val key = try {
             hexStringToByteArray(encryptionKeyHex)
         } catch (e: Exception) {
-            Log.e(TAG, "Bad key hex", e)
             return null
         }
 
         // Enforce key check BEFORE decrypting (critical security/ correctness check)
         if (keyCheck != (key[0].toInt() and 0xFF)) {
-            Log.w(TAG, "Key check failed for $mac (wrong encryption key?)")
             return null
         }
 
         val decrypted = try {
             decryptAESCTR(encrypted, key, iv)
         } catch (e: Exception) {
-            Log.e(TAG, "Decryption failed for $mac", e)
             return null
         }
 
@@ -143,8 +138,18 @@ object VictronParser {
         val alarm = reader.readUnsignedInt(16)
         val aux = reader.readUnsignedInt(16)
         val auxMode = reader.readUnsignedInt(2)
-        val current = reader.readSignedInt(22)
-        val consumedAh = reader.readUnsignedInt(20)
+
+        // Current: read as unsigned 22-bit first for proper NA detection (all-ones = 0x3FFFFF)
+        val rawCurrent = reader.readUnsignedInt(22)
+        val current = if (rawCurrent == 0x3FFFFF) 0x7FFFFF else rawCurrent  // treat all-ones as NA
+        val signedCurrent = if (current == 0x7FFFFF) null else {
+            val signBit = 1 shl 21
+            if (current and signBit != 0) (current - (1 shl 22)) else current
+        }
+
+        val consumedAhRaw = reader.readUnsignedInt(20)
+        val consumedAh = if (consumedAhRaw == 0xFFFFF) null else consumedAhRaw
+
         val soc = reader.readUnsignedInt(10)
 
         return mapOf(
@@ -153,8 +158,9 @@ object VictronParser {
             "alarm" to alarm,
             "aux" to aux,
             "aux_mode" to auxMode,
-            "battery_current" to (if (current != 0x1FFFFF) current / 1000.0 else null),
-            "consumed_ah" to (if (consumedAh != 0xFFFFF) consumedAh / 10.0 else null),
+            "battery_current" to (signedCurrent?.let { it / 1000.0 }),
+            // Discharge is negative per VE.Direct / reference convention
+            "consumed_ah" to (consumedAh?.let { -it / 10.0 }),
             "soc_percent" to (if (soc != 0x3FF) soc / 10.0 else null),
             "device_type" to "batterymonitor"
         )
