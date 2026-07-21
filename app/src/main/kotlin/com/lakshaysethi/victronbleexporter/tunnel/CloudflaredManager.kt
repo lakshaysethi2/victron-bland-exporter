@@ -57,7 +57,7 @@ class CloudflaredManager(private val context: Context) {
                                 onStatus(status)
                             }
                             line!!.contains("https://") && tunnelUrl == null -> {
-                                val urlMatch = Regex("https://[^\\s]+").find(line!!)
+                                val urlMatch = Regex("https://[^\s]+").find(line!!)
                                 urlMatch?.let {
                                     tunnelUrl = it.value
                                     status = "Connected"
@@ -117,7 +117,7 @@ class CloudflaredManager(private val context: Context) {
                 while (reader.readLine().also { line = it } != null) {
                     Log.d(TAG, "cf: $line")
                     if (line!!.contains("https://") && tunnelUrl == null) {
-                        val match = Regex("https://[a-z0-9-]+\.trycloudflare\.com").find(line!!)
+                        val match = Regex("https://[a-z0-9-]+\\.trycloudflare\\.com").find(line!!)
                         match?.let {
                             tunnelUrl = it.value
                             status = "Connected (quick)"
