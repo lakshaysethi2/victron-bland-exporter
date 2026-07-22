@@ -1,5 +1,7 @@
 package com.lakshaysethi.victronbleexporter.service
 
+import android.os.PowerManager
+
 import android.app.*
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
@@ -32,6 +34,7 @@ class VictronBleExporterService : Service() {
 
     private lateinit var prometheusExporter: PrometheusExporter
     private lateinit var cloudflaredManager: CloudflaredManager
+    private var wakeLock: PowerManager.WakeLock? = null
 
     // Device encryption keys: MAC -> key (hex)
     private val deviceKeys = mutableMapOf<String, String>()
@@ -48,8 +51,11 @@ class VictronBleExporterService : Service() {
 
         createNotificationChannel()
 
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VictronBleExporter::WakeLock")
+        wakeLock?.acquire()
         cloudflaredManager = CloudflaredManager(this)
-        prometheusExporter = PrometheusExporter(9100)
+        prometheusExporter = PrometheusExporter(5338)
         prometheusExporter.startServer()
 
         startForegroundServiceNotification("Starting...")
@@ -72,7 +78,7 @@ class VictronBleExporterService : Service() {
                         }
                     } else {
                         // Quick tunnel fallback
-                        cloudflaredManager.startQuickTunnel(9100) { status ->
+                        cloudflaredManager.startQuickTunnel(5338) { status ->
                             updateNotification(status)
                         }
                     }
@@ -204,6 +210,7 @@ class VictronBleExporterService : Service() {
         Log.i(TAG, "Service onDestroy")
         stopBleScan()
         prometheusExporter.stopServer()
+        if (wakeLock?.isHeld == true) wakeLock?.release()
         cloudflaredManager.stop()
         serviceScope.cancel()
     }

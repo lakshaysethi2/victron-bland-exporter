@@ -1,11 +1,14 @@
 package com.lakshaysethi.victronbleexporter
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -14,20 +17,18 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
-import com.lakshaysethi.victronbleexporter.parser.VictronParser
 import com.lakshaysethi.victronbleexporter.service.VictronBleExporterService
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -51,7 +52,9 @@ class MainActivity : ComponentActivity() {
                     onStop = { stopExporterService() },
                     onAddKey = { mac, key -> addKeyToService(mac, key) },
                     onStartTunnel = { token -> startTunnel(token) },
-                    onQuickTunnel = { startQuickTunnel() }
+                    onQuickTunnel = { startQuickTunnel() },
+                    onStopTunnel = { stopTunnel() },
+                    onDisableBatteryOpt = { requestDisableBatteryOptimizations() }
                 )
             }
         }
@@ -74,8 +77,6 @@ class MainActivity : ComponentActivity() {
 
         if (missing.isNotEmpty()) {
             permissionsLauncher.launch(missing.toTypedArray())
-        } else {
-            // Already granted
         }
     }
 
@@ -114,7 +115,11 @@ class MainActivity : ComponentActivity() {
             action = "START_TUNNEL"
             putExtra("tunnel_token", token)
         }
-        startForegroundService(intent)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
     }
 
     private fun startQuickTunnel() {
@@ -122,7 +127,35 @@ class MainActivity : ComponentActivity() {
             action = "START_TUNNEL"
             // no token => quick tunnel
         }
-        startForegroundService(intent)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
+    private fun stopTunnel() {
+        val intent = Intent(this, VictronBleExporterService::class.java).apply {
+            action = "STOP_TUNNEL"
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
+    @SuppressLint("BatteryLife")
+    private fun requestDisableBatteryOptimizations() {
+        val intent = Intent()
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            intent.action = Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+            intent.data = Uri.parse("package:$packageName")
+            startActivity(intent)
+        } else {
+            Toast.makeText(this, "Battery optimizations already disabled", Toast.LENGTH_SHORT).show()
+        }
     }
 }
 
@@ -132,12 +165,12 @@ fun VictronBleExporterScreen(
     onStop: () -> Unit,
     onAddKey: (String, String) -> Unit,
     onStartTunnel: (String) -> Unit,
-    onQuickTunnel: () -> Unit
+    onQuickTunnel: () -> Unit,
+    onStopTunnel: () -> Unit,
+    onDisableBatteryOpt: () -> Unit
 ) {
     val context = LocalContext.current
     var isRunning by remember { mutableStateOf(false) }
-    var tunnelStatus by remember { mutableStateOf("Stopped") }
-    var tunnelUrl by remember { mutableStateOf<String?>(null) }
     var deviceCount by remember { mutableStateOf(0) }
     var devices by remember { mutableStateOf(emptyList<Pair<String, Map<String, Any?>>>()) }
 
@@ -145,18 +178,36 @@ fun VictronBleExporterScreen(
     var keyInput by remember { mutableStateOf("") }
     var tunnelToken by remember { mutableStateOf("") }
 
-    val scope = rememberCoroutineScope()
+    var localIp by remember { mutableStateOf("Unknown IP") }
 
-    // Live refresh loop
+    // Read AppState
+    var tunnelStatus by remember { mutableStateOf(AppState.tunnelStatus) }
+    var tunnelUrl by remember { mutableStateOf(AppState.tunnelUrl) }
+
     LaunchedEffect(Unit) {
+        // Fetch WiFi IP
+        val wifiMgr = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val ipAddress = wifiMgr.connectionInfo.ipAddress
+        if (ipAddress != 0) {
+            val ipStr = String.format(
+                "%d.%d.%d.%d",
+                ipAddress and 0xff,
+                ipAddress shr 8 and 0xff,
+                ipAddress shr 16 and 0xff,
+                ipAddress shr 24 and 0xff
+            )
+            localIp = ipStr
+        }
+
         while (true) {
             val all = MetricsStore.getAll()
             deviceCount = all.size
             devices = all.map { (mac, parsed) ->
                 mac to parsed.data
             }
-            // Update UI tunnel info (we would need to expose from service, for demo we fake)
-            delay(1500)
+            tunnelStatus = AppState.tunnelStatus
+            tunnelUrl = AppState.tunnelUrl
+            delay(1000)
         }
     }
 
@@ -164,12 +215,26 @@ fun VictronBleExporterScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp)
+            .verticalScroll(rememberScrollState())
     ) {
         Text(
             "Victron BLE Prometheus Exporter",
             style = MaterialTheme.typography.headlineMedium
         )
         Spacer(Modifier.height(8.dp))
+
+        Card {
+            Column(modifier = Modifier.padding(8.dp)) {
+                Text("App Setup & Keep-Alive", style = MaterialTheme.typography.titleMedium)
+                Text("To run constantly with screen off, disable battery optimizations.", style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(4.dp))
+                Button(onClick = onDisableBatteryOpt) {
+                    Text("Disable Battery Optimizations")
+                }
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = {
@@ -182,19 +247,51 @@ fun VictronBleExporterScreen(
                 onStop()
                 isRunning = false
             }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
-                Text("Stop")
+                Text("Stop Exporter")
             }
         }
 
+        Spacer(Modifier.height(8.dp))
+
+        Text("Local Metrics Endpoint:", style = MaterialTheme.typography.titleSmall)
+        Text("http://$localIp:5338/metrics", fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary)
+        Text("(Accessible over local Wi-Fi)", style = MaterialTheme.typography.bodySmall)
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
         Spacer(Modifier.height(16.dp))
 
-        Text("Status: ${if (isRunning) "Running" else "Stopped"} | Devices: $deviceCount")
-        Text("Tunnel: $tunnelStatus")
+        Text("Cloudflare Tunnel", style = MaterialTheme.typography.titleMedium)
+        Text("Tunnel: $tunnelStatus", style = MaterialTheme.typography.bodyMedium)
         tunnelUrl?.let {
             Text("Public URL: $it", fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 4.dp))
         }
+        
+        Spacer(Modifier.height(8.dp))
 
-        Spacer(Modifier.height(24.dp))
+        OutlinedTextField(
+            value = tunnelToken,
+            onValueChange = { tunnelToken = it },
+            label = { Text("Named Tunnel Token") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+            Button(onClick = { if (tunnelToken.isNotBlank()) onStartTunnel(tunnelToken) }) {
+                Text("Start Named")
+            }
+            Button(onClick = onQuickTunnel) {
+                Text("Quick Tunnel")
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Button(onClick = onStopTunnel, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
+            Text("Disable/Stop Cloudflared")
+        }
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
 
         // Add device key
         Text("Add Device Encryption Key", style = MaterialTheme.typography.titleMedium)
@@ -210,7 +307,7 @@ fun VictronBleExporterScreen(
             label = { Text("32-char hex encryption key") },
             modifier = Modifier.fillMaxWidth()
         )
-        Row {
+        Row(modifier = Modifier.padding(top=8.dp)) {
             Button(onClick = {
                 if (macInput.isNotBlank() && keyInput.length == 32) {
                     onAddKey(macInput.uppercase(), keyInput)
@@ -222,48 +319,21 @@ fun VictronBleExporterScreen(
             }) {
                 Text("Add Key")
             }
-            Spacer(Modifier.width(8.dp))
-            TextButton(onClick = {
-                Toast.makeText(context, "Go to VictronConnect → Product Info → Instant Readout", Toast.LENGTH_LONG).show()
-            }) {
-                Text("How to get key")
-            }
         }
 
         Spacer(Modifier.height(24.dp))
 
-        // Cloudflare Tunnel
-        Text("Cloudflare Tunnel", style = MaterialTheme.typography.titleMedium)
-        OutlinedTextField(
-            value = tunnelToken,
-            onValueChange = { tunnelToken = it },
-            label = { Text("Named Tunnel Token (from Cloudflare Zero Trust)") },
-            modifier = Modifier.fillMaxWidth()
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { if (tunnelToken.isNotBlank()) onStartTunnel(tunnelToken) }) {
-                Text("Start Named Tunnel")
-            }
-            Button(onClick = onQuickTunnel) {
-                Text("Quick Tunnel (trycloudflare)")
-            }
-            Button(onClick = { /* stop via intent not shown */ }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
-                Text("Stop Tunnel")
-            }
-        }
-
-        Spacer(Modifier.height(24.dp))
-
-        Text("Live Devices", style = MaterialTheme.typography.titleMedium)
-        LazyColumn(modifier = Modifier.weight(1f)) {
-            items(devices) { (mac, data) ->
+        Text("Live Devices ($deviceCount)", style = MaterialTheme.typography.titleMedium)
+        // Using Column for list since we are inside a verticalScroll parent
+        Column {
+            devices.forEach { (mac, data) ->
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(vertical = 4.dp)
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
-                        Text(mac, style = MaterialTheme.typography.bodyMedium)
+                        Text(mac, style = MaterialTheme.typography.titleSmall)
                         data.forEach { (k, v) ->
                             Text("$k: $v", style = MaterialTheme.typography.bodySmall)
                         }
@@ -271,11 +341,5 @@ fun VictronBleExporterScreen(
                 }
             }
         }
-
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Metrics endpoint: http://localhost:9100/metrics\nUse Cloudflare tunnel to expose publicly.",
-            style = MaterialTheme.typography.bodySmall
-        )
     }
 }

@@ -6,7 +6,7 @@ import fi.iki.elonen.NanoHTTPD
 import java.io.IOException
 
 private const val TAG = "PrometheusExporter"
-private const val DEFAULT_PORT = 9100
+private const val DEFAULT_PORT = 5338
 
 /**
  * Tiny embedded Prometheus exporter using NanoHTTPD.
