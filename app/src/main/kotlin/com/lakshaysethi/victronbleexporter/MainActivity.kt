@@ -2,6 +2,13 @@ package com.lakshaysethi.victronbleexporter
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothManager
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -14,9 +21,8 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -24,8 +30,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.lakshaysethi.victronbleexporter.data.DeviceRepository
+import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevice
+import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
 import com.lakshaysethi.victronbleexporter.service.VictronBleExporterService
 import kotlinx.coroutines.delay
@@ -38,7 +48,9 @@ class MainActivity : ComponentActivity() {
         if (granted.values.all { it }) {
             startExporterService()
         } else {
-            Toast.makeText(this, "Some permissions denied. BLE will not work.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Some permissions denied. BLE may not work.", Toast.LENGTH_LONG).show()
+            // Still start service to show discovery of devices that don't need location? Start anyway for UX
+            startExporterService()
         }
     }
 
@@ -51,6 +63,7 @@ class MainActivity : ComponentActivity() {
                     onStart = { startExporterService() },
                     onStop = { stopExporterService() },
                     onAddKey = { mac, key -> addKeyToService(mac, key) },
+                    onRemoveKey = { mac -> removeKey(mac) },
                     onStartTunnel = { token -> startTunnel(token) },
                     onQuickTunnel = { startQuickTunnel() },
                     onStopTunnel = { stopTunnel() },
@@ -65,15 +78,15 @@ class MainActivity : ComponentActivity() {
     private fun checkAndRequestPermissions() {
         val perms = mutableListOf<String>()
 
-        // BT permissions
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
             perms.add(Manifest.permission.BLUETOOTH_SCAN)
             perms.add(Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            // Legacy for Android 8-11
+            perms.add(Manifest.permission.ACCESS_COARSE_LOCATION)
         }
-        // Location needed on < S and also for scan with neverForLocation flag removed
         perms.add(Manifest.permission.ACCESS_FINE_LOCATION)
 
-        // Notifications only runtime on Android 13+
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -88,37 +101,83 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 android.util.Log.w("MainActivity", "Permission request failed", e)
             }
+        } else {
+            // All permissions already granted - auto-start scanning service for convenience
+            startExporterService()
         }
     }
 
     private fun startExporterService() {
-        val intent = Intent(this, VictronBleExporterService::class.java)
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
+        try {
+            val intent = Intent(this, VictronBleExporterService::class.java)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            Toast.makeText(this, "Scanning for Victron devices...", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Failed to start service: ${e.message}", Toast.LENGTH_LONG).show()
         }
-        Toast.makeText(this, "Exporter service started", Toast.LENGTH_SHORT).show()
     }
 
     private fun stopExporterService() {
-        val intent = Intent(this, VictronBleExporterService::class.java)
-        stopService(intent)
-        Toast.makeText(this, "Service stopped", Toast.LENGTH_SHORT).show()
+        try {
+            val intent = Intent(this, VictronBleExporterService::class.java)
+            stopService(intent)
+            Toast.makeText(this, "Service stopped", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Stop failed: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun addKeyToService(mac: String, key: String) {
-        val intent = Intent(this, VictronBleExporterService::class.java).apply {
-            action = "ADD_KEY"
-            putExtra("mac", mac)
-            putExtra("key", key)
+        try {
+            val normalizedMac = DeviceRepository.normalizeMacInput(mac)
+            val cleanKey = DeviceRepository.normalizeKeyInput(key)
+
+            if (!DeviceRepository.isValidMac(normalizedMac)) {
+                Toast.makeText(this, "Invalid MAC format. Use AA:BB:CC:DD:EE:FF", Toast.LENGTH_LONG).show()
+                return
+            }
+            if (!DeviceRepository.isValidKey(cleanKey)) {
+                Toast.makeText(this, "Invalid key: need 32 hex chars (0-9, a-f). Got ${cleanKey.length}", Toast.LENGTH_LONG).show()
+                return
+            }
+
+            // Persist locally first (immediate UX)
+            try {
+                val repo = DeviceRepository(this)
+                repo.saveDevice(normalizedMac, cleanKey)
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "Local persist failed", e)
+            }
+
+            val intent = Intent(this, VictronBleExporterService::class.java).apply {
+                action = "ADD_KEY"
+                putExtra("mac", normalizedMac)
+                putExtra("key", cleanKey)
+            }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            DiscoveredDevicesStore.markHasKey(normalizedMac, true)
+            Toast.makeText(this, "Key saved for $normalizedMac", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Add key failed: ${e.message}", Toast.LENGTH_LONG).show()
         }
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
+    }
+
+    private fun removeKey(mac: String) {
+        try {
+            val repo = DeviceRepository(this)
+            repo.removeDevice(mac)
+            Toast.makeText(this, "Removed key for $mac", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Remove failed: ${e.message}", Toast.LENGTH_SHORT).show()
         }
-        Toast.makeText(this, "Key added for $mac", Toast.LENGTH_SHORT).show()
     }
 
     private fun startTunnel(token: String) {
@@ -136,7 +195,6 @@ class MainActivity : ComponentActivity() {
     private fun startQuickTunnel() {
         val intent = Intent(this, VictronBleExporterService::class.java).apply {
             action = "START_TUNNEL"
-            // no token => quick tunnel
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             startForegroundService(intent)
@@ -158,14 +216,19 @@ class MainActivity : ComponentActivity() {
 
     @SuppressLint("BatteryLife")
     private fun requestDisableBatteryOptimizations() {
-        val intent = Intent()
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-            intent.action = Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
-            intent.data = Uri.parse("package:$packageName")
-            startActivity(intent)
-        } else {
-            Toast.makeText(this, "Battery optimizations already disabled", Toast.LENGTH_SHORT).show()
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                val intent = Intent().apply {
+                    action = Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            } else {
+                Toast.makeText(this, "Battery optimizations already disabled", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "Failed to open battery settings: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 }
@@ -175,68 +238,150 @@ fun VictronBleExporterScreen(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onAddKey: (String, String) -> Unit,
+    onRemoveKey: (String) -> Unit,
     onStartTunnel: (String) -> Unit,
     onQuickTunnel: () -> Unit,
     onStopTunnel: () -> Unit,
     onDisableBatteryOpt: () -> Unit
 ) {
     val context = LocalContext.current
-    var isRunning by remember { mutableStateOf(false) }
     var deviceCount by remember { mutableStateOf(0) }
-    var devices by remember { mutableStateOf(emptyList<Pair<String, Map<String, Any?>>>()) }
+    var liveDevices by remember { mutableStateOf(emptyList<Pair<String, Map<String, Any?>>>()) }
+    var discoveredDevices by remember { mutableStateOf(emptyList<DiscoveredDevice>()) }
+    var savedKeys by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
     var macInput by remember { mutableStateOf("") }
     var keyInput by remember { mutableStateOf("") }
     var tunnelToken by remember { mutableStateOf("") }
 
     var localIp by remember { mutableStateOf("Unknown IP") }
-
-    // Read AppState
     var tunnelStatus by remember { mutableStateOf(AppState.tunnelStatus) }
     var tunnelUrl by remember { mutableStateOf(AppState.tunnelUrl) }
+    var isScanning by remember { mutableStateOf(false) }
+
+    // Clipboard helper
+    fun pasteFromClipboard(): String {
+        return try {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = cm.primaryClip
+            if (clip != null && clip.itemCount > 0) {
+                clip.getItemAt(0).text?.toString() ?: ""
+            } else ""
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    // Local BLE discovery in UI for instant feedback, even before service starts
+    DisposableEffect(Unit) {
+        var scanCallback: ScanCallback? = null
+        var scanner: android.bluetooth.le.BluetoothLeScanner? = null
+        try {
+            val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+            val adapter = btManager.adapter
+            if (adapter != null && adapter.isEnabled) {
+                scanner = adapter.bluetoothLeScanner
+                val settings = ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                    .build()
+                val filter = ScanFilter.Builder()
+                    .setManufacturerData(0x02E1, byteArrayOf(0x10))
+                    .build()
+
+                scanCallback = object : ScanCallback() {
+                    override fun onScanResult(callbackType: Int, result: ScanResult) {
+                        try {
+                            val mac = result.device.address.uppercase()
+                            val rssi = result.rssi
+                            val mfg = result.scanRecord?.getManufacturerSpecificData(0x02E1) ?: return
+                            val modelId = if (mfg.size >= 4) ((mfg[3].toInt() and 0xFF) shl 8) or (mfg[2].toInt() and 0xFF) else null
+                            val recordType = if (mfg.size >= 5) mfg[4].toInt() and 0xFF else null
+                            // Check if we already have a key persisted
+                            val repo = try { DeviceRepository(context) } catch (e: Exception) { null }
+                            val hasKey = repo?.hasKey(mac) == true
+
+                            DiscoveredDevicesStore.updateSeen(
+                                mac = mac,
+                                modelId = modelId,
+                                recordType = recordType,
+                                rssi = rssi,
+                                hasKey = hasKey,
+                                parsed = null
+                            )
+                        } catch (e: Exception) {
+                            android.util.Log.w("MainActivity", "Local scan result error", e)
+                        }
+                    }
+                }
+
+                try {
+                    scanner?.startScan(listOf(filter), settings, scanCallback)
+                    isScanning = true
+                } catch (se: SecurityException) {
+                    android.util.Log.w("MainActivity", "Missing BT permission for local scan", se)
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Local scanner init failed", e)
+        }
+
+        onDispose {
+            try {
+                if (scanCallback != null && scanner != null) {
+                    scanner.stopScan(scanCallback)
+                }
+            } catch (e: Exception) {
+                // ignore
+            }
+            isScanning = false
+        }
+    }
 
     LaunchedEffect(Unit) {
-        // Fetch WiFi IP - wrapped in try/catch to avoid crash on missing permission or deprecated API
+        // Fetch WiFi IP safely
         try {
             val wifiMgr = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             val ipAddress = try {
                 @Suppress("DEPRECATION")
                 wifiMgr?.connectionInfo?.ipAddress ?: 0
-            } catch (se: SecurityException) {
-                android.util.Log.w("MainActivity", "No ACCESS_WIFI_STATE permission for IP", se)
-                0
-            } catch (e: Exception) {
-                android.util.Log.w("MainActivity", "Failed to get wifi IP", e)
-                0
-            }
+            } catch (_: Exception) { 0 }
             if (ipAddress != 0) {
-                val ipStr = String.format(
+                localIp = String.format(
                     "%d.%d.%d.%d",
                     ipAddress and 0xff,
                     ipAddress shr 8 and 0xff,
                     ipAddress shr 16 and 0xff,
                     ipAddress shr 24 and 0xff
                 )
-                localIp = ipStr
             } else {
-                localIp = "127.0.0.1 (no wifi)"
+                localIp = "127.0.0.1"
             }
         } catch (e: Exception) {
-            android.util.Log.w("MainActivity", "IP fetch failed", e)
-            localIp = "Unknown (err: ${e.message})"
+            localIp = "Unknown"
         }
 
         while (true) {
             try {
+                // Live parsed devices
                 val all = MetricsStore.getAll()
                 deviceCount = all.size
-                devices = all.map { (mac, parsed) ->
-                    mac to parsed.data
+                liveDevices = all.map { (mac, parsed) -> mac to parsed.data }
+
+                // Nearby discovered devices (even without keys)
+                discoveredDevices = DiscoveredDevicesStore.getSortedByRssi()
+
+                // Saved keys
+                try {
+                    val repo = DeviceRepository(context)
+                    savedKeys = repo.getAllDevices()
+                } catch (e: Exception) {
+                    // ignore
                 }
+
                 tunnelStatus = AppState.tunnelStatus
                 tunnelUrl = AppState.tunnelUrl
             } catch (e: Exception) {
-                android.util.Log.w("MainActivity", "Loop update failed", e)
+                android.util.Log.w("MainActivity", "UI loop error", e)
             }
             delay(1000)
         }
@@ -249,16 +394,25 @@ fun VictronBleExporterScreen(
             .verticalScroll(rememberScrollState())
     ) {
         Text(
-            "Victron BLE Prometheus Exporter",
-            style = MaterialTheme.typography.headlineMedium
+            "Victron BLE Exporter",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
         )
-        Spacer(Modifier.height(8.dp))
+        Text(
+            "Easy MPPT discovery • Auto-scan • Saves keys",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(12.dp))
 
-        Card {
-            Column(modifier = Modifier.padding(8.dp)) {
-                Text("App Setup & Keep-Alive", style = MaterialTheme.typography.titleMedium)
-                Text("To run constantly with screen off, disable battery optimizations.", style = MaterialTheme.typography.bodySmall)
-                Spacer(Modifier.height(4.dp))
+        // Setup card
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("Keep-Alive Setup", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                Text("For 24/7 running with screen off, disable battery optimizations.", style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(6.dp))
                 Button(onClick = onDisableBatteryOpt) {
                     Text("Disable Battery Optimizations")
                 }
@@ -267,43 +421,350 @@ fun VictronBleExporterScreen(
 
         Spacer(Modifier.height(16.dp))
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
-                onStart()
-                isRunning = true
-            }) {
-                Text("Start Exporter")
+        // Service control + scanning status
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Button(onClick = { onStart() }, modifier = Modifier.weight(1f)) {
+                Text("Start Scan")
             }
-            Button(onClick = {
-                onStop()
-                isRunning = false
-            }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
-                Text("Stop Exporter")
+            OutlinedButton(onClick = { onStop() }, modifier = Modifier.weight(1f)) {
+                Text("Stop")
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            val scanningText = if (discoveredDevices.isNotEmpty() || isScanning) "Scanning • ${discoveredDevices.size} nearby" else "Idle - tap Start Scan"
+            Text(
+                scanningText,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isScanning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (isScanning) {
+                Spacer(Modifier.width(8.dp))
+                CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 2.dp)
             }
         }
 
         Spacer(Modifier.height(8.dp))
-
-        Text("Local Metrics Endpoint:", style = MaterialTheme.typography.titleSmall)
+        Text("Local Metrics:", style = MaterialTheme.typography.titleSmall)
         Text("http://$localIp:5338/metrics", fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary)
-        Text("(Accessible over local Wi-Fi)", style = MaterialTheme.typography.bodySmall)
+        Text("http://$localIp:5338/devices (JSON)", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
 
         Spacer(Modifier.height(16.dp))
         HorizontalDivider()
         Spacer(Modifier.height(16.dp))
 
-        Text("Cloudflare Tunnel", style = MaterialTheme.typography.titleMedium)
+        // ===== NEARBY DEVICES - THE CORE EASY UX =====
+        Text("Nearby Victron Devices", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(
+            "Tap a device to auto-fill MAC. VictronConnect not needed for MAC - only for the 32-char key.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+
+        if (discoveredDevices.isEmpty()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("No Victron devices seen yet", fontWeight = FontWeight.Bold)
+                    Text("• Make sure Bluetooth is ON", style = MaterialTheme.typography.bodySmall)
+                    Text("• Keep MPPT within 5m", style = MaterialTheme.typography.bodySmall)
+                    Text("• MPPT must have Instant Readout enabled (via VictronConnect once)", style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(4.dp))
+                    Text("MPPT focus: we auto-detect BlueSolar / SmartSolar MPPTs", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                discoveredDevices.forEach { dev ->
+                    val isMppt = dev.modelName.contains("MPPT", ignoreCase = true) || dev.recordType == 0x01
+                    val rssiStrength = when {
+                        dev.rssi > -60 -> "Strong"
+                        dev.rssi > -75 -> "Good"
+                        dev.rssi > -85 -> "Weak"
+                        else -> "Very weak"
+                    }
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        border = if (isMppt) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null,
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (dev.hasKey && dev.parsed != null)
+                                MaterialTheme.colorScheme.primaryContainer
+                            else if (dev.hasKey)
+                                MaterialTheme.colorScheme.secondaryContainer
+                            else
+                                MaterialTheme.colorScheme.surface
+                        ),
+                        onClick = {
+                            macInput = dev.mac
+                            // Haptic? Toast hint
+                            Toast.makeText(context, "Selected ${dev.modelName} - now paste key", Toast.LENGTH_SHORT).show()
+                        }
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        dev.modelName + if (isMppt) " • MPPT" else "",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        dev.mac,
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                                Column(horizontalAlignment = androidx.compose.ui.Alignment.End) {
+                                    Badge(
+                                        containerColor = when {
+                                            dev.hasKey && dev.parsed != null -> MaterialTheme.colorScheme.primary
+                                            dev.hasKey -> MaterialTheme.colorScheme.secondary
+                                            else -> MaterialTheme.colorScheme.error
+                                        }
+                                    ) {
+                                        Text(
+                                            when {
+                                                dev.hasKey && dev.parsed != null -> "Ready ✓"
+                                                dev.hasKey -> "Key saved"
+                                                else -> "Needs key"
+                                            },
+                                            modifier = Modifier.padding(horizontal = 4.dp),
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    }
+                                    Spacer(Modifier.height(4.dp))
+                                    Text("${dev.rssi} dBm • $rssiStrength", style = MaterialTheme.typography.labelSmall)
+                                    Text(DiscoveredDevicesStore.timeAgo(dev.lastSeenTimestamp), style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+
+                            // Quick preview of parsed data if available
+                            dev.parsed?.let { parsed ->
+                                Spacer(Modifier.height(6.dp))
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                                val data = parsed.data
+                                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    data["battery_voltage"]?.let { Text("Batt: ${it}V", style = MaterialTheme.typography.bodySmall) }
+                                    data["solar_power_w"]?.let { Text("${it}W", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold) }
+                                    data["yield_today_wh"]?.let { Text("${it}Wh today", style = MaterialTheme.typography.bodySmall) }
+                                }
+                            }
+
+                            if (dev.needsKey) {
+                                Spacer(Modifier.height(8.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button(
+                                        onClick = { macInput = dev.mac },
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("Select & Add Key")
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            val pasted = pasteFromClipboard()
+                                            val clean = DeviceRepository.normalizeKeyInput(pasted)
+                                            if (DeviceRepository.isValidKey(clean)) {
+                                                keyInput = clean
+                                                macInput = dev.mac
+                                                Toast.makeText(context, "Pasted key from clipboard", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(context, "Clipboard doesn't contain 32-char hex key", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    ) {
+                                        Text("Paste Key")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        // ===== ADD KEY SECTION - IMPROVED =====
+        Text("Add / Edit Device Key", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(
+            "How to get key: VictronConnect → Device → Settings (gear) → Product info → Instant readout → Show encryption key (32 hex chars). Copy once, saved forever.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = macInput,
+            onValueChange = { macInput = DeviceRepository.normalizeMacInput(it) },
+            label = { Text("Device MAC (auto-filled from scan)") },
+            placeholder = { Text("AA:BB:CC:DD:EE:FF") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            isError = macInput.isNotBlank() && !DeviceRepository.isValidMac(macInput),
+            supportingText = {
+                if (macInput.isNotBlank() && !DeviceRepository.isValidMac(macInput)) {
+                    Text("Invalid MAC, should be AA:BB:CC:DD:EE:FF")
+                } else if (macInput.isNotBlank()) {
+                    Text("✓ Valid MAC", color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        )
+        Spacer(Modifier.height(4.dp))
+        OutlinedTextField(
+            value = keyInput,
+            onValueChange = {
+                // Auto-clean as user types: allow pasting with spaces, colons, etc.
+                val clean = if (it.length > 32) DeviceRepository.normalizeKeyInput(it) else it.lowercase().replace(Regex("[^0-9a-fA-F]"), "")
+                keyInput = clean.take(32).lowercase()
+            },
+            label = { Text("32-char hex encryption key") },
+            placeholder = { Text("a1b2c3d4e5f6... (32 hex)") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = false,
+            minLines = 1,
+            isError = keyInput.isNotBlank() && keyInput.length != 32,
+            supportingText = {
+                Text("${keyInput.length}/32 chars ${if (DeviceRepository.isValidKey(keyInput)) "✓ valid" else ""}")
+            }
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+            Button(
+                onClick = {
+                    val normMac = DeviceRepository.normalizeMacInput(macInput)
+                    val normKey = DeviceRepository.normalizeKeyInput(keyInput)
+                    if (DeviceRepository.isValidMac(normMac) && DeviceRepository.isValidKey(normKey)) {
+                        onAddKey(normMac, normKey)
+                        keyInput = ""
+                        // keep macInput for convenience or clear? Keep for feedback
+                    } else {
+                        Toast.makeText(context, "Fix MAC and key first", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                enabled = DeviceRepository.isValidMac(macInput) && DeviceRepository.isValidKey(keyInput)
+            ) {
+                Text("Save Key")
+            }
+            OutlinedButton(
+                onClick = {
+                    val pasted = pasteFromClipboard()
+                    val clean = DeviceRepository.normalizeKeyInput(pasted)
+                    if (clean.isNotBlank()) {
+                        if (clean.length == 32) {
+                            keyInput = clean
+                        } else {
+                            // Try to find 32-char hex inside clipboard
+                            val match = Regex("[0-9a-fA-F]{32}").find(pasted)
+                            if (match != null) {
+                                keyInput = match.value.lowercase()
+                            } else {
+                                Toast.makeText(context, "Clipboard: $clean (${clean.length} chars) not 32", Toast.LENGTH_SHORT).show()
+                                keyInput = clean.take(32)
+                            }
+                        }
+                    } else {
+                        Toast.makeText(context, "Clipboard empty", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            ) {
+                Text("Paste")
+            }
+            OutlinedButton(onClick = { macInput = ""; keyInput = "" }) {
+                Text("Clear")
+            }
+        }
+
+        // Saved keys list
+        if (savedKeys.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            Text("Saved Keys (${savedKeys.size})", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                savedKeys.forEach { (mac, key) ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.padding(8.dp).fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(mac, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                                Text("••••${key.takeLast(4)} (saved)", style = MaterialTheme.typography.labelSmall)
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                TextButton(onClick = {
+                                    macInput = mac
+                                    keyInput = key
+                                }) {
+                                    Text("Edit")
+                                }
+                                TextButton(
+                                    onClick = { onRemoveKey(mac) },
+                                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                                ) {
+                                    Text("Remove")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        // Live metrics from parsed devices
+        Text("Live Metrics ($deviceCount MPPT / Shunt)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        if (liveDevices.isEmpty()) {
+            Text(
+                "No decrypted data yet. Add key for a discovered device above.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                liveDevices.forEach { (mac, data) ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(mac, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                            Spacer(Modifier.height(4.dp))
+                            data.forEach { (k, v) ->
+                                Text("$k: $v", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        Text("Cloudflare Tunnel (optional)", style = MaterialTheme.typography.titleMedium)
+        Text("Expose metrics to internet", style = MaterialTheme.typography.bodySmall)
         Text("Tunnel: $tunnelStatus", style = MaterialTheme.typography.bodyMedium)
         tunnelUrl?.let {
             Text("Public URL: $it", fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 4.dp))
         }
-        
+
         Spacer(Modifier.height(8.dp))
 
         OutlinedTextField(
             value = tunnelToken,
             onValueChange = { tunnelToken = it },
-            label = { Text("Named Tunnel Token") },
+            label = { Text("Named Tunnel Token (optional)") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true
         )
@@ -311,7 +772,7 @@ fun VictronBleExporterScreen(
             Button(onClick = { if (tunnelToken.isNotBlank()) onStartTunnel(tunnelToken) }) {
                 Text("Start Named")
             }
-            Button(onClick = onQuickTunnel) {
+            OutlinedButton(onClick = onQuickTunnel) {
                 Text("Quick Tunnel")
             }
         }
@@ -320,57 +781,6 @@ fun VictronBleExporterScreen(
             Text("Disable/Stop Cloudflared")
         }
 
-        Spacer(Modifier.height(16.dp))
-        HorizontalDivider()
-        Spacer(Modifier.height(16.dp))
-
-        // Add device key
-        Text("Add Device Encryption Key", style = MaterialTheme.typography.titleMedium)
-        OutlinedTextField(
-            value = macInput,
-            onValueChange = { macInput = it },
-            label = { Text("Device MAC (AA:BB:CC:DD:EE:FF)") },
-            modifier = Modifier.fillMaxWidth()
-        )
-        OutlinedTextField(
-            value = keyInput,
-            onValueChange = { keyInput = it },
-            label = { Text("32-char hex encryption key") },
-            modifier = Modifier.fillMaxWidth()
-        )
-        Row(modifier = Modifier.padding(top=8.dp)) {
-            Button(onClick = {
-                if (macInput.isNotBlank() && keyInput.length == 32) {
-                    onAddKey(macInput.uppercase(), keyInput)
-                    macInput = ""
-                    keyInput = ""
-                } else {
-                    Toast.makeText(context, "Invalid MAC or key", Toast.LENGTH_SHORT).show()
-                }
-            }) {
-                Text("Add Key")
-            }
-        }
-
-        Spacer(Modifier.height(24.dp))
-
-        Text("Live Devices ($deviceCount)", style = MaterialTheme.typography.titleMedium)
-        // Using Column for list since we are inside a verticalScroll parent
-        Column {
-            devices.forEach { (mac, data) ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp)
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(mac, style = MaterialTheme.typography.titleSmall)
-                        data.forEach { (k, v) ->
-                            Text("$k: $v", style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
-            }
-        }
+        Spacer(Modifier.height(32.dp))
     }
 }

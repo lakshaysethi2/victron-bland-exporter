@@ -14,6 +14,8 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.lakshaysethi.victronbleexporter.R
+import com.lakshaysethi.victronbleexporter.data.DeviceRepository
+import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
 import com.lakshaysethi.victronbleexporter.exporter.PrometheusExporter
 import com.lakshaysethi.victronbleexporter.parser.VictronParser
@@ -35,14 +37,41 @@ class VictronBleExporterService : Service() {
     private lateinit var prometheusExporter: PrometheusExporter
     private lateinit var cloudflaredManager: CloudflaredManager
     private var wakeLock: PowerManager.WakeLock? = null
+    private lateinit var deviceRepository: DeviceRepository
 
-    // Device encryption keys: MAC -> key (hex)
+    // Device encryption keys: MAC -> key (hex) - in-memory cache, persisted via DeviceRepository
     private val deviceKeys = mutableMapOf<String, String>()
 
-    // For demo, allow adding keys from UI (we'll expose a simple way)
     fun addDeviceKey(mac: String, key: String) {
-        deviceKeys[mac.uppercase()] = key.trim()
-        Log.i(TAG, "Key added for $mac")
+        val normalizedMac = DeviceRepository.normalizeMacInput(mac)
+        val cleanKey = DeviceRepository.normalizeKeyInput(key)
+        if (!DeviceRepository.isValidKey(cleanKey)) {
+            Log.w(TAG, "Invalid key format for $mac: length ${cleanKey.length}")
+            // Still allow? For UX, reject if clearly invalid
+            if (cleanKey.length != 32) return
+        }
+        deviceKeys[normalizedMac] = cleanKey
+        try {
+            deviceRepository.saveDevice(normalizedMac, cleanKey)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to persist key for $normalizedMac", e)
+        }
+        DiscoveredDevicesStore.markHasKey(normalizedMac, true)
+        Log.i(TAG, "Key added & persisted for $normalizedMac")
+    }
+
+    private fun loadPersistedKeys() {
+        try {
+            if (!::deviceRepository.isInitialized) {
+                deviceRepository = DeviceRepository(this)
+            }
+            val all = deviceRepository.getAllDevices()
+            deviceKeys.clear()
+            deviceKeys.putAll(all.mapKeys { it.key.uppercase() })
+            Log.i(TAG, "Loaded ${deviceKeys.size} persisted keys: ${deviceKeys.keys}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load persisted keys", e)
+        }
     }
 
     override fun onCreate() {
@@ -53,6 +82,13 @@ class VictronBleExporterService : Service() {
             createNotificationChannel()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create notification channel", e)
+        }
+
+        try {
+            deviceRepository = DeviceRepository(this)
+            loadPersistedKeys()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to init DeviceRepository", e)
         }
 
         try {
@@ -147,22 +183,58 @@ class VictronBleExporterService : Service() {
 
         scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val device = result.device
-                val scanRecord = result.scanRecord ?: return
-                val mfgData = scanRecord.getManufacturerSpecificData(0x02E1) ?: return
+                try {
+                    val device = result.device
+                    val scanRecord = result.scanRecord ?: return
+                    val mfgData = scanRecord.getManufacturerSpecificData(0x02E1) ?: return
 
-                val mac = device.address.uppercase()
-                val rssi = result.rssi
+                    val mac = device.address.uppercase()
+                    val rssi = result.rssi
 
-                val key = deviceKeys[mac]
-                val parsed = VictronParser.parseAdvertisement(mac, mfgData, rssi, key)
+                    // Extract modelId & recordType without decryption (always visible)
+                    val modelId: Int? = if (mfgData.size >= 4) {
+                        ((mfgData[3].toInt() and 0xFF) shl 8) or (mfgData[2].toInt() and 0xFF)
+                    } else null
+                    val recordType: Int? = if (mfgData.size >= 5) mfgData[4].toInt() and 0xFF else null
 
-                if (parsed != null) {
-                    MetricsStore.update(parsed)
-                    Log.d(TAG, "Parsed ${parsed.mac} : ${parsed.data}")
-                } else {
-                    // Still record that we saw a Victron device (even without key)
-                    Log.d(TAG, "Saw Victron adv from $mac (no key or parse fail)")
+                    val key = deviceKeys[mac] ?: deviceKeys[mac.uppercase()]
+                    val hasKey = !key.isNullOrBlank()
+
+                    val parsed = if (hasKey) {
+                        try {
+                            VictronParser.parseAdvertisement(mac, mfgData, rssi, key)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Parse failed for $mac", e)
+                            null
+                        }
+                    } else null
+
+                    // Always update discovered store for easy UX
+                    try {
+                        DiscoveredDevicesStore.updateSeen(
+                            mac = mac,
+                            modelId = modelId,
+                            recordType = recordType,
+                            rssi = rssi,
+                            hasKey = hasKey,
+                            parsed = parsed
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to update discovered store", e)
+                    }
+
+                    if (parsed != null) {
+                        MetricsStore.update(parsed)
+                        Log.d(TAG, "Parsed ${parsed.mac} : ${parsed.data}")
+                    } else {
+                        if (!hasKey) {
+                            Log.d(TAG, "Saw Victron $mac (model=${modelId?.toString(16)}) without key - showing in discovered list")
+                        } else {
+                            Log.d(TAG, "Saw Victron adv from $mac (key present but parse fail)")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "onScanResult exception", e)
                 }
             }
 

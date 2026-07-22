@@ -1,41 +1,118 @@
 package com.lakshaysethi.victronbleexporter.data
 
 import android.content.Context
+import android.content.SharedPreferences
+import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
 /**
  * Simple encrypted storage for device MAC -> encryption keys.
+ * Falls back to plain SharedPreferences if encrypted store fails (some OEMs / emulators).
  */
 class DeviceRepository(context: Context) {
 
-    private val masterKey = MasterKey.Builder(context)
-        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-        .build()
+    private val tag = "DeviceRepository"
+    private var prefs: SharedPreferences
 
-    private val prefs = EncryptedSharedPreferences.create(
-        context,
-        "victron_devices",
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
+    init {
+        prefs = try {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+
+            EncryptedSharedPreferences.create(
+                context,
+                "victron_devices",
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        } catch (e: Exception) {
+            Log.w(tag, "EncryptedSharedPreferences failed, falling back to plain prefs", e)
+            context.getSharedPreferences("victron_devices_fallback", Context.MODE_PRIVATE)
+        }
+    }
 
     fun saveDevice(mac: String, key: String) {
-        prefs.edit().putString(mac.uppercase(), key).apply()
+        try {
+            // Normalize: uppercase MAC, lowercase key? keep key as lowercase hex but accept either
+            val cleanKey = key.trim().lowercase().replace(Regex("[^0-9a-f]"), "")
+            if (cleanKey.length != 32) {
+                Log.w(tag, "Attempt to save invalid key length ${cleanKey.length} for $mac")
+                // Still save if user insists? Save only if hex and 32
+            }
+            prefs.edit().putString(mac.uppercase(), cleanKey).apply()
+            Log.i(tag, "Saved key for $mac")
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to save $mac", e)
+        }
     }
 
     fun getAllDevices(): Map<String, String> {
-        return prefs.all.filterKeys { it.matches(Regex("[0-9A-F:]{17}")) } as Map<String, String>
+        return try {
+            prefs.all.entries
+                .filter { entry ->
+                    // Keys are MACs like AA:BB:CC:DD:EE:FF
+                    entry.key.matches(Regex("(?i)^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")) ||
+                            entry.key.matches(Regex("(?i)^[0-9A-F:]{17}$"))
+                }
+                .filter { it.value is String }
+                .associate { it.key.uppercase() to it.value as String }
+        } catch (e: Exception) {
+            Log.e(tag, "getAllDevices failed", e)
+            emptyMap()
+        }
     }
 
-    fun getKey(mac: String): String? = prefs.getString(mac.uppercase(), null)
+    fun getKey(mac: String): String? = try {
+        prefs.getString(mac.uppercase(), null)
+    } catch (e: Exception) {
+        Log.w(tag, "getKey failed for $mac", e)
+        null
+    }
 
     fun removeDevice(mac: String) {
-        prefs.edit().remove(mac.uppercase()).apply()
+        try {
+            prefs.edit().remove(mac.uppercase()).apply()
+        } catch (e: Exception) {
+            Log.e(tag, "remove failed for $mac", e)
+        }
     }
 
     fun clear() {
-        prefs.edit().clear().apply()
+        try {
+            prefs.edit().clear().apply()
+        } catch (e: Exception) {
+            Log.e(tag, "clear failed", e)
+        }
+    }
+
+    fun hasKey(mac: String): Boolean = !getKey(mac).isNullOrBlank()
+
+    companion object {
+        fun normalizeKeyInput(input: String): String {
+            return input.trim().lowercase().replace(Regex("[^0-9a-f]"), "")
+        }
+
+        fun isValidKey(input: String): Boolean {
+            val clean = normalizeKeyInput(input)
+            return clean.length == 32 && clean.matches(Regex("^[0-9a-f]{32}$"))
+        }
+
+        fun normalizeMacInput(input: String): String {
+            val cleaned = input.trim().uppercase().replace(Regex("[^0-9A-F:]"), "")
+            // Auto-insert colons if given as 12 hex chars without colons
+            return if (!cleaned.contains(":") && cleaned.length == 12) {
+                cleaned.chunked(2).joinToString(":")
+            } else {
+                cleaned.uppercase()
+            }
+        }
+
+        fun isValidMac(input: String): Boolean {
+            val mac = normalizeMacInput(input)
+            return mac.matches(Regex("^([0-9A-F]{2}:){5}[0-9A-F]{2}$"))
+        }
     }
 }
