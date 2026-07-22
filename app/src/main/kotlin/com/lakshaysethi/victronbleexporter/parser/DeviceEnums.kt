@@ -1,0 +1,108 @@
+package com.lakshaysethi.victronbleexporter.parser
+
+enum class OperationMode(val value: Int) {
+    OFF(0),
+    LOW_POWER(1),
+    FAULT(2),
+    BULK(3),
+    ABSORPTION(4),
+    FLOAT(5),
+    STORAGE(6),
+    EQUALIZE_MANUAL(7),
+    INVERTING(9),
+    POWER_SUPPLY(11),
+    STARTING_UP(245),
+    REPEATED_ABSORPTION(246),
+    RECONDITION(247),
+    BATTERY_SAFE(248),
+    ACTIVE(249),
+    EXTERNAL_CONTROL(252),
+    NOT_AVAILABLE(255);
+
+    companion object {
+        fun fromValue(v: Int): OperationMode? = values().find { it.value == v }
+    }
+}
+
+enum class ChargerError(val value: Int) {
+    NO_ERROR(0),
+    TEMPERATURE_BATTERY_HIGH(1),
+    VOLTAGE_HIGH(2),
+    REMOTE_TEMPERATURE_A(3),
+    REMOTE_TEMPERATURE_B(4),
+    REMOTE_TEMPERATURE_C(5),
+    REMOTE_BATTERY_A(6),
+    REMOTE_BATTERY_B(7),
+    REMOTE_BATTERY_C(8),
+    HIGH_RIPPLE(11),
+    TEMPERATURE_BATTERY_LOW(14),
+    TEMPERATURE_CHARGER(17),
+    OVER_CURRENT(18),
+    BULK_TIME(20),
+    CURRENT_SENSOR(21),
+    INTERNAL_TEMPERATURE_A(22),
+    INTERNAL_TEMPERATURE_B(23),
+    FAN(24),
+    OVERHEATED(26),
+    SHORT_CIRCUIT(27),
+    CONVERTER_ISSUE(28),
+    OVER_CHARGE(29),
+    INPUT_VOLTAGE(33),
+    INPUT_CURRENT(34),
+    INPUT_POWER(35),
+    INPUT_SHUTDOWN_VOLTAGE(38),
+    INPUT_SHUTDOWN_CURRENT(39),
+    INPUT_SHUTDOWN_FAILURE(40),
+    INVERTER_SHUTDOWN_41(41),
+    INVERTER_SHUTDOWN_42(42),
+    INVERTER_SHUTDOWN_43(43),
+    INVERTER_OVERLOAD(50),
+    INVERTER_TEMPERATURE(51),
+    INVERTER_PEAK_CURRENT(52),
+    INVERTER_OUTPUT_VOLTAGE_A(53),
+    INVERTER_OUTPUT_VOLTAGE_B(54),
+    INVERTER_SELF_TEST_A(55),
+    INVERTER_SELF_TEST_B(56),
+    INVERTER_AC(57),
+    INVERTER_SELF_TEST_C(58),
+    COMMUNICATION(65),
+    SYNCHRONISATION(66),
+    BMS(67),
+    NETWORK_A(68),
+    NETWORK_B(69),
+    NETWORK_C(70),
+    NETWORK_D(71),
+    PV_INPUT_SHUTDOWN_80(80),
+    PV_INPUT_SHUTDOWN_81(81),
+    PV_INPUT_SHUTDOWN_82(82),
+    PV_INPUT_SHUTDOWN_83(83),
+    PV_INPUT_SHUTDOWN_84(84),
+    PV_INPUT_SHUTDOWN_85(85),
+    PV_INPUT_SHUTDOWN_86(86),
+    PV_INPUT_SHUTDOWN_87(87),
+    CPU_TEMPERATURE(114),
+    CALIBRATION_LOST(116),
+    FIRMWARE(117),
+    SETTINGS(119),
+    TESTER_FAIL(121),
+    INTERNAL_DC_VOLTAGE_A(200),
+    INTERNAL_DC_VOLTAGE_B(201),
+    SELF_TEST(202),
+    INTERNAL_SUPPLY_A(203),
+    INTERNAL_SUPPLY_B(205),
+    INTERNAL_SUPPLY_C(212),
+    INTERNAL_SUPPLY_D(215);
+
+    companion object {
+        fun fromValue(v: Int): ChargerError? = values().find { it.value == v }
+    }
+}
+
+data class VictronDevice(
+    val mac: String,
+    val name: String?,
+    val modelId: Int,
+    val encryptionKey: String? = null,
+    var lastSeen: Long = 0L,
+    var rssi: Int = -100
+)
