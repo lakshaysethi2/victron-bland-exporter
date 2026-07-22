@@ -49,22 +49,53 @@ class VictronBleExporterService : Service() {
         super.onCreate()
         Log.i(TAG, "Service onCreate")
 
-        createNotificationChannel()
+        try {
+            createNotificationChannel()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create notification channel", e)
+        }
 
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VictronBleExporter::WakeLock")
-        wakeLock?.acquire()
-        cloudflaredManager = CloudflaredManager(this)
-        prometheusExporter = PrometheusExporter(5338)
-        prometheusExporter.startServer()
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VictronBleExporter::WakeLock")
+            wakeLock?.acquire(10 * 60 * 1000L /*10 minutes*/)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to acquire wakeLock", e)
+        }
 
-        startForegroundServiceNotification("Starting...")
+        try {
+            cloudflaredManager = CloudflaredManager(this)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to init CloudflaredManager", e)
+            cloudflaredManager = CloudflaredManager(this) // still init, but log
+        }
 
-        // Start BLE scan
-        startBleScan()
+        try {
+            prometheusExporter = PrometheusExporter(5338)
+            prometheusExporter.startServer()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start exporter", e)
+        }
 
-        // Start cloudflared if we have a token (from SharedPrefs or passed in)
-        // For now, we support runtime start via intent extras or UI
+        try {
+            startForegroundServiceNotification("Starting...")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start foreground", e)
+            // Fallback without foreground type
+            try {
+                val notification = buildNotification("Starting...")
+                startForeground(NOTIFICATION_ID, notification)
+            } catch (e2: Exception) {
+                Log.e(TAG, "Fallback foreground failed", e2)
+            }
+        }
+
+        // Start BLE scan - may fail if BT off or permission missing, handled inside
+        try {
+            startBleScan()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start BLE scan in onCreate", e)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -177,20 +208,35 @@ class VictronBleExporterService : Service() {
     }
 
     private fun buildNotification(content: String): Notification {
-        val intent = Intent(this, Class.forName("com.lakshaysethi.victronbleexporter.MainActivity"))
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
+        val mainIntent = try {
+            Intent(this, Class.forName("com.lakshaysethi.victronbleexporter.MainActivity"))
+        } catch (e: Exception) {
+            Log.w(TAG, "MainActivity class not found via reflection, using package launcher", e)
+            packageManager.getLaunchIntentForPackage(packageName) ?: Intent()
+        }
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val pendingIntent = try {
+            PendingIntent.getActivity(
+                this, 0, mainIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to create PendingIntent", e)
+            null
+        }
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.notification_title))
             .setContentText(content)
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth) // placeholder, use proper icon later
+            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setOngoing(true)
-            .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+
+        if (pendingIntent != null) {
+            builder.setContentIntent(pendingIntent)
+        }
+
+        return builder.build()
     }
 
     private fun createNotificationChannel() {
@@ -208,10 +254,22 @@ class VictronBleExporterService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Log.i(TAG, "Service onDestroy")
-        stopBleScan()
-        prometheusExporter.stopServer()
-        if (wakeLock?.isHeld == true) wakeLock?.release()
-        cloudflaredManager.stop()
+        try { stopBleScan() } catch (e: Exception) { Log.w(TAG, "stopBleScan failed", e) }
+        try {
+            if (::prometheusExporter.isInitialized) prometheusExporter.stopServer()
+        } catch (e: Exception) {
+            Log.w(TAG, "stop exporter failed", e)
+        }
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "wakeLock release failed", e)
+        }
+        try {
+            if (::cloudflaredManager.isInitialized) cloudflaredManager.stop()
+        } catch (e: Exception) {
+            Log.w(TAG, "cloudflared stop failed", e)
+        }
         serviceScope.cancel()
     }
 

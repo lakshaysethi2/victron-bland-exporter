@@ -63,20 +63,31 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkAndRequestPermissions() {
-        val perms = mutableListOf(
-            Manifest.permission.BLUETOOTH_SCAN,
-            Manifest.permission.BLUETOOTH_CONNECT,
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.POST_NOTIFICATIONS,
-            Manifest.permission.FOREGROUND_SERVICE
-        )
+        val perms = mutableListOf<String>()
+
+        // BT permissions
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            perms.add(Manifest.permission.BLUETOOTH_SCAN)
+            perms.add(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+        // Location needed on < S and also for scan with neverForLocation flag removed
+        perms.add(Manifest.permission.ACCESS_FINE_LOCATION)
+
+        // Notifications only runtime on Android 13+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            perms.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
 
         val missing = perms.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
 
         if (missing.isNotEmpty()) {
-            permissionsLauncher.launch(missing.toTypedArray())
+            try {
+                permissionsLauncher.launch(missing.toTypedArray())
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "Permission request failed", e)
+            }
         }
     }
 
@@ -185,28 +196,48 @@ fun VictronBleExporterScreen(
     var tunnelUrl by remember { mutableStateOf(AppState.tunnelUrl) }
 
     LaunchedEffect(Unit) {
-        // Fetch WiFi IP
-        val wifiMgr = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        val ipAddress = wifiMgr.connectionInfo.ipAddress
-        if (ipAddress != 0) {
-            val ipStr = String.format(
-                "%d.%d.%d.%d",
-                ipAddress and 0xff,
-                ipAddress shr 8 and 0xff,
-                ipAddress shr 16 and 0xff,
-                ipAddress shr 24 and 0xff
-            )
-            localIp = ipStr
+        // Fetch WiFi IP - wrapped in try/catch to avoid crash on missing permission or deprecated API
+        try {
+            val wifiMgr = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val ipAddress = try {
+                @Suppress("DEPRECATION")
+                wifiMgr?.connectionInfo?.ipAddress ?: 0
+            } catch (se: SecurityException) {
+                android.util.Log.w("MainActivity", "No ACCESS_WIFI_STATE permission for IP", se)
+                0
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "Failed to get wifi IP", e)
+                0
+            }
+            if (ipAddress != 0) {
+                val ipStr = String.format(
+                    "%d.%d.%d.%d",
+                    ipAddress and 0xff,
+                    ipAddress shr 8 and 0xff,
+                    ipAddress shr 16 and 0xff,
+                    ipAddress shr 24 and 0xff
+                )
+                localIp = ipStr
+            } else {
+                localIp = "127.0.0.1 (no wifi)"
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "IP fetch failed", e)
+            localIp = "Unknown (err: ${e.message})"
         }
 
         while (true) {
-            val all = MetricsStore.getAll()
-            deviceCount = all.size
-            devices = all.map { (mac, parsed) ->
-                mac to parsed.data
+            try {
+                val all = MetricsStore.getAll()
+                deviceCount = all.size
+                devices = all.map { (mac, parsed) ->
+                    mac to parsed.data
+                }
+                tunnelStatus = AppState.tunnelStatus
+                tunnelUrl = AppState.tunnelUrl
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "Loop update failed", e)
             }
-            tunnelStatus = AppState.tunnelStatus
-            tunnelUrl = AppState.tunnelUrl
             delay(1000)
         }
     }
