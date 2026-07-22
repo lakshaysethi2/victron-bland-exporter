@@ -7,14 +7,16 @@ services:
       - .:/project
       - gradle-cache:/root/.gradle
     working_dir: /project
-    # The image has gradle installed globally. We'll generate gradlew first if missing, then build.
     command: >
       bash -c "
       echo 'Accepting licenses...' && 
       yes | sdkmanager --licenses > /dev/null && 
       if [ ! -f gradlew ]; then 
-        echo 'Generating Gradle wrapper...' && 
-        gradle wrapper --gradle-version 8.7; 
+        echo 'Downloading Gradle wrapper...' && 
+        curl -sL https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradlew -o gradlew &&
+        chmod +x gradlew &&
+        mkdir -p gradle/wrapper &&
+        curl -sL https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar;
       fi && 
       echo 'Starting build...' && 
       ./gradlew assembleDebug"
