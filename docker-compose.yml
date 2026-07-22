@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  builder:
+    image: mingc/android-build-box:latest
+    volumes:
+      - .:/project
+      - gradle-cache:/root/.gradle
+    working_dir: /project
+    # The image has gradle installed globally. We'll generate gradlew first if missing, then build.
+    command: >
+      bash -c "
+      echo 'Accepting licenses...' && 
+      yes | sdkmanager --licenses > /dev/null && 
+      if [ ! -f gradlew ]; then 
+        echo 'Generating Gradle wrapper...' && 
+        gradle wrapper --gradle-version 8.7; 
+      fi && 
+      echo 'Starting build...' && 
+      ./gradlew assembleDebug"
+
+volumes:
+  gradle-cache:
