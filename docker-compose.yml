@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  builder:
+    image: mingc/android-build-box:latest
+    volumes:
+      - .:/project
+      - gradle-cache:/root/.gradle
+    working_dir: /project
+    command: >
+      bash -c "
+      echo 'Accepting licenses...' && 
+      yes | sdkmanager --licenses > /dev/null && 
+      if [ ! -f gradlew ]; then 
+        echo 'Downloading Gradle wrapper...' && 
+        curl -sL https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradlew -o gradlew &&
+        chmod +x gradlew &&
+        mkdir -p gradle/wrapper &&
+        curl -sL https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar;
+      fi && 
+      echo 'Starting build...' && 
+      ./gradlew assembleDebug"
+
+volumes:
+  gradle-cache:
