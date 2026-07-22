@@ -1,32 +1,28 @@
 package com.lakshaysethi.victronbleexporter.parser
 
-import android.util.Log
-import java.security.MessageDigest
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-private const val TAG = "VictronParser"
-private const val VICTRON_MFG_ID = 0x02E1
-
 /**
- * Full port of Victron Instant Readout BLE advertisement parser.
- * Supports Solar Charger (MPPT) record type 0x01 and basic SmartShunt.
+ * Parsed device data returned by the parser.
  */
+data class ParsedDevice(
+    val mac: String,
+    val modelId: Int,
+    val recordType: Int,
+    val data: Map<String, Any?>,
+    val rssi: Int
+)
+
 object VictronParser {
 
-    data class ParsedDevice(
-        val mac: String,
-        val modelId: Int,
-        val recordType: Int,
-        val data: Map<String, Any?>,
-        val rssi: Int
-    )
-
     fun isVictronAdvertisement(manufacturerData: ByteArray?): Boolean {
-        if (manufacturerData == null || manufacturerData.size < 3) return false
-        val mfgId = ((manufacturerData[1].toInt() and 0xFF) shl 8) or (manufacturerData[0].toInt() and 0xFF)
-        return mfgId == VICTRON_MFG_ID && manufacturerData[2].toInt() and 0xFF == 0x10
+        if (manufacturerData == null || manufacturerData.size < 2) return false
+        // After Android strips the company ID (real captures always have 0x02 here):
+        // [0]=0x10 (prefix), [1]=0x02 (record protocol/version), [2-3]=model LE, ...
+        return (manufacturerData[0].toInt() and 0xFF) == 0x10 &&
+               (manufacturerData[1].toInt() and 0xFF) == 0x02
     }
 
     fun parseAdvertisement(
@@ -39,34 +35,35 @@ object VictronParser {
 
         if (manufacturerData.size < 8) return null
 
-        val modelId = ((manufacturerData[4].toInt() and 0xFF) shl 8) or (manufacturerData[3].toInt() and 0xFF)
-        val recordType = manufacturerData[5].toInt() and 0xFF
-        val iv = manufacturerData.copyOfRange(6, 8) // 2 bytes
-        val keyCheck = manufacturerData[8].toInt() and 0xFF
-        val encrypted = manufacturerData.copyOfRange(9, manufacturerData.size)
+        // Correct layout (company ID stripped by Android):
+        // [0]=0x10, [1]=0x02 (protocol), [2-3]=model LE, [4]=recordType,
+        // [5-6]=IV LE, [7]=keyCheck, [8+]=encrypted
+        val modelId = ((manufacturerData[3].toInt() and 0xFF) shl 8) or (manufacturerData[2].toInt() and 0xFF)
+        val recordType = manufacturerData[4].toInt() and 0xFF
+        val iv = manufacturerData.copyOfRange(5, 7)
+        val keyCheck = manufacturerData[7].toInt() and 0xFF
+        val encrypted = manufacturerData.copyOfRange(8, manufacturerData.size)
 
         if (encryptionKeyHex.isNullOrBlank() || encryptionKeyHex.length != 32) {
-            Log.w(TAG, "No or invalid encryption key for $mac")
             return null
         }
 
         val key = try {
             hexStringToByteArray(encryptionKeyHex)
         } catch (e: Exception) {
-            Log.e(TAG, "Bad key hex", e)
+            return null
+        }
+
+        // Enforce key check BEFORE decrypting (critical security/ correctness check)
+        if (keyCheck != (key[0].toInt() and 0xFF)) {
             return null
         }
 
         val decrypted = try {
             decryptAESCTR(encrypted, key, iv)
         } catch (e: Exception) {
-            Log.e(TAG, "Decryption failed for $mac", e)
             return null
         }
-
-        // Verify key check (first byte of decrypted should match keyCheck after XOR or as per protocol)
-        // In practice many implementations just parse after successful decrypt.
-        // We keep simple: assume success if decrypt didn't throw.
 
         val parsedData = when (recordType) {
             0x01 -> parseSolarCharger(decrypted)
@@ -84,14 +81,11 @@ object VictronParser {
     }
 
     private fun decryptAESCTR(ciphertext: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
-        // AES-128-CTR. Nonce/IV is 2 bytes LE + 14 zero bytes (common for Victron)
         val fullIv = ByteArray(16)
         System.arraycopy(iv, 0, fullIv, 0, 2)
-        // rest remain 0
 
         val cipher = Cipher.getInstance("AES/CTR/NoPadding")
         val secretKey = SecretKeySpec(key, "AES")
-        // For CTR the IV param is the initial counter value
         val ivSpec = IvParameterSpec(fullIv)
         cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
 
@@ -133,38 +127,51 @@ object VictronParser {
     }
 
     private fun parseBatteryMonitor(decrypted: ByteArray): Map<String, Any?> {
-        // Simplified BMV/SmartShunt parser (record 0x02)
+        // Real SmartShunt/BMV layout (from keshavdv/victron-ble battery_monitor.py)
+        // ttg u16, voltage s16, alarm u16, aux u16, aux_mode u2, current s22, consumed u20, soc u10
         val reader = BitReader(decrypted)
 
-        val aux = reader.readUnsignedInt(16)
-        val voltage = reader.readSignedInt(16)
-        val current = reader.readSignedInt(16)
-        val power = reader.readSignedInt(16)
-        val consumedAh = reader.readSignedInt(16)
-        val soc = reader.readUnsignedInt(16)
         val timeToGo = reader.readUnsignedInt(16)
+        val voltage = reader.readSignedInt(16)
+        val alarm = reader.readUnsignedInt(16)
+        val aux = reader.readUnsignedInt(16)
+        val auxMode = reader.readUnsignedInt(2)
+
+        // Current: read as unsigned 22-bit first for proper NA detection (all-ones = 0x3FFFFF)
+        val rawCurrent = reader.readUnsignedInt(22)
+        val current = if (rawCurrent == 0x3FFFFF) 0x7FFFFF else rawCurrent  // treat all-ones as NA
+        val signedCurrent = if (current == 0x7FFFFF) null else {
+            val signBit = 1 shl 21
+            if (current and signBit != 0) (current - (1 shl 22)) else current
+        }
+
+        val consumedAhRaw = reader.readUnsignedInt(20)
+        val consumedAh = if (consumedAhRaw == 0xFFFFF) null else consumedAhRaw
+
+        val soc = reader.readUnsignedInt(10)
 
         return mapOf(
-            "aux_voltage" to (if (aux != 0xFFFF) aux / 100.0 else null),
+            "time_to_go_min" to (if (timeToGo != 0xFFFF) timeToGo else null),
             "battery_voltage" to (if (voltage != 0x7FFF) voltage / 100.0 else null),
-            "battery_current" to (if (current != 0x7FFF) current / 10.0 else null),
-            "power_w" to (if (power != 0x7FFF) power else null),
-            "consumed_ah" to (if (consumedAh != 0x7FFF) consumedAh / 10.0 else null),
-            "soc_percent" to (if (soc != 0xFFFF) soc / 10.0 else null),
-            "time_to_go_min" to (if (timeToGo != 0xFFFF) timeToGo / 60 else null),
+            "alarm" to alarm,
+            "aux" to aux,
+            "aux_mode" to auxMode,
+            "battery_current" to (signedCurrent?.let { it / 1000.0 }),
+            // Discharge is negative per VE.Direct / reference convention
+            "consumed_ah" to (consumedAh?.let { -it / 10.0 }),
+            "soc_percent" to (if (soc != 0x3FF) soc / 10.0 else null),
             "device_type" to "batterymonitor"
         )
     }
 
-    // Helper to get model name from modelId (simplified subset)
     fun getModelName(modelId: Int): String {
         return when (modelId) {
+            0xA042 -> "BlueSolar MPPT 75/15"
             0xA050 -> "SmartSolar MPPT 250/100"
             0xA051 -> "SmartSolar MPPT 150/100"
             0xA058 -> "SmartSolar MPPT 150/35"
             0xA059 -> "SmartSolar MPPT 150/100 rev2"
-            // Add more as needed from the MODEL_ID_MAPPING
-            else -> "Victron-$modelId"
+            else -> "Victron-0x${modelId.toString(16).uppercase()}"
         }
     }
 }
