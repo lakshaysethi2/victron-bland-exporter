@@ -37,11 +37,11 @@ class PrometheusExporter(
             val labels = buildLabels(mac, device)
             val data = device.data
 
-            appendMetric(sb, "victron_battery_voltage_volts", labels, data["battery_voltage"] as? Double)
-            appendMetric(sb, "victron_battery_current_amps", labels, data["battery_current"] as? Double)
-            appendMetric(sb, "victron_solar_power_watts", labels, data["solar_power_w"] as? Int)
-            appendMetric(sb, "victron_yield_today_wh", labels, data["yield_today_wh"] as? Int)
-            appendMetric(sb, "victron_load_current_amps", labels, data["load_current_a"] as? Double)
+            appendMetric(sb, "victron_battery_voltage_volts", labels, data["battery_voltage"] as? Number)
+            appendMetric(sb, "victron_battery_current_amps", labels, data["battery_current"] as? Number)
+            appendMetric(sb, "victron_solar_power_watts", labels, data["solar_power_w"] as? Number)
+            appendMetric(sb, "victron_yield_today_wh", labels, data["yield_today_wh"] as? Number)
+            appendMetric(sb, "victron_load_current_amps", labels, data["load_current_a"] as? Number)
 
             // Common
             appendMetric(sb, "victron_rssi_dbm", labels, device.rssi.toDouble())
@@ -64,7 +64,7 @@ class PrometheusExporter(
             }
 
             if (data.containsKey("soc_percent")) {
-                appendMetric(sb, "victron_soc_percent", labels, data["soc_percent"] as? Double)
+                appendMetric(sb, "victron_soc_percent", labels, data["soc_percent"] as? Number)
             }
         }
 
@@ -77,9 +77,9 @@ class PrometheusExporter(
         return "{device=\"${model.replace("\"", "")}\",mac=\"$mac\",type=\"$type\"}"
     }
 
-    private fun appendMetric(sb: StringBuilder, name: String, labels: String, value: Double?) {
+    private fun appendMetric(sb: StringBuilder, name: String, labels: String, value: Number?) {
         if (value != null) {
-            sb.append("$name$labels $value\n")
+            sb.append("$name$labels ${value.toDouble()}\n")
         }
     }
 
