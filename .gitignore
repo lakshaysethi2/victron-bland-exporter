@@ -13,9 +13,7 @@ local.properties
 *.iml
 *.hprof
 
-# Binary for cloudflared (too big + licensing)
-app/src/main/jniLibs/**/*.so
-!app/src/main/jniLibs/.gitkeep
+# cloudflared binary is bundled intentionally at app/src/main/jniLibs/arm64-v8a/libcloudflared.so (see README); keep it tracked
 
 # Generated
 app/release/
