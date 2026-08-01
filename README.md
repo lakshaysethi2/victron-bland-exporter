@@ -76,7 +76,8 @@ app/
 │   │   ├── exporter/
 │   │   │   └── PrometheusExporter.kt
 │   │   ├── tunnel/
-│   │   │   └── CloudflaredManager.kt
+│   │   │   ├── CloudflaredManager.kt
+│   │   │   └── TunnelNetworkPrep.kt
 │   │   └── ui/...
 │   ├── jniLibs/arm64-v8a/
 │   │   └── libcloudflared.so   ← bundled cloudflared (arm64-v8a only)
@@ -105,6 +106,8 @@ val cloudflared = File(applicationInfo.nativeLibraryDir, "libcloudflared.so")
 ProcessBuilder(cloudflared.absolutePath, "--no-autoupdate", "tunnel", "run", "--token", yourToken)
 ```
 `--no-autoupdate` is always passed (cloudflared's auto-updater cannot rewrite its own binary inside the read-only `nativeLibraryDir`, a known quick-tunnel exit cause), and `HOME`/`TMPDIR`/`TMP`/`TEMP` are pointed at app-private writable dirs (`filesDir`/`cacheDir`). Quick tunnels run `--no-autoupdate tunnel --url http://localhost:5338` against the Prometheus exporter port.
+
+Before starting cloudflared the app calls `ConnectivityManager.bindProcessToNetwork(activeNetwork)` and preflights DNS for `api.trycloudflare.com` via Android APIs. Native Go DNS talks to Android netd at `[::1]:53`; without the process network bind the stub refuses the query (`connection refused`) even when the app itself can resolve hosts. On stop the binding is cleared with `bindProcessToNetwork(null)`. Share/Copy debug logs include the active network, bind result, and preflight IPs.
 
 ## Permissions (all requested in code)
 
