@@ -10,6 +10,7 @@ Android app that turns Victron Instant Readout BLE devices (MPPT, SmartShunt, et
 - Prometheus `/metrics` endpoint (OpenMetrics format)
 - Embedded `cloudflared` for secure public exposure via Named Tunnel (or Quick Tunnel)
 - One-tap **Share Debug Logs** / **Copy Log** for cloudflared (last 200 output lines, exit code, tunnel state, device info) with clipboard fallback
+- One-tap **Copy URL** / **Share URL** for the quick-tunnel public URL (selectable URL text, clipboard copy with toast, Android share sheet); the URL is auto-copied with a toast the moment the tunnel comes up
 - Foreground service with persistent notification
 - Multi-device support (Solar Charger / MPPT + Battery Monitor / SmartShunt)
 - Jetpack Compose UI
