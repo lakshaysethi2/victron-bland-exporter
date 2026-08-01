@@ -409,13 +409,9 @@ internal object TunnelDnsSelfTest {
         }
 
         if (controller != null && bindOk) {
-            // Self-test must not leave the process pinned; caller may re-bind for tunnel start.
-            try {
-                controller.clearProcessNetworkBinding()
-                lines.add("bindProcessToNetwork(null) clear: done")
-            } catch (e: Exception) {
-                lines.add("bindProcessToNetwork(null) clear failed: ${e.message ?: e.javaClass.simpleName}")
-            }
+            // Never clear here: a live tunnel may own the process network bind.
+            // CloudflaredManager clears only when !isRunning() after the self-test.
+            lines.add("bindProcessToNetwork(null) clear: deferred to caller")
         }
 
         val summary = if (passed) "DNS self-test PASSED" else "DNS self-test FAILED"

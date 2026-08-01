@@ -251,7 +251,9 @@ class TunnelNetworkPrepTest {
         assertTrue(report.passed)
         assertEquals(listOf(CLOUDFLARE_PREFLIGHT_HOST, CLOUDFLARE_SELFTEST_HOST), hosts)
         assertEquals(1, controller.bindCalls)
-        assertEquals(1, controller.clearCalls)
+        // Self-test must not clear; a live tunnel may own the process bind.
+        assertEquals(0, controller.clearCalls)
+        assertTrue(report.lines.any { it.contains("clear: deferred to caller") })
         assertTrue(report.lines.any { it.contains("activeNetwork: 850") })
         assertTrue(report.lines.any { it.contains("NET_CAPABILITY_INTERNET: true") })
         assertTrue(report.lines.any { it.contains("system DNS servers: 1.1.1.1") })
