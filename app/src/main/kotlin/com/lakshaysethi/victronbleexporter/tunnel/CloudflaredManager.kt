@@ -2,6 +2,8 @@ package com.lakshaysethi.victronbleexporter.tunnel
 
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import java.io.BufferedReader
 import java.io.File
@@ -11,6 +13,8 @@ import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
 import com.lakshaysethi.victronbleexporter.AppState
@@ -38,6 +42,30 @@ internal object TunnelLog {
         lastLine.isNullOrBlank() -> "cloudflared exited (code $exitCode): (no output captured)"
         else -> "cloudflared exited (code $exitCode): ${lastLine.trim().take(200)}"
     }
+
+    /**
+     * Render an argv list for shareable logs with secrets scrubbed.
+     * Redacts the value immediately following any `--token` flag.
+     */
+    fun redactCommand(args: List<String>?): String {
+        if (args == null) return "n/a"
+        if (args.isEmpty()) return ""
+        val out = ArrayList<String>(args.size)
+        var i = 0
+        while (i < args.size) {
+            val arg = args[i]
+            out.add(arg)
+            if (arg == "--token") {
+                if (i + 1 < args.size) {
+                    out.add("<redacted>")
+                    i += 2
+                    continue
+                }
+            }
+            i++
+        }
+        return out.joinToString(" ")
+    }
 }
 
 internal object TunnelArgs {
@@ -52,7 +80,12 @@ internal object TunnelArgs {
         listOf(NO_AUTOUPDATE, "tunnel", "run", "--token", token)
 }
 
-class CloudflaredManager(context: Context) {
+class CloudflaredManager(
+    context: Context,
+    /** Background executor for bind/DNS preflight + ProcessBuilder.start (never main). */
+    private val startExecutor: Executor = defaultStartExecutor,
+    private val mainHandler: Handler = Handler(Looper.getMainLooper()),
+) {
 
     // Application context only: AppState holds a static reference to this manager
     // so the UI can share debug logs even after the process died; never retain the
@@ -82,6 +115,7 @@ class CloudflaredManager(context: Context) {
 
     // Last network bind + DNS preflight (surfaced in buildDebugLog).
     @Volatile private var lastNetworkPrep: NetworkPrepResult? = null
+    @Volatile private var lastDnsSelfTest: DnsSelfTestReport? = null
     private val networkController: ProcessNetworkController? =
         processNetworkControllerFrom(appContext)
 
@@ -109,10 +143,24 @@ class CloudflaredManager(context: Context) {
     private fun setStatus(value: String, onStatus: (String) -> Unit) {
         status = value
         AppState.tunnelStatus = value
-        onStatus(value)
+        // Notification / UI callbacks should land on main; AppState is already safe.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            onStatus(value)
+        } else {
+            mainHandler.post { onStatus(value) }
+        }
     }
 
-    private fun prepareAndRun(args: List<String>, onStatus: (String) -> Unit) {
+    /**
+     * Bind + DNS preflight + ProcessBuilder.start. MUST run off the main thread —
+     * InetAddress DNS throws NetworkOnMainThreadException on API 36+ strict mode paths
+     * and a hanging resolver would ANR the service.
+     */
+    private fun prepareAndRun(args: List<String>, onStatus: (String) -> Unit, generation: Long) {
+        if (generation != runGeneration.get() || manualStopRequested) {
+            return
+        }
+
         val bin = getBinaryFile()
         if (bin == null) {
             val reason = if (isSupportedAbi()) {
@@ -133,6 +181,17 @@ class CloudflaredManager(context: Context) {
         val prep = TunnelNetworkPrep.prepare(networkController)
         lastNetworkPrep = prep
         prep.debugLines().forEach { Log.i(TAG, "network prep: $it") }
+
+        // Stop/start raced during preflight — do not clobber Stopped with prep status.
+        if (generation != runGeneration.get() || manualStopRequested) {
+            try {
+                networkController?.clearProcessNetworkBinding()
+            } catch (e: Exception) {
+                Log.w(TAG, "clearProcessNetworkBinding after cancelled start", e)
+            }
+            return
+        }
+
         if (!prep.canStart) {
             val reason = prep.blockedStatus ?: "No working network/DNS"
             Log.e(TAG, "Refusing to start cloudflared: $reason")
@@ -140,10 +199,15 @@ class CloudflaredManager(context: Context) {
             return
         }
 
-        runBinary(bin, args, onStatus)
+        runBinary(bin, args, onStatus, generation)
     }
 
-    private fun runBinary(bin: File, args: List<String>, onStatus: (String) -> Unit) {
+    private fun runBinary(
+        bin: File,
+        args: List<String>,
+        onStatus: (String) -> Unit,
+        generation: Long,
+    ) {
         try {
             // nativeLibraryDir is extracted with exec permission; no chmod needed.
             val fullCommand = listOf(bin.absolutePath) + args
@@ -160,12 +224,18 @@ class CloudflaredManager(context: Context) {
             env["TMP"] = tmpDir
             env["TEMP"] = tmpDir
 
-            val generation = synchronized(runStateLock) {
-                manualStopRequested = false
+            synchronized(runStateLock) {
+                if (generation != runGeneration.get() || manualStopRequested) {
+                    try {
+                        networkController?.clearProcessNetworkBinding()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "clearProcessNetworkBinding after cancelled start", e)
+                    }
+                    return
+                }
                 lastExitCode = null
                 lastRunStartedAtMs = System.currentTimeMillis()
                 lastRunDurationMs = null
-                runGeneration.incrementAndGet()
             }
             lastCommand = fullCommand
             lastEnvOverrides = mapOf(
@@ -249,18 +319,88 @@ class CloudflaredManager(context: Context) {
         }
     }
 
-    fun startNamedTunnel(token: String, onStatus: (String) -> Unit = {}) {
+    /**
+     * Begin a new start generation on the caller thread (may be main), then hand
+     * bind/DNS/exec to [startExecutor]. Safe to call from Service.onStartCommand.
+     */
+    private fun enqueueStart(args: List<String>, onStatus: (String) -> Unit) {
+        // stop() bumps generation and clears any previous process/binding.
         stop()
-        prepareAndRun(TunnelArgs.namedTunnel(token), onStatus)
+        val generation = synchronized(runStateLock) {
+            manualStopRequested = false
+            runGeneration.incrementAndGet()
+        }
+        setStatus("Preparing network...", onStatus)
+        startExecutor.execute {
+            try {
+                prepareAndRun(args, onStatus, generation)
+            } catch (e: Exception) {
+                Log.e(TAG, "Background tunnel start failed", e)
+                if (generation == runGeneration.get()) {
+                    val msg = if (isNetworkOnMainThreadException(e)) {
+                        "BUG: network/DNS on main thread (NetworkOnMainThreadException)"
+                    } else {
+                        "Failed to start cloudflared: ${e.message ?: e.javaClass.simpleName}"
+                    }
+                    setStatus(msg, onStatus)
+                }
+            }
+        }
+    }
+
+    fun startNamedTunnel(token: String, onStatus: (String) -> Unit = {}) {
+        enqueueStart(TunnelArgs.namedTunnel(token), onStatus)
     }
 
     fun startQuickTunnel(localPort: Int = 5338, onStatus: (String) -> Unit = {}) {
-        stop()
-        prepareAndRun(TunnelArgs.quickTunnel(localPort), onStatus)
+        enqueueStart(TunnelArgs.quickTunnel(localPort), onStatus)
+    }
+
+    /**
+     * One-tap DNS/network self-test. Always runs on [startExecutor]; reports on
+     * screen via [onResult] (main thread) and is included in [buildDebugLog].
+     */
+    fun runDnsSelfTest(onResult: (String) -> Unit = {}) {
+        startExecutor.execute {
+            val report = try {
+                TunnelDnsSelfTest.run(
+                    controller = networkController,
+                    binaryFile = getBinaryFile()
+                        ?: File(appContext.applicationInfo.nativeLibraryDir, binaryName)
+                            .takeIf { it.exists() },
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "DNS self-test crashed", e)
+                DnsSelfTestReport(
+                    passed = false,
+                    lines = listOf("crash: ${e.javaClass.simpleName}: ${e.message ?: ""}"),
+                    summary = "DNS self-test FAILED (crash)",
+                )
+            }
+            lastDnsSelfTest = report
+            AppState.dnsSelfTestResult = report.asText()
+            // If a tunnel is not running, ensure we are not left bound from the test.
+            if (!isRunning()) {
+                try {
+                    networkController?.clearProcessNetworkBinding()
+                } catch (e: Exception) {
+                    Log.w(TAG, "clearProcessNetworkBinding after self-test", e)
+                }
+            }
+            val text = report.asText()
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                onResult(text)
+            } else {
+                mainHandler.post { onResult(text) }
+            }
+        }
     }
 
     fun stop() {
         manualStopRequested = true
+        synchronized(runStateLock) {
+            runGeneration.incrementAndGet()
+        }
         process?.destroyForcibly()
         process = null
         tunnelUrl = null
@@ -314,8 +454,16 @@ class CloudflaredManager(context: Context) {
             prep.debugLines().forEach { sb.appendLine(it) }
         }
         sb.appendLine()
+        sb.appendLine("--- DNS / network self-test ---")
+        val selfTest = lastDnsSelfTest?.asText() ?: AppState.dnsSelfTestResult
+        if (selfTest.isNullOrBlank()) {
+            sb.appendLine("(no self-test recorded yet — tap DNS Self-Test)")
+        } else {
+            sb.appendLine(selfTest)
+        }
+        sb.appendLine()
         sb.appendLine("--- cloudflared invocation ---")
-        sb.appendLine("Command: ${lastCommand?.joinToString(" ") ?: "n/a"}")
+        sb.appendLine("Command: ${TunnelLog.redactCommand(lastCommand)}")
         sb.appendLine("Env overrides: ${lastEnvOverrides?.toSortedMap()?.entries?.joinToString(", ") { "${it.key}=${it.value}" } ?: "n/a"}")
         sb.appendLine()
         sb.appendLine("--- last $TUNNEL_LOG_MAX_LINES cloudflared output lines ---")
@@ -346,5 +494,11 @@ class CloudflaredManager(context: Context) {
         }
     } catch (e: Exception) {
         -1L
+    }
+
+    companion object {
+        private val defaultStartExecutor: Executor = Executors.newSingleThreadExecutor { r ->
+            Thread(r, "cloudflared-start").apply { isDaemon = true }
+        }
     }
 }

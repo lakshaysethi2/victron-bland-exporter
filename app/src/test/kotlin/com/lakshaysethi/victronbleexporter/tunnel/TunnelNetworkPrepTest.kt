@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -15,6 +16,12 @@ import java.util.concurrent.atomic.AtomicInteger
 private class FakeProcessNetworkController(
     private var activeLabel: String? = "100",
     private var bindResult: Boolean = true,
+    private var diagnostics: NetworkDiagnostics = NetworkDiagnostics(
+        activeNetworkLabel = "100",
+        hasInternet = true,
+        isValidated = true,
+        dnsServers = listOf("1.1.1.1"),
+    ),
 ) : ProcessNetworkController {
     var bindCalls = 0
         private set
@@ -23,6 +30,7 @@ private class FakeProcessNetworkController(
 
     fun setActive(label: String?) {
         activeLabel = label
+        diagnostics = diagnostics.copy(activeNetworkLabel = label)
     }
 
     override fun activeNetworkLabel(): String? = activeLabel
@@ -36,7 +44,14 @@ private class FakeProcessNetworkController(
     override fun clearProcessNetworkBinding() {
         clearCalls++
     }
+
+    override fun networkDiagnostics(): NetworkDiagnostics = diagnostics.copy(
+        activeNetworkLabel = activeLabel,
+    )
 }
+
+/** Stand-in exception whose simple name matches Android's NetworkOnMainThreadException. */
+private class NetworkOnMainThreadException(message: String = "network on main") : RuntimeException(message)
 
 class TunnelNetworkPrepTest {
 
@@ -54,6 +69,7 @@ class TunnelNetworkPrepTest {
         assertTrue(result.canStart)
         assertNull(result.blockedStatus)
         assertEquals(1, controller.bindCalls)
+        assertEquals(0, controller.clearCalls)
         assertTrue(result.bindCalled)
         assertTrue(result.bindSucceeded)
         assertEquals("wifi-42", result.activeNetworkLabel)
@@ -83,7 +99,7 @@ class TunnelNetworkPrepTest {
     }
 
     @Test
-    fun `preflight DNS failure short-circuits start after bind`() {
+    fun `preflight DNS failure short-circuits start after bind and clears binding`() {
         val controller = FakeProcessNetworkController(activeLabel = "100")
 
         val result = TunnelNetworkPrep.prepare(controller) {
@@ -95,6 +111,7 @@ class TunnelNetworkPrepTest {
         assertTrue(blocked != null && blocked.startsWith("No working network/DNS — cannot resolve"))
         assertTrue(blocked != null && blocked.contains("connection refused"))
         assertEquals(1, controller.bindCalls)
+        assertEquals(1, controller.clearCalls)
         assertTrue(result.bindCalled)
         assertTrue(result.bindSucceeded)
         assertEquals(emptyList<String>(), result.dnsIps)
@@ -102,7 +119,26 @@ class TunnelNetworkPrepTest {
     }
 
     @Test
-    fun `empty DNS result blocks start`() {
+    fun `NetworkOnMainThreadException is distinct bug status not no-network`() {
+        val controller = FakeProcessNetworkController(activeLabel = "850")
+
+        val result = TunnelNetworkPrep.prepare(controller) {
+            throw NetworkOnMainThreadException()
+        }
+
+        assertFalse(result.canStart)
+        assertEquals(
+            "BUG: network/DNS on main thread (NetworkOnMainThreadException)",
+            result.blockedStatus,
+        )
+        assertTrue(result.dnsError!!.contains("wrong thread"))
+        assertFalse(result.blockedStatus!!.contains("No working network/DNS"))
+        assertEquals(1, controller.bindCalls)
+        assertEquals(1, controller.clearCalls)
+    }
+
+    @Test
+    fun `empty DNS result blocks start and clears binding`() {
         val controller = FakeProcessNetworkController(activeLabel = "100")
 
         val result = TunnelNetworkPrep.prepare(controller) { emptyList() }
@@ -113,6 +149,7 @@ class TunnelNetworkPrepTest {
             result.blockedStatus,
         )
         assertEquals(1, controller.bindCalls)
+        assertEquals(1, controller.clearCalls)
         assertEquals("empty DNS result", result.dnsError)
     }
 
@@ -129,6 +166,7 @@ class TunnelNetworkPrepTest {
         assertFalse(result.canStart)
         assertEquals("No working network/DNS — bindProcessToNetwork failed", result.blockedStatus)
         assertEquals(1, controller.bindCalls)
+        assertEquals(0, controller.clearCalls)
         assertTrue(result.bindCalled)
         assertFalse(result.bindSucceeded)
         assertEquals(0, resolveCalls.get())
@@ -164,5 +202,79 @@ class TunnelNetworkPrepTest {
         assertEquals(0, controller.clearCalls)
         controller.clearProcessNetworkBinding()
         assertEquals(1, controller.clearCalls)
+    }
+
+    @Test
+    fun `isNetworkOnMainThreadException matches simple name and cause chain`() {
+        assertTrue(isNetworkOnMainThreadException(NetworkOnMainThreadException()))
+        assertTrue(isNetworkOnMainThreadException(RuntimeException(NetworkOnMainThreadException())))
+        assertFalse(isNetworkOnMainThreadException(IOException("connection refused")))
+    }
+
+    @Test
+    fun `dns self-test fails hard when run on main thread`() {
+        val controller = FakeProcessNetworkController()
+        val report = TunnelDnsSelfTest.run(
+            controller = controller,
+            binaryFile = null,
+            isMainThread = { true },
+            threadName = { "main" },
+            resolve = { listOf("1.2.3.4") },
+            httpProbe = { "HTTP 200" },
+        )
+        assertFalse(report.passed)
+        assertTrue(report.summary.contains("FAILED"))
+        assertTrue(report.lines.any { it.contains("main looper") })
+        assertEquals(0, controller.bindCalls)
+    }
+
+    @Test
+    fun `dns self-test reports bind resolve binary and https on background thread`() {
+        val controller = FakeProcessNetworkController(activeLabel = "850")
+        val tmp = File.createTempFile("libcloudflared", ".so").apply {
+            writeBytes(ByteArray(150_000) { 1 })
+            deleteOnExit()
+        }
+        val hosts = mutableListOf<String>()
+        val report = TunnelDnsSelfTest.run(
+            controller = controller,
+            binaryFile = tmp,
+            isMainThread = { false },
+            threadName = { "cloudflared-start" },
+            resolve = { host ->
+                hosts.add(host)
+                listOf("1.1.1.1")
+            },
+            httpProbe = { url -> "HTTP 200 from $url" },
+            nowMs = { 1_000L },
+        )
+        assertTrue(report.passed)
+        assertEquals(listOf(CLOUDFLARE_PREFLIGHT_HOST, CLOUDFLARE_SELFTEST_HOST), hosts)
+        assertEquals(1, controller.bindCalls)
+        assertEquals(1, controller.clearCalls)
+        assertTrue(report.lines.any { it.contains("activeNetwork: 850") })
+        assertTrue(report.lines.any { it.contains("NET_CAPABILITY_INTERNET: true") })
+        assertTrue(report.lines.any { it.contains("system DNS servers: 1.1.1.1") })
+        assertTrue(report.lines.any { it.contains("libcloudflared.so") && it.contains("150000") })
+        assertTrue(report.lines.any { it.contains("HTTPS https://api.trycloudflare.com") })
+        assertTrue(report.lines.any { it.contains("thread: cloudflared-start") })
+    }
+
+    @Test
+    fun `dns self-test treats NetworkOnMainThreadException on resolve as bug`() {
+        val controller = FakeProcessNetworkController()
+        val report = TunnelDnsSelfTest.run(
+            controller = controller,
+            binaryFile = File.createTempFile("cfbin", ".so").apply {
+                writeBytes(ByteArray(150_000))
+                deleteOnExit()
+            },
+            isMainThread = { false },
+            threadName = { "bg" },
+            resolve = { throw NetworkOnMainThreadException() },
+            httpProbe = { "HTTP 200" },
+        )
+        assertFalse(report.passed)
+        assertTrue(report.lines.any { it.contains("NetworkOnMainThreadException") && it.contains("wrong thread") })
     }
 }
