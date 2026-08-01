@@ -14,6 +14,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Debug APK: `./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk`. SDK via `local.properties` `sdk.dir` (gitignored).
 - Pre-existing: `VictronParserTest` "real SmartShunt advert" can fail on JVM unit tests; tunnel unit tests are under `tunnel/*Test`.
 
+## Charger control over BLE
+
+- The Instant Readout advertisements the app parses are read-only. Charger on/off is a write to the proprietary VictronConnect GATT service `306b0001-b081-4037-83dc-e59fcc3cdfd0` (chars `306b0002` control / `306b0003` commands / `306b0004` bulk), register `0x0200` device mode: `1`=on, `0`/`4`=off. Protocol + verified frame layouts are documented in `charger/ChargerProtocol.kt` (researched from Victron's BlueSolar/SmartSolar HEX protocol Rev 18, the VictronConnect APK register metadata, and the pysmartsolar / Olen solar-monitor / Mrkvak victron-linux open-source implementations).
+- The device requires BLE pairing; PIN is on the sticker or `000000`. Writes are write-without-response; the device echoes the new mode in `08 03 19 02 00 41 <mode>` notifications (status 133 in `onCharacteristicWrite` is a known no-response-write quirk, not an error).
+- Implementation: `charger/ChargerController.kt` (one GATT session per op, latches + dedicated HandlerThread, serialized by a Mutex), `charger/ChargerSchedule.kt` + `data/ChargerScheduleStore.kt` (daily window, manual override until next boundary), `ChargerDebugLog` ring buffer (200 lines) included in Share Debug Logs. Schedule is enforced only while the foreground service runs — by design, called out in UI + README.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

@@ -65,6 +65,11 @@ class MainActivity : ComponentActivity() {
                     onStop = { stopExporterService() },
                     onAddKey = { mac, key -> addKeyToService(mac, key) },
                     onRemoveKey = { mac -> removeKey(mac) },
+                    onChargerSet = { mac, enable -> sendChargerSet(mac, enable) },
+                    onChargerRead = { mac -> sendChargerRead(mac) },
+                    onChargerScheduleSave = { mac, enabled, enableTime, disableTime ->
+                        saveChargerSchedule(mac, enabled, enableTime, disableTime)
+                    },
                     onStartTunnel = { token -> startTunnel(token) },
                     onQuickTunnel = { startQuickTunnel() },
                     onStopTunnel = { stopTunnel() },
@@ -184,6 +189,60 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun sendToService(intent: Intent) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
+    private fun sendChargerSet(mac: String, enable: Boolean) {
+        if (mac.isBlank()) {
+            Toast.makeText(this, "Enter the charger device MAC first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        sendToService(
+            Intent(this, VictronBleExporterService::class.java).apply {
+                action = "CHARGER_SET"
+                putExtra("mac", mac.trim().uppercase())
+                putExtra("enable", enable)
+            }
+        )
+        Toast.makeText(this, if (enable) "Enabling charger…" else "Disabling charger…", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun sendChargerRead(mac: String) {
+        if (mac.isBlank()) {
+            Toast.makeText(this, "Enter the charger device MAC first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        sendToService(
+            Intent(this, VictronBleExporterService::class.java).apply {
+                action = "CHARGER_READ"
+                putExtra("mac", mac.trim().uppercase())
+            }
+        )
+        Toast.makeText(this, "Reading charger state…", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun saveChargerSchedule(mac: String, enabled: Boolean, enableTime: String, disableTime: String) {
+        if (mac.isBlank()) {
+            Toast.makeText(this, "Enter the charger device MAC first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        sendToService(
+            Intent(this, VictronBleExporterService::class.java).apply {
+                action = "CHARGER_SCHEDULE_SAVE"
+                putExtra("mac", mac.trim().uppercase())
+                putExtra("schedule_enabled", enabled)
+                putExtra("enable_time", enableTime)
+                putExtra("disable_time", disableTime)
+            }
+        )
+        Toast.makeText(this, "Schedule saved", Toast.LENGTH_SHORT).show()
+    }
+
     private fun startTunnel(token: String) {
         val intent = Intent(this, VictronBleExporterService::class.java).apply {
             action = "START_TUNNEL"
@@ -220,20 +279,22 @@ class MainActivity : ComponentActivity() {
 
     private fun shareDebugLogs() {
         val log = AppState.cloudflaredManager?.buildDebugLog()
-        if (log == null) {
+        val full = if (log == null) {
             Toast.makeText(this, "Tunnel service not started yet", Toast.LENGTH_SHORT).show()
             return
+        } else {
+            log + "\n\n" + AppState.chargerDebugSection()
         }
         val sendIntent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_SUBJECT, "Victron cloudflared debug log")
-            putExtra(Intent.EXTRA_TEXT, log)
+            putExtra(Intent.EXTRA_TEXT, full)
         }
         try {
             startActivity(Intent.createChooser(sendIntent, "Share debug logs"))
         } catch (e: Exception) {
             android.util.Log.w("MainActivity", "Share sheet unavailable", e)
-            copyTextToClipboard(log)
+            copyTextToClipboard(full)
             Toast.makeText(this, "Share unavailable — debug log copied to clipboard", Toast.LENGTH_LONG).show()
         }
     }
@@ -244,7 +305,7 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Tunnel service not started yet", Toast.LENGTH_SHORT).show()
             return
         }
-        copyTextToClipboard(log)
+        copyTextToClipboard(log + "\n\n" + AppState.chargerDebugSection())
         Toast.makeText(this, "Debug log copied to clipboard", Toast.LENGTH_SHORT).show()
     }
 
@@ -292,6 +353,9 @@ fun VictronBleExporterScreen(
     onStop: () -> Unit,
     onAddKey: (String, String) -> Unit,
     onRemoveKey: (String) -> Unit,
+    onChargerSet: (String, Boolean) -> Unit,
+    onChargerRead: (String) -> Unit,
+    onChargerScheduleSave: (String, Boolean, String, String) -> Unit,
     onStartTunnel: (String) -> Unit,
     onQuickTunnel: () -> Unit,
     onStopTunnel: () -> Unit,
@@ -309,6 +373,18 @@ fun VictronBleExporterScreen(
     var macInput by remember { mutableStateOf("") }
     var keyInput by remember { mutableStateOf("") }
     var tunnelToken by remember { mutableStateOf("") }
+
+    // Charger control UI state
+    var chargerMac by remember { mutableStateOf("") }
+    var chargerModeText by remember { mutableStateOf(AppState.chargerModeText) }
+    var chargerBusy by remember { mutableStateOf(AppState.chargerBusy) }
+    var chargerLastAction by remember { mutableStateOf(AppState.chargerLastAction) }
+    var chargerLastError by remember { mutableStateOf(AppState.chargerLastError) }
+    var chargerOverrideUntil by remember { mutableStateOf(AppState.chargerOverrideUntil) }
+    var scheduleEnabled by remember { mutableStateOf(false) }
+    var enableTime by remember { mutableStateOf("08:30") }
+    var disableTime by remember { mutableStateOf("18:00") }
+    var scheduleLoaded by remember { mutableStateOf(false) }
 
     var localIp by remember { mutableStateOf("Unknown IP") }
     var tunnelStatus by remember { mutableStateOf(AppState.tunnelStatus) }
@@ -438,6 +514,32 @@ fun VictronBleExporterScreen(
                 tunnelStatus = AppState.tunnelStatus
                 tunnelUrl = AppState.tunnelUrl
                 dnsSelfTestResult = AppState.dnsSelfTestResult
+
+                // Charger control state (driven by the foreground service)
+                chargerModeText = AppState.chargerModeText
+                chargerBusy = AppState.chargerBusy
+                chargerLastAction = AppState.chargerLastAction
+                chargerLastError = AppState.chargerLastError
+                chargerOverrideUntil = AppState.chargerOverrideUntil
+                if (AppState.chargerMac != null && chargerMac.isBlank()) {
+                    chargerMac = AppState.chargerMac!!
+                }
+                if (chargerMac.isBlank() && savedKeys.isNotEmpty()) {
+                    chargerMac = savedKeys.keys.first()
+                }
+                // Load persisted schedule settings once
+                if (!scheduleLoaded) {
+                    try {
+                        val store = com.lakshaysethi.victronbleexporter.data.ChargerScheduleStore(context)
+                        scheduleEnabled = store.scheduleEnabled
+                        enableTime = store.enableTime
+                        disableTime = store.disableTime
+                        if (store.chargerMac.isNotBlank()) chargerMac = store.chargerMac
+                        scheduleLoaded = true
+                    } catch (e: Exception) {
+                        // ignore
+                    }
+                }
             } catch (e: Exception) {
                 android.util.Log.w("MainActivity", "UI loop error", e)
             }
@@ -810,6 +912,160 @@ fun VictronBleExporterScreen(
         HorizontalDivider()
         Spacer(Modifier.height(16.dp))
 
+        // ===== CHARGER CONTROL (enable/disable over BLE + daily schedule) =====
+        Text("Charger Control", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(
+            "Enable/disable the MPPT charger over BLE. First connection prompts for pairing — PIN is usually 000000 (or on the product sticker).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = chargerMac,
+            onValueChange = { chargerMac = it.uppercase() },
+            label = { Text("Charger device MAC") },
+            placeholder = { Text("AA:BB:CC:DD:EE:FF") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            supportingText = {
+                Text("Auto-filled from your saved devices — the MPPT's MAC")
+            }
+        )
+        Spacer(Modifier.height(8.dp))
+
+        // Current state + last action
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = when (chargerModeText) {
+                    "ON" -> MaterialTheme.colorScheme.primaryContainer
+                    "OFF" -> MaterialTheme.colorScheme.secondaryContainer
+                    else -> MaterialTheme.colorScheme.surfaceVariant
+                }
+            )
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Text(
+                        "Charger: $chargerModeText",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (chargerBusy) {
+                        Spacer(Modifier.width(10.dp))
+                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                    }
+                }
+                Text(chargerLastAction, style = MaterialTheme.typography.bodySmall)
+                if (chargerOverrideUntil > System.currentTimeMillis()) {
+                    val until = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US)
+                        .format(java.util.Date(chargerOverrideUntil))
+                    Text(
+                        "Manual override — schedule paused until $until",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                }
+                chargerLastError?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = { onChargerSet(chargerMac, true) },
+                modifier = Modifier.weight(1f),
+                enabled = !chargerBusy && chargerMac.isNotBlank()
+            ) {
+                Text("Enable Charger")
+            }
+            OutlinedButton(
+                onClick = { onChargerSet(chargerMac, false) },
+                modifier = Modifier.weight(1f),
+                enabled = !chargerBusy && chargerMac.isNotBlank()
+            ) {
+                Text("Disable Charger")
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        OutlinedButton(
+            onClick = { onChargerRead(chargerMac) },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !chargerBusy && chargerMac.isNotBlank()
+        ) {
+            Text("Read Current State")
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        // Schedule card
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Daily schedule", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Text(
+                            "Charger ON from enable time, OFF from disable time.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Switch(checked = scheduleEnabled, onCheckedChange = { scheduleEnabled = it })
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    TimePickerButton(
+                        current = enableTime,
+                        defaultHour = 8,
+                        defaultMinute = 30,
+                        onPicked = { enableTime = it },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("ON at $it") }
+                    TimePickerButton(
+                        current = disableTime,
+                        defaultHour = 18,
+                        defaultMinute = 0,
+                        onPicked = { disableTime = it },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("OFF at $it") }
+                }
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = { onChargerScheduleSave(chargerMac, scheduleEnabled, enableTime, disableTime) },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = chargerMac.isNotBlank() &&
+                        com.lakshaysethi.victronbleexporter.charger.ChargerSchedule.isValidTime(enableTime) &&
+                        com.lakshaysethi.victronbleexporter.charger.ChargerSchedule.isValidTime(disableTime)
+                ) {
+                    Text("Save Schedule")
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Note: the schedule applies while the app is open (foreground service running). " +
+                        "Manual Enable/Disable pauses the schedule until the next window boundary.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
         Text("Cloudflare Tunnel (optional)", style = MaterialTheme.typography.titleMedium)
         Text("Expose metrics to internet", style = MaterialTheme.typography.bodySmall)
         Text("Tunnel: $tunnelStatus", style = MaterialTheme.typography.bodyMedium)
@@ -874,5 +1130,45 @@ fun VictronBleExporterScreen(
         }
 
         Spacer(Modifier.height(32.dp))
+    }
+}
+
+/**
+ * Button that opens a platform time picker and reports "HH:mm".
+ * The dialog is created inside a LaunchedEffect so it is shown exactly once per
+ * open (a plain `if` would re-show it on every recomposition, stacking dialogs).
+ */
+@Composable
+fun TimePickerButton(
+    current: String,
+    defaultHour: Int,
+    defaultMinute: Int,
+    onPicked: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    label: @Composable (String) -> Unit
+) {
+    var open by remember { mutableStateOf(false) }
+    OutlinedButton(onClick = { open = true }, modifier = modifier) {
+        label(current)
+    }
+    if (open) {
+        val parts = current.split(":").map { it.toIntOrNull() ?: 0 }
+        val hour = parts.getOrElse(0) { defaultHour }.coerceIn(0, 23)
+        val minute = parts.getOrElse(1) { defaultMinute }.coerceIn(0, 59)
+        val context = LocalContext.current
+        LaunchedEffect(Unit) {
+            val dialog = android.app.TimePickerDialog(
+                context,
+                { _, h, m ->
+                    onPicked("%02d:%02d".format(h, m))
+                    open = false
+                },
+                hour,
+                minute,
+                true
+            )
+            dialog.setOnDismissListener { open = false }
+            dialog.show()
+        }
     }
 }

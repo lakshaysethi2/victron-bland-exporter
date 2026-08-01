@@ -13,7 +13,12 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.lakshaysethi.victronbleexporter.AppState
 import com.lakshaysethi.victronbleexporter.R
+import com.lakshaysethi.victronbleexporter.charger.ChargerController
+import com.lakshaysethi.victronbleexporter.charger.ChargerDebugLog
+import com.lakshaysethi.victronbleexporter.charger.ChargerSchedule
+import com.lakshaysethi.victronbleexporter.data.ChargerScheduleStore
 import com.lakshaysethi.victronbleexporter.data.DeviceRepository
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
@@ -38,6 +43,12 @@ class VictronBleExporterService : Service() {
     private lateinit var cloudflaredManager: CloudflaredManager
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var deviceRepository: DeviceRepository
+
+    // Charger control (BLE write of register 0x0200 device mode) + daily schedule.
+    private val chargerController: ChargerController by lazy { ChargerController(this) }
+    private val chargerScheduleStore: ChargerScheduleStore by lazy { ChargerScheduleStore(this) }
+    private var lastScheduledMode: Boolean? = null
+    private var scheduleRetryAt = 0L
 
     // Device encryption keys: MAC -> key (hex) - in-memory cache, persisted via DeviceRepository
     private val deviceKeys = mutableMapOf<String, String>()
@@ -132,6 +143,146 @@ class VictronBleExporterService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start BLE scan in onCreate", e)
         }
+
+        startChargerScheduleLoop()
+    }
+
+    // ---- Charger control (enable/disable over BLE + daily schedule) ----
+
+    private fun startChargerScheduleLoop() {
+        serviceScope.launch {
+            while (isActive) {
+                try {
+                    enforceChargerSchedule()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Charger schedule tick failed", e)
+                }
+                delay(30_000)
+            }
+        }
+    }
+
+    /**
+     * Enforces the configured enable/disable window while the service runs.
+     * Manual overrides pause the schedule until the next window boundary.
+     */
+    private suspend fun enforceChargerSchedule() {
+        val settings = chargerScheduleStore.load()
+        if (settings.chargerMac.isBlank()) return
+        val now = System.currentTimeMillis()
+        if (settings.manualOverrideUntil in 1..now) {
+            chargerScheduleStore.clearOverride()
+            AppState.chargerOverrideUntil = 0L
+            ChargerDebugLog.append("Manual override ended — schedule resumes")
+        }
+        if (!settings.scheduleEnabled) return
+        if (chargerScheduleStore.manualOverrideUntil > now) return // manual override active
+        if (now < scheduleRetryAt) return
+
+        val cal = Calendar.getInstance()
+        val minutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+        val desiredOn = ChargerSchedule.scheduledOn(minutes, settings.enableMinutes, settings.disableMinutes)
+        if (desiredOn == lastScheduledMode) return
+
+        ChargerDebugLog.append(
+            "Schedule tick: window=${ChargerSchedule.formatMinutes(settings.enableMinutes)}-${ChargerSchedule.formatMinutes(settings.disableMinutes)}" +
+                " -> charger ${if (desiredOn) "ON" else "OFF"}"
+        )
+        val result = chargerController.setMode(settings.chargerMac, desiredOn)
+        if (result.success) {
+            lastScheduledMode = desiredOn
+            AppState.chargerMode = result.mode
+            AppState.chargerMac = settings.chargerMac
+            AppState.chargerStateUpdatedAt = System.currentTimeMillis()
+            AppState.chargerLastAction = "Schedule: charger ${if (desiredOn) "ENABLED" else "DISABLED"} (${result.modeText})"
+            AppState.chargerLastError = null
+        } else {
+            AppState.chargerLastAction = "Schedule apply failed: ${result.message}"
+            AppState.chargerLastError = result.message
+            scheduleRetryAt = now + 10 * 60_000L
+        }
+    }
+
+    private suspend fun performChargerSet(mac: String, enable: Boolean) {
+        val store = chargerScheduleStore
+        store.chargerMac = mac
+        AppState.chargerMac = mac
+        AppState.chargerBusy = true
+        AppState.chargerLastAction = if (enable) "Enabling charger…" else "Disabling charger…"
+        AppState.chargerLastError = null
+        ChargerDebugLog.append("Manual ${if (enable) "ENABLE" else "DISABLE"} requested for $mac")
+        try {
+            val result = chargerController.setMode(mac, enable)
+            AppState.chargerMode = result.mode
+            AppState.chargerStateUpdatedAt = System.currentTimeMillis()
+            if (result.success) {
+                // Manual override: pause the schedule until the next window boundary.
+                val cal = Calendar.getInstance()
+                val minutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+                val next = ChargerSchedule.nextTransition(minutes, store.load().enableMinutes, store.load().disableMinutes)
+                val until = nextTransitionEpoch(next)
+                store.manualOverrideUntil = until
+                AppState.chargerOverrideUntil = until
+                AppState.chargerLastAction = "Charger ${if (enable) "ENABLED" else "DISABLED"} (${result.modeText})"
+                ChargerDebugLog.append("Manual override active until ${ChargerSchedule.formatMinutes(next)}")
+            } else {
+                AppState.chargerLastAction = "Failed: ${result.message}"
+                AppState.chargerLastError = result.message
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Charger set failed", e)
+            AppState.chargerLastAction = "Failed: ${e.message}"
+            AppState.chargerLastError = e.message
+            ChargerDebugLog.append("ERROR: ${e.message}")
+        } finally {
+            AppState.chargerBusy = false
+        }
+    }
+
+    private suspend fun performChargerRead(mac: String) {
+        val store = chargerScheduleStore
+        store.chargerMac = mac
+        AppState.chargerMac = mac
+        AppState.chargerBusy = true
+        AppState.chargerLastAction = "Reading charger state…"
+        AppState.chargerLastError = null
+        ChargerDebugLog.append("Manual state read requested for $mac")
+        try {
+            val result = chargerController.readMode(mac)
+            AppState.chargerMode = result.mode
+            AppState.chargerStateUpdatedAt = System.currentTimeMillis()
+            AppState.chargerLastAction = if (result.success) "Read: ${result.modeText}" else "Read failed: ${result.message}"
+            if (!result.success) AppState.chargerLastError = result.message
+        } catch (e: Exception) {
+            Log.w(TAG, "Charger read failed", e)
+            AppState.chargerLastAction = "Read failed: ${e.message}"
+            AppState.chargerLastError = e.message
+            ChargerDebugLog.append("ERROR: ${e.message}")
+        } finally {
+            AppState.chargerBusy = false
+        }
+    }
+
+    private fun saveChargerSchedule(mac: String, enabled: Boolean, enableTime: String, disableTime: String) {
+        chargerScheduleStore.save(enabled, enableTime, disableTime, mac)
+        AppState.chargerMac = mac
+        AppState.chargerOverrideUntil = 0L
+        lastScheduledMode = null // force a fresh apply on the next tick
+        ChargerDebugLog.append(
+            "Schedule saved: $mac ${if (enabled) "enabled" else "disabled"} " +
+                "($enableTime → $disableTime). Applies while the app is open."
+        )
+    }
+
+    private fun nextTransitionEpoch(nextMinutesOfDay: Int): Long {
+        val cal = Calendar.getInstance()
+        val nowMinutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+        if (nextMinutesOfDay <= nowMinutes) cal.add(Calendar.DAY_OF_YEAR, 1)
+        cal.set(Calendar.HOUR_OF_DAY, nextMinutesOfDay / 60)
+        cal.set(Calendar.MINUTE, nextMinutesOfDay % 60)
+        cal.set(Calendar.SECOND, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        return cal.timeInMillis
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -155,6 +306,22 @@ class VictronBleExporterService : Service() {
                     val mac = it.getStringExtra("mac") ?: return@let
                     val key = it.getStringExtra("key") ?: return@let
                     addDeviceKey(mac, key)
+                }
+                "CHARGER_SET" -> {
+                    val mac = it.getStringExtra("mac") ?: return@let
+                    val enable = it.getBooleanExtra("enable", true)
+                    serviceScope.launch { performChargerSet(mac, enable) }
+                }
+                "CHARGER_READ" -> {
+                    val mac = it.getStringExtra("mac") ?: return@let
+                    serviceScope.launch { performChargerRead(mac) }
+                }
+                "CHARGER_SCHEDULE_SAVE" -> {
+                    val mac = it.getStringExtra("mac") ?: return@let
+                    val enabled = it.getBooleanExtra("schedule_enabled", false)
+                    val enableTime = it.getStringExtra("enable_time") ?: ChargerSchedule.DEFAULT_ENABLE
+                    val disableTime = it.getStringExtra("disable_time") ?: ChargerSchedule.DEFAULT_DISABLE
+                    saveChargerSchedule(mac, enabled, enableTime, disableTime)
                 }
             }
         }
@@ -341,6 +508,11 @@ class VictronBleExporterService : Service() {
             if (::cloudflaredManager.isInitialized) cloudflaredManager.stop()
         } catch (e: Exception) {
             Log.w(TAG, "cloudflared stop failed", e)
+        }
+        try {
+            chargerController.shutdown()
+        } catch (e: Exception) {
+            Log.w(TAG, "charger controller shutdown failed", e)
         }
         serviceScope.cancel()
     }
