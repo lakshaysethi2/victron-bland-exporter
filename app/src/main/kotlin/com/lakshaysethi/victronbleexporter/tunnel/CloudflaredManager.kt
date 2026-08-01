@@ -11,6 +11,7 @@ import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 import com.lakshaysethi.victronbleexporter.AppState
 
@@ -71,6 +72,8 @@ class CloudflaredManager(private val context: Context) {
     private var lastEnvOverrides: Map<String, String>? = null
     private var lastBinary: File? = null
     @Volatile private var manualStopRequested = false
+    private val runStateLock = Any()
+    private val runGeneration = AtomicLong(0)
 
     init {
         // Self-register so the UI can build a debug log without the service wiring it up.
@@ -131,10 +134,13 @@ class CloudflaredManager(private val context: Context) {
             env["TMP"] = tmpDir
             env["TEMP"] = tmpDir
 
-            manualStopRequested = false
-            lastExitCode = null
-            lastRunStartedAtMs = System.currentTimeMillis()
-            lastRunDurationMs = null
+            val generation = synchronized(runStateLock) {
+                manualStopRequested = false
+                lastExitCode = null
+                lastRunStartedAtMs = System.currentTimeMillis()
+                lastRunDurationMs = null
+                runGeneration.incrementAndGet()
+            }
             lastCommand = fullCommand
             lastEnvOverrides = mapOf(
                 "HOME" to homeDir,
@@ -156,6 +162,7 @@ class CloudflaredManager(private val context: Context) {
                         val text = line ?: continue
                         Log.d(TAG, "cloudflared: $text")
                         synchronized(logBufferLock) { TunnelLog.append(logBuffer, text) }
+                        if (generation != runGeneration.get()) continue
                         if (text.contains("Registered tunnel connection")) {
                             setStatus("Connected", onStatus)
                         } else if (text.contains("https://") && tunnelUrl == null) {
@@ -186,16 +193,20 @@ class CloudflaredManager(private val context: Context) {
                 } catch (e: InterruptedException) {
                     Thread.currentThread().interrupt()
                 }
-                lastExitCode = exit
-                lastRunDurationMs = System.currentTimeMillis() - (lastRunStartedAtMs ?: System.currentTimeMillis())
-                val lastLine = synchronized(logBufferLock) { TunnelLog.lastLine(logBuffer) }
-                val finalStatus = if (manualStopRequested) {
-                    "Stopped"
-                } else {
-                    TunnelLog.exitStatus(exit, lastLine)
+                synchronized(runStateLock) {
+                    if (generation != runGeneration.get()) return@synchronized
+                    lastExitCode = exit
+                    val durationMs = System.currentTimeMillis() - (lastRunStartedAtMs ?: System.currentTimeMillis())
+                    lastRunDurationMs = durationMs
+                    val lastLine = synchronized(logBufferLock) { TunnelLog.lastLine(logBuffer) }
+                    val finalStatus = if (manualStopRequested) {
+                        "Stopped"
+                    } else {
+                        TunnelLog.exitStatus(exit, lastLine)
+                    }
+                    setStatus(finalStatus, onStatus)
+                    Log.w(TAG, "cloudflared exited with code $exit after ${durationMs}ms")
                 }
-                setStatus(finalStatus, onStatus)
-                Log.w(TAG, "cloudflared exited with code $exit after ${lastRunDurationMs}ms")
             }.start()
 
         } catch (e: IOException) {
