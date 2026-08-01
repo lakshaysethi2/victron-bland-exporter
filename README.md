@@ -9,6 +9,7 @@ Android app that turns Victron Instant Readout BLE devices (MPPT, SmartShunt, et
 - AES-128-CTR decryption using the key from VictronConnect
 - Prometheus `/metrics` endpoint (OpenMetrics format)
 - Embedded `cloudflared` for secure public exposure via Named Tunnel (or Quick Tunnel)
+- One-tap **Share Debug Logs** / **Copy Log** for cloudflared (last 200 output lines, exit code, tunnel state, device info) with clipboard fallback
 - Foreground service with persistent notification
 - Multi-device support (Solar Charger / MPPT + Battery Monitor / SmartShunt)
 - Jetpack Compose UI
@@ -54,7 +55,7 @@ Android Foreground Service
 ├── BLE Scanner (BluetoothLeScanner + ScanFilter for 0x02E1)
 ├── VictronParser (AES-CTR + BitReader + device parsers)
 ├── MetricsStore (thread-safe latest values)
-├── Ktor / NanoHTTPD Prometheus Server (:9100/metrics)
+├── Ktor / NanoHTTPD Prometheus Server (:5338/metrics)
 └── cloudflared (bundled) → Named Tunnel
 ```
 
@@ -101,8 +102,9 @@ And `AndroidManifest.xml`:
 At runtime the service will:
 ```kotlin
 val cloudflared = File(applicationInfo.nativeLibraryDir, "libcloudflared.so")
-ProcessBuilder(cloudflared.absolutePath, "tunnel", "run", "--token", yourToken)
+ProcessBuilder(cloudflared.absolutePath, "--no-autoupdate", "tunnel", "run", "--token", yourToken)
 ```
+`--no-autoupdate` is always passed (cloudflared's auto-updater cannot rewrite its own binary inside the read-only `nativeLibraryDir`, a known quick-tunnel exit cause), and `HOME`/`TMPDIR`/`TMP`/`TEMP` are pointed at app-private writable dirs (`filesDir`/`cacheDir`). Quick tunnels run `--no-autoupdate tunnel --url http://localhost:5338` against the Prometheus exporter port.
 
 ## Permissions (all requested in code)
 
