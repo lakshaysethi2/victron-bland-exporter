@@ -67,6 +67,8 @@ class MainActivity : ComponentActivity() {
                     onStartTunnel = { token -> startTunnel(token) },
                     onQuickTunnel = { startQuickTunnel() },
                     onStopTunnel = { stopTunnel() },
+                    onShareDebugLogs = { shareDebugLogs() },
+                    onCopyDebugLog = { copyDebugLog() },
                     onDisableBatteryOpt = { requestDisableBatteryOptimizations() }
                 )
             }
@@ -214,6 +216,45 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun shareDebugLogs() {
+        val log = AppState.cloudflaredManager?.buildDebugLog()
+        if (log == null) {
+            Toast.makeText(this, "Tunnel service not started yet", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Victron cloudflared debug log")
+            putExtra(Intent.EXTRA_TEXT, log)
+        }
+        try {
+            startActivity(Intent.createChooser(sendIntent, "Share debug logs"))
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Share sheet unavailable", e)
+            copyTextToClipboard(log)
+            Toast.makeText(this, "Share unavailable — debug log copied to clipboard", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun copyDebugLog() {
+        val log = AppState.cloudflaredManager?.buildDebugLog()
+        if (log == null) {
+            Toast.makeText(this, "Tunnel service not started yet", Toast.LENGTH_SHORT).show()
+            return
+        }
+        copyTextToClipboard(log)
+        Toast.makeText(this, "Debug log copied to clipboard", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun copyTextToClipboard(text: String) {
+        try {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("victron-debug-log", text))
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Clipboard copy failed", e)
+        }
+    }
+
     @SuppressLint("BatteryLife")
     private fun requestDisableBatteryOptimizations() {
         try {
@@ -242,6 +283,8 @@ fun VictronBleExporterScreen(
     onStartTunnel: (String) -> Unit,
     onQuickTunnel: () -> Unit,
     onStopTunnel: () -> Unit,
+    onShareDebugLogs: () -> Unit,
+    onCopyDebugLog: () -> Unit,
     onDisableBatteryOpt: () -> Unit
 ) {
     val context = LocalContext.current
@@ -779,6 +822,15 @@ fun VictronBleExporterScreen(
         Spacer(Modifier.height(8.dp))
         Button(onClick = onStopTunnel, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
             Text("Disable/Stop Cloudflared")
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Button(onClick = onShareDebugLogs, modifier = Modifier.weight(1f)) {
+                Text("Share Debug Logs")
+            }
+            OutlinedButton(onClick = onCopyDebugLog, modifier = Modifier.weight(1f)) {
+                Text("Copy Log")
+            }
         }
 
         Spacer(Modifier.height(32.dp))
