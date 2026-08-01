@@ -152,6 +152,72 @@ class CloudflaredManager(
     }
 
     /**
+     * Publish a status string only while [generation] is still current, under the
+     * run-state lock, so a cancelled background start cannot clobber the Stopped
+     * status (or a newer generation's status) already published by stop()/start().
+     */
+    private fun publishStatus(
+        value: String,
+        generation: Long,
+        onStatus: (String) -> Unit,
+    ) {
+        synchronized(runStateLock) {
+            if (generation != runGeneration.get() || manualStopRequested) return
+            setStatus(value, onStatus)
+        }
+    }
+
+    /**
+     * Publish the discovered Quick Tunnel URL + Connected status only while
+     * [generation] is current, under the lock, so stop() clearing tunnelUrl cannot
+     * be undone by a stale reader thread.
+     */
+    private fun publishTunnelUrl(
+        url: String,
+        generation: Long,
+        onStatus: (String) -> Unit,
+    ) {
+        synchronized(runStateLock) {
+            if (generation != runGeneration.get() || manualStopRequested) return
+            tunnelUrl = url
+            AppState.tunnelUrl = url
+            setStatus("Connected", onStatus)
+        }
+    }
+
+    /**
+     * Handle a start that failed without a live adopted process: tear down any
+     * child spawned, clear the process network binding this generation established
+     * (only when the generation is still current), and surface the failure status.
+     */
+    private fun onFailedStart(
+        started: Process?,
+        generation: Long,
+        onStatus: (String) -> Unit,
+        message: String,
+    ) {
+        synchronized(runStateLock) {
+            if (generation != runGeneration.get() || manualStopRequested) return
+            if (started != null && process === started) {
+                process = null
+            }
+            if (started != null) {
+                try {
+                    started.destroyForcibly()
+                } catch (e: Exception) {
+                    Log.w(TAG, "destroyForcibly after failed start", e)
+                }
+            }
+            try {
+                networkController?.clearProcessNetworkBinding()
+            } catch (e: Exception) {
+                Log.w(TAG, "clearProcessNetworkBinding after failed start", e)
+            }
+        }
+        publishStatus(message, generation, onStatus)
+    }
+
+    /**
      * Bind + DNS preflight + ProcessBuilder.start. MUST run off the main thread —
      * InetAddress DNS throws NetworkOnMainThreadException on API 36+ strict mode paths
      * and a hanging resolver would ANR the service.
@@ -169,7 +235,7 @@ class CloudflaredManager(
                 "cloudflared bundled for arm64 only — unsupported device ABI (${Build.SUPPORTED_ABIS.joinToString()})"
             }
             Log.e(TAG, reason)
-            setStatus(reason, onStatus)
+            publishStatus(reason, generation, onStatus)
             return
         }
 
@@ -195,7 +261,7 @@ class CloudflaredManager(
         if (!prep.canStart) {
             val reason = prep.blockedStatus ?: "No working network/DNS"
             Log.e(TAG, "Refusing to start cloudflared: $reason")
-            setStatus(reason, onStatus)
+            publishStatus(reason, generation, onStatus)
             return
         }
 
@@ -208,6 +274,7 @@ class CloudflaredManager(
         onStatus: (String) -> Unit,
         generation: Long,
     ) {
+        var started: Process? = null
         try {
             // nativeLibraryDir is extracted with exec permission; no chmod needed.
             val fullCommand = listOf(bin.absolutePath) + args
@@ -246,6 +313,7 @@ class CloudflaredManager(
             )
             lastBinary = bin
             val proc = pb.start()
+            started = proc
             // stop()/a newer enqueueStart() may have bumped generation while ProcessBuilder
             // was starting; never publish a cancelled child into process.
             val adopted = synchronized(runStateLock) {
@@ -267,7 +335,7 @@ class CloudflaredManager(
                 return
             }
 
-            setStatus("Starting tunnel...", onStatus)
+            publishStatus("Starting tunnel...", generation, onStatus)
 
             val readerThread = Thread {
                 try {
@@ -279,18 +347,16 @@ class CloudflaredManager(
                         synchronized(logBufferLock) { TunnelLog.append(logBuffer, text) }
                         if (generation != runGeneration.get()) continue
                         if (text.contains("Registered tunnel connection")) {
-                            setStatus("Connected", onStatus)
+                            publishStatus("Connected", generation, onStatus)
                         } else if (text.contains("https://") && tunnelUrl == null) {
                             val match = Regex("https://[a-z0-9-]+\\.trycloudflare\\.com").find(text)
                             if (match != null) {
-                                tunnelUrl = match.value
-                                AppState.tunnelUrl = tunnelUrl
-                                setStatus("Connected", onStatus)
+                                publishTunnelUrl(match.value, generation, onStatus)
                             }
                         } else if (text.contains("error", ignoreCase = true)) {
                             // Only update status if we aren't connected
                             if (status != "Connected") {
-                                setStatus("cloudflared error: ${text.trim().take(200)}", onStatus)
+                                publishStatus("cloudflared error: ${text.trim().take(200)}", generation, onStatus)
                             }
                         }
                     }
@@ -335,10 +401,20 @@ class CloudflaredManager(
             } else {
                 ""
             }
-            setStatus("Failed to start cloudflared: ${e.message ?: e.javaClass.simpleName}$hint", onStatus)
+            onFailedStart(
+                started,
+                generation,
+                onStatus,
+                "Failed to start cloudflared: ${e.message ?: e.javaClass.simpleName}$hint",
+            )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start cloudflared", e)
-            setStatus("Failed to start cloudflared: ${e.message ?: e.javaClass.simpleName}", onStatus)
+            onFailedStart(
+                started,
+                generation,
+                onStatus,
+                "Failed to start cloudflared: ${e.message ?: e.javaClass.simpleName}",
+            )
         }
     }
 
@@ -359,14 +435,21 @@ class CloudflaredManager(
                 prepareAndRun(args, onStatus, generation)
             } catch (e: Exception) {
                 Log.e(TAG, "Background tunnel start failed", e)
-                if (generation == runGeneration.get()) {
-                    val msg = if (isNetworkOnMainThreadException(e)) {
-                        "BUG: network/DNS on main thread (NetworkOnMainThreadException)"
-                    } else {
-                        "Failed to start cloudflared: ${e.message ?: e.javaClass.simpleName}"
-                    }
-                    setStatus(msg, onStatus)
+                val msg = if (isNetworkOnMainThreadException(e)) {
+                    "BUG: network/DNS on main thread (NetworkOnMainThreadException)"
+                } else {
+                    "Failed to start cloudflared: ${e.message ?: e.javaClass.simpleName}"
                 }
+                synchronized(runStateLock) {
+                    if (generation == runGeneration.get() && !manualStopRequested) {
+                        try {
+                            networkController?.clearProcessNetworkBinding()
+                        } catch (e2: Exception) {
+                            Log.w(TAG, "clearProcessNetworkBinding after background start failure", e2)
+                        }
+                    }
+                }
+                publishStatus(msg, generation, onStatus)
             }
         }
     }
