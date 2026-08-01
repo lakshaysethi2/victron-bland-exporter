@@ -22,8 +22,9 @@ internal const val CLOUDFLARE_SELFTEST_HOST = "cloudflare.com"
 
 /**
  * Snapshot of the bind + DNS preflight that must succeed before we exec cloudflared.
- * Native Go DNS resolves via localhost netd ([::1]:53); without bindProcessToNetwork
- * Android refuses those queries even when the app process itself can resolve hosts.
+ * The bind routes the parent's (and the exec'd child's) sockets over the active
+ * network — correct + harmless — but it does not cover the child's DNS; the bundled
+ * cgo/NDK binary resolves via bionic getaddrinfo → netd like the app itself.
  */
 internal data class NetworkPrepResult(
     val canStart: Boolean,
@@ -65,8 +66,10 @@ internal interface ProcessNetworkController {
     fun activeNetworkLabel(): String?
 
     /**
-     * Bind this process to the active default network so native subprocess DNS
-     * (cloudflared/Go → [::1]:53) is accepted by Android netd.
+     * Bind this process to the active default network so sockets created after
+     * the bind (including the exec'd cloudflared child's) route over it. This
+     * does NOT cover the child's DNS — that is the cgo/NDK binary's job (bionic
+     * getaddrinfo → netd).
      * @return false when there is no active network to bind to
      */
     fun bindProcessToActiveNetwork(): Boolean
@@ -149,8 +152,8 @@ internal fun isNetworkOnMainThreadException(e: Throwable): Boolean {
  * Pure-ish prep helper: bind the process to the active network, then resolve
  * [dnsHost] via the supplied resolver (defaults to [InetAddress.getAllByName]).
  *
- * Order matters — bind first so the preflight query (and later cloudflared) use
- * the active network's DNS path rather than an unbound localhost stub.
+ * Order matters — bind first so the preflight query uses the active network's
+ * DNS path and the exec'd cloudflared's sockets route over the active network.
  *
  * On DNS preflight failure after a successful bind, the process network binding
  * is cleared so the app is not left pinned to a network after a refused start.

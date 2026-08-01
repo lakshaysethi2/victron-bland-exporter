@@ -241,9 +241,10 @@ class CloudflaredManager(
         }
 
         // Bind this process to the active network BEFORE exec'ing cloudflared.
-        // Go's resolver talks to Android netd at [::1]:53; without the bind the
-        // stub refuses the query (connection refused) even though the app itself
-        // can resolve hosts. Preflight DNS via Android APIs surfaces a clear
+        // The bind is correct + harmless for the parent (its sockets, including
+        // the child's, route over the active network) but it does NOT cover the
+        // child's DNS — that is the bundled cgo/NDK binary's job (bionic
+        // getaddrinfo → netd). Preflight DNS via Android APIs surfaces a clear
         // "no working network/DNS" status instead of a cryptic cloudflared exit.
         val prep = TunnelNetworkPrep.prepare(networkController)
         lastNetworkPrep = prep

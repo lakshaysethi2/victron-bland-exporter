@@ -77,6 +77,7 @@ app/
 │   │   │   └── PrometheusExporter.kt
 │   │   ├── tunnel/
 │   │   │   ├── CloudflaredManager.kt
+│   │   │   ├── TunnelBinaryInspector.kt
 │   │   │   └── TunnelNetworkPrep.kt
 │   │   └── ui/...
 │   ├── jniLibs/arm64-v8a/
