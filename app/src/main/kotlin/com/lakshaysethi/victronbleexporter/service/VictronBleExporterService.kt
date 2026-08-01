@@ -173,6 +173,7 @@ class VictronBleExporterService : Service() {
         if (settings.manualOverrideUntil in 1..now) {
             chargerScheduleStore.clearOverride()
             AppState.chargerOverrideUntil = 0L
+            lastScheduledMode = null
             ChargerDebugLog.append("Manual override ended — schedule resumes")
         }
         if (!settings.scheduleEnabled) return

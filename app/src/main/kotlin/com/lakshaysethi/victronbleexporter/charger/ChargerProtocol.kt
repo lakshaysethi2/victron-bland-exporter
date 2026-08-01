@@ -152,6 +152,13 @@ object ChargerProtocol {
 
     fun isChargerOn(mode: Int?): Boolean = mode == MODE_CHARGER_ON
 
+    /** True when [mode] satisfies a request to set the charger to [on] (1 = on, 0/4 = off). */
+    fun modeMatchesRequest(mode: Int?, on: Boolean): Boolean = when (mode) {
+        MODE_CHARGER_ON -> on
+        MODE_CHARGER_OFF, MODE_CHARGER_OFF_LEGACY -> !on
+        else -> false
+    }
+
     fun chargerModeText(mode: Int?): String = when (mode) {
         MODE_CHARGER_ON -> "ON"
         MODE_CHARGER_OFF, MODE_CHARGER_OFF_LEGACY -> "OFF"

@@ -94,5 +94,17 @@ class ChargerProtocolTest {
         assertTrue(flat.contains("f941"))
     }
 
+    @Test
+    fun `readback must match the requested mode`() {
+        assertTrue(ChargerProtocol.modeMatchesRequest(1, true))
+        assertFalse(ChargerProtocol.modeMatchesRequest(1, false))
+        assertTrue(ChargerProtocol.modeMatchesRequest(4, false))
+        assertTrue(ChargerProtocol.modeMatchesRequest(0, false))
+        assertFalse(ChargerProtocol.modeMatchesRequest(4, true))
+        assertFalse(ChargerProtocol.modeMatchesRequest(0, true))
+        assertFalse(ChargerProtocol.modeMatchesRequest(null, false))
+        assertFalse(ChargerProtocol.modeMatchesRequest(2, false))
+    }
+
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 }

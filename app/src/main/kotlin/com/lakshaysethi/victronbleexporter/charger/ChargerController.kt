@@ -72,11 +72,22 @@ class ChargerController(private val context: Context) {
     /** Enable (on = true) or disable the charger on the device. */
     suspend fun setMode(mac: String, on: Boolean): ChargerOpResult = opMutex.withLock {
         withContext(Dispatchers.IO) {
-            runSession(mac, if (on) "enable" else "disable") { session ->
+            val result = runSession(mac, if (on) "enable" else "disable") { session ->
                 session.writeMode(on)
+                session.rearmModeReadback()
                 session.requestModeReadback()
             }
+            result.verifyWriteSucceeded(on)
         }
+    }
+
+    /** A set-mode operation only succeeded when the readback matches the requested state. */
+    private fun ChargerOpResult.verifyWriteSucceeded(on: Boolean): ChargerOpResult {
+        if (!success || ChargerProtocol.modeMatchesRequest(mode, on)) return this
+        val readback = mode?.let { "${ChargerProtocol.chargerModeText(it)} (mode=$it)" } ?: "none"
+        val message = "Readback ($readback) does not match requested ${if (on) "ON" else "OFF"} — write may not have taken effect"
+        ChargerDebugLog.append("ERROR: $message")
+        return ChargerOpResult(success = false, mode = mode, message = message)
     }
 
     /** Release the BLE handler thread (call from the service's onDestroy). */
@@ -124,11 +135,12 @@ class ChargerController(private val context: Context) {
 
         private val connectedLatch = CountDownLatch(1)
         private val servicesLatch = CountDownLatch(1)
-        private val modeLatch = CountDownLatch(1)
 
         private val gattRef = AtomicReference<BluetoothGatt?>()
         private val connected = AtomicInteger(0) // 0 unknown, 1 ok, 2 failed
-        private val modeValue = AtomicInteger(-1)
+        private val modeMonitor = Object()
+        private var modeValue = -1
+        private var readbackClosed = false
 
         private val registers = LinkedHashMap<Int, ByteArray>()
         private val registersLock = Any()
@@ -216,7 +228,10 @@ class ChargerController(private val context: Context) {
                         connected.compareAndSet(0, 2)
                         connectedLatch.countDown()
                         servicesLatch.countDown()
-                        modeLatch.countDown()
+                        synchronized(modeMonitor) {
+                            readbackClosed = true
+                            modeMonitor.notifyAll()
+                        }
                     }
                 }
             }
@@ -254,8 +269,10 @@ class ChargerController(private val context: Context) {
                 log("Notify reg 0x${registerId.toString(16).padStart(4, '0')} = ${raw.toHex()}")
             }
             ChargerProtocol.chargerModeOf(parsed)?.let { mode ->
-                modeValue.set(mode)
-                modeLatch.countDown()
+                synchronized(modeMonitor) {
+                    modeValue = mode
+                    modeMonitor.notifyAll()
+                }
                 log("Device mode readback: ${ChargerProtocol.chargerModeText(mode)} (mode=$mode)")
             }
         }
@@ -319,6 +336,10 @@ class ChargerController(private val context: Context) {
             writeFrames(listOf(ChargerProtocol.SINGLE_UUID to frame))
         }
 
+        fun rearmModeReadback() {
+            synchronized(modeMonitor) { modeValue = -1 }
+        }
+
         fun requestModeReadback() {
             log("Requesting device-mode readback")
             writeFrames(
@@ -330,14 +351,26 @@ class ChargerController(private val context: Context) {
         }
 
         fun awaitModeReadback(): Int? {
-            val seen = await(modeLatch, READBACK_TIMEOUT_MS)
-            if (!seen) {
-                val current = modeValue.get()
-                if (current >= 0) return current
+            val deadline = System.currentTimeMillis() + READBACK_TIMEOUT_MS
+            val mode: Int
+            synchronized(modeMonitor) {
+                while (modeValue < 0 && !readbackClosed) {
+                    val remaining = deadline - System.currentTimeMillis()
+                    if (remaining <= 0) break
+                    try {
+                        modeMonitor.wait(remaining)
+                    } catch (e: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        break
+                    }
+                }
+                mode = modeValue
+            }
+            if (mode < 0) {
                 error("no device-mode readback within ${READBACK_TIMEOUT_MS}ms (device may be out of range or busy in VictronConnect)")
                 return null
             }
-            return modeValue.get()
+            return mode
         }
 
         private fun writeFrames(frames: List<Pair<String, ByteArray>>) {
