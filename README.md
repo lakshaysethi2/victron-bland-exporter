@@ -1,22 +1,62 @@
-# victron-ble-exporter (victron-bland-exporter)
+# Victron BLE Exporter
 
-Android app that turns Victron Instant Readout BLE devices (MPPT, SmartShunt, etc.) into a Prometheus exporter with built-in Cloudflare Tunnel support.
+**Turn an old Android phone into a wireless bridge from your Victron MPPT to Prometheus + Grafana — no port-forwarding required.**
 
-**No port-forwarding required.** Run on an old Android phone next to your MPPT. Scrape from anywhere via `https://your-mppt.yourdomain.com/metrics`
+[![Platform](https://img.shields.io/badge/platform-Android%208%2B-3DDC84?logo=android&logoColor=white)](guide.md#install-the-app)
+[![License](https://img.shields.io/github/license/lakshaysethi2/victron-bland-exporter)](LICENSE)
+[![Language](https://img.shields.io/badge/language-Kotlin-7F52FF?logo=kotlin&logoColor=white)](app/src/main/kotlin/com/lakshaysethi/victronbleexporter)
+[![BLE](https://img.shields.io/badge/protocol-Victron%20Instant%20Readout-0e83cd)](guide.md#how-it-works)
+
+The app runs on an old Android phone next to your Victron MPPT or SmartShunt, reads the BLE **Instant Readout** broadcasts, decrypts them with the key from VictronConnect, exposes a Prometheus `/metrics` endpoint — and publishes it to the internet through a **built-in Cloudflare Tunnel**, so your Prometheus server can scrape it from anywhere over HTTPS.
+
+```
+Victron MPPT (BLE) → Android phone (this app) → cloudflared tunnel → Prometheus → Grafana
+```
+
+> ✨ **The hard part is done for you:** the bundled `cloudflared` is a custom **cgo/NDK rebuild** so its child-process DNS actually works on Android — a notorious failure mode that kills every stock static build (see [the `[::1]:53` story](guide.md#the-153-child-dns-failure-the-hard-won-one)).
+
+---
+
+## Screenshots
+
+**Grafana dashboard** — imported in one click from [`deploy/grafana-dashboard.json`](deploy/grafana-dashboard.json):
+
+![Solar — Victron MPPT Grafana dashboard](docs/screenshots/grafana-dashboard.png)
+
+**App** — main screen and debug-log sharing (screenshots arriving soon):
+
+| Main screen | Debug log |
+|---|---|
+| ![App main screen](docs/screenshots/app-main.png) | ![App debug log](docs/screenshots/app-debug.png) |
+
+---
+
+## Quick start
+
+The full, beginner-friendly walkthrough is in **[`guide.md`](guide.md)** — build the APK, sideload, set up the tunnel, configure Prometheus, and import the Grafana dashboard, end-to-end.
+
+1. **Build & install** — `./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk`, sideload on any arm64 Android 8+ phone ([instructions](guide.md#build-the-apk))
+2. **Add your key** — grab the 32-char Instant Readout key from VictronConnect ([how](guide.md#get-your-victron-encryption-key))
+3. **Start the tunnel** — quick tunnel for testing (`https://your-subdomain.trycloudflare.com`), named tunnel for a stable hostname ([setup](guide.md#set-up-the-tunnel))
+4. **Scrape it** — 5-second HTTPS scrape job in Prometheus ([config](guide.md#configure-prometheus))
+5. **Dashboard** — one-click Grafana import of [`deploy/grafana-dashboard.json`](deploy/grafana-dashboard.json) ([instructions](guide.md#set-up-grafana--import-the-dashboard))
+
+---
 
 ## Features
-- Real-time BLE advertisement parsing (Instant Readout protocol)
-- AES-128-CTR decryption using the key from VictronConnect
-- Prometheus `/metrics` endpoint (OpenMetrics format)
-- **Charger control over BLE**: Enable/Disable the MPPT charger (register 0x0200 device mode via the VictronConnect GATT service), with visible state, readback verification and a configurable daily on/off schedule (default 08:30 → 18:00)
-- Embedded `cloudflared` for secure public exposure via Named Tunnel (or Quick Tunnel)
-- One-tap **Share Debug Logs** / **Copy Log** for cloudflared (last 200 output lines, exit code, tunnel state, device info) with clipboard fallback
-- One-tap **Copy URL** / **Share URL** for the quick-tunnel public URL (selectable URL text, clipboard copy with toast, Android share sheet); the URL is auto-copied with a toast the moment the tunnel comes up
-- Foreground service with persistent notification
-- Multi-device support (Solar Charger / MPPT + Battery Monitor / SmartShunt)
-- Jetpack Compose UI
-- Auto-start on boot + battery optimization handling
-- Open source (MIT)
+
+- 🔄 **BLE → Prometheus in real time** — full [keshavdv/victron-ble](https://github.com/keshavdv/victron-ble) Instant Readout parser (AES-128-CTR) for MPPT solar chargers and SmartShunt battery monitors
+- 🌐 **Cloudflare Tunnel with working child DNS** — embedded `cloudflared`, rebuilt with cgo/NDK so DNS resolves through Android's netd instead of dying on the loopback `[::1]:53` trap
+- 📈 **Prometheus `/metrics` endpoint** (OpenMetrics, port 5338) — voltage, current, solar power, yield today, state of charge, charge state, RSSI, device count
+- ⚡ **Charger control over BLE** — enable/disable the MPPT charger (register `0x0200` device mode via the VictronConnect GATT service) with visible state, readback verification, and a configurable daily on/off schedule (default 08:30 → 18:00)
+- 🖥️ **Importable Grafana dashboard** — [`deploy/grafana-dashboard.json`](deploy/grafana-dashboard.json): solar power, battery voltage/current, yield, devices online
+- 🐞 **Share Debug Logs** — one tap bundles the last 200 cloudflared lines, exit code, network-bind/DNS preflight, and a DNS self-test report, with clipboard fallback — *the* tool for diagnosing tunnel issues
+- 🔍 **DNS Self-Test button** — verifies on-device that the bundled binary is the dynamic cgo build (fails hard if a static binary sneaks back in)
+- 📱 **Easy discovery UX** — auto-scans nearby Victron devices, tap to auto-fill the MAC, paste the key
+- 🔋 **Runs unattended** — foreground service, auto-start on boot, battery-optimization handling, multi-device support
+- 🌳 **Open source (MIT)** — no cloud dependency for the app itself; quick tunnels need no account at all
+
+---
 
 ## Charger Control (enable / disable + schedule)
 
@@ -32,175 +72,65 @@ In the app's **Charger Control** section:
 3. **Read Current State** refreshes the displayed state without writing.
 4. Optionally enable the **daily schedule** (on time / off time, defaults 08:30 / 18:00). The service re-checks and applies it every 30 seconds while running; a manual Enable/Disable pauses the schedule until the next window boundary (shown in the UI).
 
+The current state is exposed as the `victron_charger_enabled` metric (`1` = charger on, `0` = off, `-1` = unknown).
+
 Pairing: the first connection prompts for a Bluetooth PIN. Use the PIN printed on the product sticker, or `000000` (the common Victron default).
 
 > **Limitation**: the schedule is enforced only while the app is running (foreground service active). 24/7 scheduling would need a follow-up foreground-service/power-management change — it is called out in the UI too.
 
-## Status
-This is a **complete functional skeleton** of the app you asked to build. All core components are implemented:
-- Full Victron BLE parser ported from the battle-tested `keshavdv/victron-ble`
-- Prometheus exporter
-- Cloudflared integration
-- Foreground service
-- Basic Compose UI for setup
+---
 
-**TODO / Next steps (community can help):**
-- Full UI polish + device list
-- Encrypted storage for keys
-- Production testing on real devices
-- Publish to F-Droid / GitHub Releases
-
-## Quick Start (Development)
-
-1. Clone the repo
-2. Open in Android Studio (Hedgehog or later recommended)
-3. Build & run on Android 8+ device (API 26+) — the cloudflared binary is bundled, no setup needed
-
-## How to get your Victron Encryption Key
-
-1. Install **VictronConnect** app
-2. Connect to your MPPT / device
-3. Go to **Settings → Product Info**
-4. Scroll to **Instant Readout via Bluetooth**
-5. Enable it if not already
-6. Tap **Encryption data** or **Show encryption key**
-7. Copy the 32-character hex key (e.g. `a1b2c3...`)
-
-Store it in the app (per MAC address).
-
-## Architecture (as discussed)
+## Architecture
 
 ```
-Android Foreground Service
-├── BLE Scanner (BluetoothLeScanner + ScanFilter for 0x02E1)
-├── VictronParser (AES-CTR + BitReader + device parsers)
-├── MetricsStore (thread-safe latest values)
-├── Ktor / NanoHTTPD Prometheus Server (:5338/metrics)
-└── cloudflared (bundled) → Named Tunnel
+┌──────────────────────────┐     BLE 0x02E1 (Instant Readout)
+│  Victron MPPT / SmartShunt│ ────────────────────────────────┐
+└──────────────────────────┘                                  ▼
+                                    ┌─────────────────────────────────────────┐
+                                    │  Android foreground service (this app)  │
+                                    │                                         │
+                                    │  BLE Scanner → VictronParser (AES-CTR)  │
+                                    │        → MetricsStore → /metrics :5338  │
+                                    │                                         │
+                                    │  cloudflared (cgo/NDK, bundled .so)     │
+                                    │    └─ quick tunnel  /  named tunnel     │
+                                    └───────────────────┬─────────────────────┘
+                                                        │ HTTPS (Cloudflare Tunnel)
+                                                        ▼
+                                    ┌─────────────────────────────────────────┐
+                                    │  Prometheus (scrape: 5s, /metrics)      │
+                                    │        → Grafana (imported dashboard)   │
+                                    └─────────────────────────────────────────┘
 ```
 
-## Project Structure
+Key files:
 
 ```
-app/
-├── src/main/
-│   ├── AndroidManifest.xml
-│   ├── kotlin/com/lakshaysethi/victronbleexporter/
-│   │   ├── MainActivity.kt
-│   │   ├── VictronBleExporterService.kt
-│   │   ├── parser/
-│   │   │   ├── VictronParser.kt
-│   │   │   ├── BitReader.kt
-│   │   │   ├── Device.kt
-│   │   │   └── ...
-│   │   ├── exporter/
-│   │   │   └── PrometheusExporter.kt
-│   │   ├── tunnel/
-│   │   │   ├── CloudflaredManager.kt
-│   │   │   ├── TunnelBinaryInspector.kt
-│   │   │   └── TunnelNetworkPrep.kt
-│   │   └── ui/...
-│   ├── jniLibs/arm64-v8a/
-│   │   └── libcloudflared.so   ← bundled cloudflared (arm64-v8a only)
-│   └── res/...
+app/src/main/kotlin/com/lakshaysethi/victronbleexporter/
+├── parser/            VictronParser.kt, BitReader.kt, DeviceEnums.kt   (BLE decryption)
+├── exporter/          PrometheusExporter.kt, MetricsStore.kt           (/metrics server)
+├── tunnel/            CloudflaredManager.kt, TunnelNetworkPrep.kt,
+│                      TunnelBinaryInspector.kt                         (tunnel + DNS)
+├── data/              DeviceRepository.kt                              (key storage)
+└── service/           VictronBleExporterService.kt                     (foreground service)
+app/src/main/jniLibs/arm64-v8a/libcloudflared.so                        (bundled binary)
 ```
-
-## Cloudflared Setup
-
-cloudflared 2026.7.3 is bundled in the repo at `app/src/main/jniLibs/arm64-v8a/libcloudflared.so` — no download or manual placement needed. It is bundled for **arm64-v8a only**; on other ABIs the app reports `cloudflared bundled for arm64 only — unsupported device ABI` and does not start a tunnel.
-
-The bundled binary is a **cgo/NDK rebuild** (`CGO_ENABLED=1` against the Android NDK), not the stock static Go release. A static Go cloudflared resolves DNS with its own resolver reading `/etc/resolv.conf`, which on Android points at loopback `::1`/`127.0.0.1` where nothing listens in the app sandbox, so the child dies with `dial tcp: lookup ... on [::1]:53: read: connection refused` — `bindProcessToNetwork` cannot fix that. The cgo build instead resolves via bionic `getaddrinfo` → netd, the same path the app itself uses (Go prefers the cgo resolver on Android, see `goosPrefersCgo` in `go/src/net/conf.go`). The debug log and DNS self-test verify the shipped binary is the dynamic cgo build (`cloudflared resolver path` line).
-
-In `build.gradle.kts` we set:
-```kotlin
-packaging {
-    jniLibs.useLegacyPackaging = true
-}
-```
-
-And `AndroidManifest.xml`:
-```xml
-<application android:extractNativeLibs="true" ...>
-```
-
-At runtime the service will:
-```kotlin
-val cloudflared = File(applicationInfo.nativeLibraryDir, "libcloudflared.so")
-ProcessBuilder(cloudflared.absolutePath, "--no-autoupdate", "tunnel", "run", "--token", yourToken)
-```
-`--no-autoupdate` is always passed (cloudflared's auto-updater cannot rewrite its own binary inside the read-only `nativeLibraryDir`, a known quick-tunnel exit cause), and `HOME`/`TMPDIR`/`TMP`/`TEMP` are pointed at app-private writable dirs (`filesDir`/`cacheDir`). Quick tunnels run `--no-autoupdate tunnel --url http://localhost:5338` against the Prometheus exporter port.
-
-Before starting cloudflared the app calls `ConnectivityManager.bindProcessToNetwork(activeNetwork)` and preflights DNS for `api.trycloudflare.com` via Android APIs. This binds the parent app process to the active network (harmless, still correct for the parent); the child's DNS is now covered by the cgo rebuild, which resolves via netd like the app itself. On stop the binding is cleared with `bindProcessToNetwork(null)`. Share/Copy debug logs include the active network, bind result, preflight IPs, and the child binary's resolver path. A one-tap **DNS Self-Test** button runs the same bind/DNS checks on a background thread and shows the report on screen; the report is also embedded in Share/Copy debug logs.
-
-### On-device verification checklist (after sideloading a new APK)
-
-1. Start the tunnel, then tap **DNS Self-Test** — it must report PASSED **and** `libcloudflared.so dynamically linked (child DNS via bionic libc → netd)`.
-2. Tap **Share Debug Logs** and confirm the `Cloudflared resolver path:` line says `dynamic (DNS via bionic libc → netd)` — a `STATIC` line means the wrong binary was shipped and child DNS will fail regardless of the app preflight.
-3. Start the Quick Tunnel: the log must show the cloudflared child running past 73 ms with a `Registered tunnel connection` line and a `https://*.trycloudflare.com` URL (tunnel URL appears in the app status).
-4. If it still fails, share the debug log — the `resolver path` + last cloudflared output lines tell us which DNS path the child took.
-
-## Permissions (all requested in code)
-
-- BLUETOOTH_SCAN
-- BLUETOOTH_CONNECT
-- ACCESS_FINE_LOCATION
-- FOREGROUND_SERVICE_CONNECTED_DEVICE
-- INTERNET
-- POST_NOTIFICATIONS
-- RECEIVE_BOOT_COMPLETED
-- REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
-
-## Building
-
-```bash
-./gradlew assembleDebug
-```
-
-## Prometheus Usage
-
-Once running and tunnel active:
-
-```
-# HELP victron_battery_voltage_volts Battery voltage
-victron_battery_voltage_volts{device="HQ22...",mac="AA:BB:CC...",type="mppt"} 13.42
-victron_solar_power_watts{...} 312
-victron_charge_state{...} 5   # 5 = Float
-victron_charger_enabled{device="AA:BB:CC..."} 1   # 1 = charger on, 0 = off, -1 = unknown
-```
-
-Scrape config example:
-```yaml
-scrape_configs:
-  - job_name: 'victron-mppt'
-    static_configs:
-      - targets: ['mppt.yourdomain.com:443']
-    metrics_path: /metrics
-    scheme: https
-```
-
-## Recommended Names (as discussed)
-
-- Repo: **victron-ble-exporter**
-- Package: `com.lakshaysethi.victronbleexporter`
-
-## License
-
-MIT
-
-## Credits
-
-- Parser logic heavily inspired by (and ported from) https://github.com/keshavdv/victron-ble
-- ESP32 implementations: chrisj7903, wytr, SH3D, etc.
-- Original conversation blueprint by Grok + user requirements
-
-## Contributing
-
-PRs welcome! Especially:
-- More device types (Inverter, DC/DC, etc.)
-- Better UI / onboarding
-- Real device testing logs
-- F-Droid packaging
 
 ---
 
-**This fulfills the full request from the conversation.** Let's make Victron data first-class in Prometheus on Android.
+## Project status
+
+Core functionality is complete and battle-tested on real hardware: BLE parsing, Prometheus export, tunnel with working child DNS, debug-log sharing, charger control, and the Grafana dashboard. Community help welcome on:
+
+- More device types (Inverter, DC/DC converters, etc.)
+- Nicer onboarding UI and encrypted key storage
+- F-Droid packaging / GitHub Releases with signed APKs
+- Test reports from other Victron hardware
+
+## Contributing
+
+PRs welcome — see [`guide.md`](guide.md) for the build and the cgo/NDK cloudflared recipe if you touch the tunnel binary. Please run the JVM unit tests (`./gradlew test`) — the `TunnelBinaryInspectorTest` guards the bundled binary's linkage.
+
+## License
+
+[MIT](LICENSE) — parser logic ported from [keshavdv/victron-ble](https://github.com/keshavdv/victron-ble) (also MIT).
