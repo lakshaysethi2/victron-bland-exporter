@@ -16,6 +16,7 @@ import java.util.Locale
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 import com.lakshaysethi.victronbleexporter.AppState
 
@@ -240,9 +241,10 @@ class CloudflaredManager(
         }
 
         // Bind this process to the active network BEFORE exec'ing cloudflared.
-        // Go's resolver talks to Android netd at [::1]:53; without the bind the
-        // stub refuses the query (connection refused) even though the app itself
-        // can resolve hosts. Preflight DNS via Android APIs surfaces a clear
+        // The bind is correct + harmless for the parent (its sockets, including
+        // the child's, route over the active network) but it does NOT cover the
+        // child's DNS — that is the bundled cgo/NDK binary's job (bionic
+        // getaddrinfo → netd). Preflight DNS via Android APIs surfaces a clear
         // "no working network/DNS" status instead of a cryptic cloudflared exit.
         val prep = TunnelNetworkPrep.prepare(networkController)
         lastNetworkPrep = prep
@@ -275,6 +277,7 @@ class CloudflaredManager(
         generation: Long,
     ) {
         var started: Process? = null
+        val lastOutputLine = AtomicReference<String?>()
         try {
             // nativeLibraryDir is extracted with exec permission; no chmod needed.
             val fullCommand = listOf(bin.absolutePath) + args
@@ -343,6 +346,7 @@ class CloudflaredManager(
                     var line: String?
                     while (reader.readLine().also { line = it } != null) {
                         val text = line ?: continue
+                        lastOutputLine.set(text)
                         Log.d(TAG, "cloudflared: $text")
                         synchronized(logBufferLock) { TunnelLog.append(logBuffer, text) }
                         if (generation != runGeneration.get()) continue
@@ -383,7 +387,7 @@ class CloudflaredManager(
                     lastExitCode = exit
                     val durationMs = System.currentTimeMillis() - (lastRunStartedAtMs ?: System.currentTimeMillis())
                     lastRunDurationMs = durationMs
-                    val lastLine = synchronized(logBufferLock) { TunnelLog.lastLine(logBuffer) }
+                    val lastLine = lastOutputLine.get()
                     val finalStatus = if (manualStopRequested) {
                         "Stopped"
                     } else {
@@ -486,7 +490,7 @@ class CloudflaredManager(
             lastDnsSelfTest = report
             AppState.dnsSelfTestResult = report.asText()
             // If a tunnel is not running, ensure we are not left bound from the test.
-            if (!isRunning()) {
+            if (AppState.cloudflaredManager === this && !isRunning()) {
                 try {
                     networkController?.clearProcessNetworkBinding()
                 } catch (e: Exception) {
@@ -557,6 +561,24 @@ class CloudflaredManager(
         sb.appendLine("Last exit code: ${lastExitCode?.toString() ?: "never exited"}")
         sb.appendLine("Last run duration: ${lastRunDurationMs?.let { "$it ms" } ?: "n/a"}")
         sb.appendLine("Cloudflared binary: ${lastBinary?.absolutePath ?: "n/a"} (${lastBinary?.length() ?: 0} bytes)")
+        // Which DNS resolver the child will use is decided by how the binary is
+        // linked. Surfaces "static pure-Go resolver" vs "cgo/bionic → netd" so a
+        // failing child run tells us which DNS path it took, not just that it failed.
+        val bin = lastBinary
+        if (bin != null) {
+            val info = try {
+                TunnelBinaryInspector.inspect(bin)
+            } catch (e: Exception) {
+                BinaryInfo(
+                    isElf = false, is64Bit = false, machine = null,
+                    isDynamic = false, interp = null,
+                    error = "inspector threw ${e.javaClass.simpleName}: ${e.message ?: ""}",
+                )
+            }
+            sb.appendLine("Cloudflared resolver path: ${info.summary()}")
+        } else {
+            sb.appendLine("Cloudflared resolver path: n/a (binary not found)")
+        }
         sb.appendLine()
         sb.appendLine("--- Network bind / DNS preflight ---")
         val prep = lastNetworkPrep
