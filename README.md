@@ -8,6 +8,7 @@ Android app that turns Victron Instant Readout BLE devices (MPPT, SmartShunt, et
 - Real-time BLE advertisement parsing (Instant Readout protocol)
 - AES-128-CTR decryption using the key from VictronConnect
 - Prometheus `/metrics` endpoint (OpenMetrics format)
+- **Charger control over BLE**: Enable/Disable the MPPT charger (register 0x0200 device mode via the VictronConnect GATT service), with visible state, readback verification and a configurable daily on/off schedule (default 08:30 → 18:00)
 - Embedded `cloudflared` for secure public exposure via Named Tunnel (or Quick Tunnel)
 - One-tap **Share Debug Logs** / **Copy Log** for cloudflared (last 200 output lines, exit code, tunnel state, device info) with clipboard fallback
 - One-tap **Copy URL** / **Share URL** for the quick-tunnel public URL (selectable URL text, clipboard copy with toast, Android share sheet); the URL is auto-copied with a toast the moment the tunnel comes up
@@ -16,6 +17,24 @@ Android app that turns Victron Instant Readout BLE devices (MPPT, SmartShunt, et
 - Jetpack Compose UI
 - Auto-start on boot + battery optimization handling
 - Open source (MIT)
+
+## Charger Control (enable / disable + schedule)
+
+The MPPT advertises live data through the read-only Instant Readout protocol, but **charger on/off is a write** to the proprietary VictronConnect GATT service:
+
+- Service `306b0001-b081-4037-83dc-e59fcc3cdfd0` (legacy SmartSolar protocol), characteristics `306b0002` (control), `306b0003` (commands), `306b0004` (bulk)
+- Register `0x0200` **device mode**: `1` = Charger on, `0` or `4` = Charger off (Victron "VE.Direct Protocol / BlueSolar and SmartSolar MPPT" Rev 18 + VictronConnect APK register metadata)
+- Read frame `05 03 81 19 02 00`, write frame `06 03 82 19 02 00 41 <mode>`, response `08 03 19 02 00 41 <mode>`
+
+In the app's **Charger Control** section:
+1. Enter the MPPT's MAC (auto-filled from your saved devices).
+2. Tap **Enable Charger** / **Disable Charger** — the app connects, runs the session handshake, writes the mode and reads the value back so you see the resulting device state (also in **Share/Copy Debug Logs** under "Charger control").
+3. **Read Current State** refreshes the displayed state without writing.
+4. Optionally enable the **daily schedule** (on time / off time, defaults 08:30 / 18:00). The service re-checks and applies it every 30 seconds while running; a manual Enable/Disable pauses the schedule until the next window boundary (shown in the UI).
+
+Pairing: the first connection prompts for a Bluetooth PIN. Use the PIN printed on the product sticker, or `000000` (the common Victron default).
+
+> **Limitation**: the schedule is enforced only while the app is running (foreground service active). 24/7 scheduling would need a follow-up foreground-service/power-management change — it is called out in the UI too.
 
 ## Status
 This is a **complete functional skeleton** of the app you asked to build. All core components are implemented:
@@ -146,6 +165,7 @@ Once running and tunnel active:
 victron_battery_voltage_volts{device="HQ22...",mac="AA:BB:CC...",type="mppt"} 13.42
 victron_solar_power_watts{...} 312
 victron_charge_state{...} 5   # 5 = Float
+victron_charger_enabled{device="AA:BB:CC..."} 1   # 1 = charger on, 0 = off, -1 = unknown
 ```
 
 Scrape config example:

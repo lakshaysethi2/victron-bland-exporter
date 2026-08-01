@@ -1,6 +1,8 @@
 package com.lakshaysethi.victronbleexporter.exporter
 
 import android.util.Log
+import com.lakshaysethi.victronbleexporter.AppState
+import com.lakshaysethi.victronbleexporter.charger.ChargerProtocol
 import com.lakshaysethi.victronbleexporter.parser.ParsedDevice
 import fi.iki.elonen.NanoHTTPD
 import java.io.IOException
@@ -32,6 +34,15 @@ class PrometheusExporter(
         sb.append("# HELP victron_devices_total Number of Victron devices discovered\n")
         sb.append("# TYPE victron_devices_total gauge\n")
         sb.append("victron_devices_total ${all.size}\n\n")
+
+        // Charger control state (1 = charger enabled, 0 = disabled, -1 = unknown)
+        val chargerMode = AppState.chargerMode
+        sb.append("# HELP victron_charger_enabled Whether the MPPT charger is enabled (1) or disabled (0)\n")
+        sb.append("# TYPE victron_charger_enabled gauge\n")
+        sb.append(
+            "victron_charger_enabled${AppState.chargerMac?.let { "{device=\"$it\"}" } ?: ""} " +
+                "${when (chargerMode) { ChargerProtocol.MODE_CHARGER_ON -> 1; ChargerProtocol.MODE_CHARGER_OFF, ChargerProtocol.MODE_CHARGER_OFF_LEGACY -> 0; else -> -1 }}\n\n"
+        )
 
         for ((mac, device) in all) {
             val labels = buildLabels(mac, device)
