@@ -92,7 +92,7 @@ class CloudflaredManager(
     // service/activity context here or the static field would leak it.
     private val appContext: Context = context.applicationContext
 
-    private var process: Process? = null
+    @Volatile private var process: Process? = null
     var tunnelUrl: String? = null
         private set
     var status: String = "Stopped"
@@ -246,7 +246,26 @@ class CloudflaredManager(
             )
             lastBinary = bin
             val proc = pb.start()
-            process = proc
+            // stop()/a newer enqueueStart() may have bumped generation while ProcessBuilder
+            // was starting; never publish a cancelled child into process.
+            val adopted = synchronized(runStateLock) {
+                if (generation != runGeneration.get() || manualStopRequested) {
+                    try {
+                        proc.destroyForcibly()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "destroyForcibly after cancelled start", e)
+                    }
+                    // Do not clearProcessNetworkBinding here: stop()/a newer start owns the
+                    // bind and may already have re-bound for the live generation.
+                    false
+                } else {
+                    process = proc
+                    true
+                }
+            }
+            if (!adopted) {
+                return
+            }
 
             setStatus("Starting tunnel...", onStatus)
 
@@ -291,6 +310,10 @@ class CloudflaredManager(
                 }
                 synchronized(runStateLock) {
                     if (generation != runGeneration.get()) return@synchronized
+                    // Only clear our own slot; a newer generation may already own process.
+                    if (process === proc) {
+                        process = null
+                    }
                     lastExitCode = exit
                     val durationMs = System.currentTimeMillis() - (lastRunStartedAtMs ?: System.currentTimeMillis())
                     lastRunDurationMs = durationMs
@@ -398,11 +421,17 @@ class CloudflaredManager(
 
     fun stop() {
         manualStopRequested = true
+        val toDestroy: Process?
         synchronized(runStateLock) {
             runGeneration.incrementAndGet()
+            toDestroy = process
+            process = null
         }
-        process?.destroyForcibly()
-        process = null
+        try {
+            toDestroy?.destroyForcibly()
+        } catch (e: Exception) {
+            Log.w(TAG, "destroyForcibly on stop failed", e)
+        }
         tunnelUrl = null
         AppState.tunnelUrl = null
         status = "Stopped"
