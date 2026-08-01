@@ -2,6 +2,7 @@ package com.lakshaysethi.victronbleexporter.service
 
 import android.os.PowerManager
 
+import android.annotation.SuppressLint
 import android.app.*
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
@@ -419,6 +420,7 @@ class VictronBleExporterService : Service() {
         }
     }
 
+    @SuppressLint("MissingPermission") // SecurityException is handled by the catch below; permission is requested at startup
     private fun stopBleScan() {
         try {
             bluetoothLeScanner?.stopScan(scanCallback)

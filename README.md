@@ -29,7 +29,7 @@ In the app's **Charger Control** section:
 1. Enter the MPPT's MAC (auto-filled from your saved devices).
 2. Tap **Enable Charger** / **Disable Charger** — the app connects, runs the session handshake, writes the mode and reads the value back so you see the resulting device state (also in **Share/Copy Debug Logs** under "Charger control").
 3. **Read Current State** refreshes the displayed state without writing.
-4. Optionally enable the **daily schedule** (on time / off time, defaults 08:30 / 18:00). The service applies it once per minute; a manual Enable/Disable pauses the schedule until the next window boundary (shown in the UI).
+4. Optionally enable the **daily schedule** (on time / off time, defaults 08:30 / 18:00). The service re-checks and applies it every 30 seconds while running; a manual Enable/Disable pauses the schedule until the next window boundary (shown in the UI).
 
 Pairing: the first connection prompts for a Bluetooth PIN. Use the PIN printed on the product sticker, or `000000` (the common Victron default).
 

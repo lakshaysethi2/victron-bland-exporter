@@ -190,11 +190,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun sendToService(intent: Intent) {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
+        // minSdk 26: startForegroundService is always available.
+        startForegroundService(intent)
     }
 
     private fun sendChargerSet(mac: String, enable: Boolean) {
@@ -380,7 +377,7 @@ fun VictronBleExporterScreen(
     var chargerBusy by remember { mutableStateOf(AppState.chargerBusy) }
     var chargerLastAction by remember { mutableStateOf(AppState.chargerLastAction) }
     var chargerLastError by remember { mutableStateOf(AppState.chargerLastError) }
-    var chargerOverrideUntil by remember { mutableStateOf(AppState.chargerOverrideUntil) }
+    var chargerOverrideUntil by remember { mutableLongStateOf(AppState.chargerOverrideUntil) }
     var scheduleEnabled by remember { mutableStateOf(false) }
     var enableTime by remember { mutableStateOf("08:30") }
     var disableTime by remember { mutableStateOf("18:00") }
@@ -460,7 +457,9 @@ fun VictronBleExporterScreen(
 
         onDispose {
             try {
-                if (scanCallback != null && scanner != null) {
+                if (scanCallback != null && scanner != null &&
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+                ) {
                     scanner.stopScan(scanCallback)
                 }
             } catch (e: Exception) {
