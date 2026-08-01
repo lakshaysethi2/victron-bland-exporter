@@ -557,6 +557,24 @@ class CloudflaredManager(
         sb.appendLine("Last exit code: ${lastExitCode?.toString() ?: "never exited"}")
         sb.appendLine("Last run duration: ${lastRunDurationMs?.let { "$it ms" } ?: "n/a"}")
         sb.appendLine("Cloudflared binary: ${lastBinary?.absolutePath ?: "n/a"} (${lastBinary?.length() ?: 0} bytes)")
+        // Which DNS resolver the child will use is decided by how the binary is
+        // linked. Surfaces "static pure-Go resolver" vs "cgo/bionic → netd" so a
+        // failing child run tells us which DNS path it took, not just that it failed.
+        val bin = lastBinary
+        if (bin != null) {
+            val info = try {
+                TunnelBinaryInspector.inspect(bin)
+            } catch (e: Exception) {
+                BinaryInfo(
+                    isElf = false, is64Bit = false, machine = null,
+                    isDynamic = false, interp = null,
+                    error = "inspector threw ${e.javaClass.simpleName}: ${e.message ?: ""}",
+                )
+            }
+            sb.appendLine("Cloudflared resolver path: ${info.summary()}")
+        } else {
+            sb.appendLine("Cloudflared resolver path: n/a (binary not found)")
+        }
         sb.appendLine()
         sb.appendLine("--- Network bind / DNS preflight ---")
         val prep = lastNetworkPrep

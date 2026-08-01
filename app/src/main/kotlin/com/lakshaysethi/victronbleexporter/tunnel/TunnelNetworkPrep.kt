@@ -293,6 +293,7 @@ internal object TunnelDnsSelfTest {
         resolve: (String) -> List<String> = TunnelNetworkPrep::defaultResolve,
         httpProbe: (String) -> String = ::defaultHttpProbe,
         nowMs: () -> Long = System::currentTimeMillis,
+        binaryInspector: (File) -> BinaryInfo = TunnelBinaryInspector::inspect,
     ): DnsSelfTestReport {
         val lines = mutableListOf<String>()
         var passed = true
@@ -389,6 +390,31 @@ internal object TunnelDnsSelfTest {
                 fail("libcloudflared.so present but suspiciously small ($size bytes)")
             } else {
                 ok("libcloudflared.so present ($size bytes)")
+            }
+            // The binary's linking style decides the child's DNS resolution path:
+            // static Go binaries read /etc/resolv.conf (loopback nameservers, no
+            // listener in the sandbox → connection refused); cgo binaries resolve
+            // via bionic getaddrinfo → netd like every native app. A static binary
+            // is a hard failure regardless of how the app itself resolves.
+            val info = try {
+                binaryInspector(binaryFile)
+            } catch (e: Exception) {
+                BinaryInfo(
+                    isElf = false,
+                    is64Bit = false,
+                    machine = null,
+                    isDynamic = false,
+                    interp = null,
+                    error = "inspector threw ${e.javaClass.simpleName}: ${e.message ?: ""}",
+                )
+            }
+            lines.add("cloudflared resolver path: ${info.summary()}")
+            if (!info.isElf) {
+                fail("libcloudflared.so is not a valid ELF binary (${info.error ?: "unknown"})")
+            } else if (!info.isDynamic) {
+                fail("libcloudflared.so is statically linked — child DNS would use the pure-Go resolver (resolv.conf) and fail on Android; ship the cgo/NDK build")
+            } else {
+                ok("libcloudflared.so dynamically linked (child DNS via bionic libc → netd)")
             }
         }
 

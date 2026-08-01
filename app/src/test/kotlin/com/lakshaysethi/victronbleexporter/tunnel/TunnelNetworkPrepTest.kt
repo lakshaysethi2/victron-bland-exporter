@@ -247,6 +247,19 @@ class TunnelNetworkPrepTest {
             },
             httpProbe = { url -> "HTTP 200 from $url" },
             nowMs = { 1_000L },
+            // Random filler bytes are not a valid ELF; stub a dynamic cgo build
+            // so the self-test's binary-linking checks pass (covered in depth by
+            // TunnelBinaryInspectorTest).
+            binaryInspector = {
+                BinaryInfo(
+                    isElf = true,
+                    is64Bit = true,
+                    machine = "AArch64",
+                    isDynamic = true,
+                    interp = "/system/bin/linker64",
+                    error = null,
+                )
+            },
         )
         assertTrue(report.passed)
         assertEquals(listOf(CLOUDFLARE_PREFLIGHT_HOST, CLOUDFLARE_SELFTEST_HOST), hosts)

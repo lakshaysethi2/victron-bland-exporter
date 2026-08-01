@@ -88,6 +88,8 @@ app/
 
 cloudflared 2026.7.3 is bundled in the repo at `app/src/main/jniLibs/arm64-v8a/libcloudflared.so` — no download or manual placement needed. It is bundled for **arm64-v8a only**; on other ABIs the app reports `cloudflared bundled for arm64 only — unsupported device ABI` and does not start a tunnel.
 
+The bundled binary is a **cgo/NDK rebuild** (`CGO_ENABLED=1` against the Android NDK), not the stock static Go release. A static Go cloudflared resolves DNS with its own resolver reading `/etc/resolv.conf`, which on Android points at loopback `::1`/`127.0.0.1` where nothing listens in the app sandbox, so the child dies with `dial tcp: lookup ... on [::1]:53: read: connection refused` — `bindProcessToNetwork` cannot fix that. The cgo build instead resolves via bionic `getaddrinfo` → netd, the same path the app itself uses (Go prefers the cgo resolver on Android, see `goosPrefersCgo` in `go/src/net/conf.go`). The debug log and DNS self-test verify the shipped binary is the dynamic cgo build (`cloudflared resolver path` line).
+
 In `build.gradle.kts` we set:
 ```kotlin
 packaging {
@@ -107,7 +109,14 @@ ProcessBuilder(cloudflared.absolutePath, "--no-autoupdate", "tunnel", "run", "--
 ```
 `--no-autoupdate` is always passed (cloudflared's auto-updater cannot rewrite its own binary inside the read-only `nativeLibraryDir`, a known quick-tunnel exit cause), and `HOME`/`TMPDIR`/`TMP`/`TEMP` are pointed at app-private writable dirs (`filesDir`/`cacheDir`). Quick tunnels run `--no-autoupdate tunnel --url http://localhost:5338` against the Prometheus exporter port.
 
-Before starting cloudflared the app calls `ConnectivityManager.bindProcessToNetwork(activeNetwork)` and preflights DNS for `api.trycloudflare.com` via Android APIs. Native Go DNS talks to Android netd at `[::1]:53`; without the process network bind the stub refuses the query (`connection refused`) even when the app itself can resolve hosts. On stop the binding is cleared with `bindProcessToNetwork(null)`. Share/Copy debug logs include the active network, bind result, and preflight IPs. A one-tap **DNS Self-Test** button runs the same bind/DNS checks on a background thread and shows the report on screen; the report is also embedded in Share/Copy debug logs.
+Before starting cloudflared the app calls `ConnectivityManager.bindProcessToNetwork(activeNetwork)` and preflights DNS for `api.trycloudflare.com` via Android APIs. This binds the parent app process to the active network (harmless, still correct for the parent); the child's DNS is now covered by the cgo rebuild, which resolves via netd like the app itself. On stop the binding is cleared with `bindProcessToNetwork(null)`. Share/Copy debug logs include the active network, bind result, preflight IPs, and the child binary's resolver path. A one-tap **DNS Self-Test** button runs the same bind/DNS checks on a background thread and shows the report on screen; the report is also embedded in Share/Copy debug logs.
+
+### On-device verification checklist (after sideloading a new APK)
+
+1. Start the tunnel, then tap **DNS Self-Test** — it must report PASSED **and** `libcloudflared.so dynamically linked (child DNS via bionic libc → netd)`.
+2. Tap **Share Debug Logs** and confirm the `Cloudflared resolver path:` line says `dynamic (DNS via bionic libc → netd)` — a `STATIC` line means the wrong binary was shipped and child DNS will fail regardless of the app preflight.
+3. Start the Quick Tunnel: the log must show the cloudflared child running past 73 ms with a `Registered tunnel connection` line and a `https://*.trycloudflare.com` URL (tunnel URL appears in the app status).
+4. If it still fails, share the debug log — the `resolver path` + last cloudflared output lines tell us which DNS path the child took.
 
 ## Permissions (all requested in code)
 
