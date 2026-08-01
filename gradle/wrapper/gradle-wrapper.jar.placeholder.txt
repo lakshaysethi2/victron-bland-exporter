@@ -1,6 +1,0 @@
-# gradle-wrapper.jar is missing in this clone.
-# To restore:
-# 1. Run: ./gradlew wrapper --gradle-version 8.7
-# OR
-# curl -L -o gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar
-# (or use Android Studio which will download it)

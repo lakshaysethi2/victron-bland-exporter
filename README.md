@@ -32,9 +32,8 @@ This is a **complete functional skeleton** of the app you asked to build. All co
 ## Quick Start (Development)
 
 1. Clone the repo
-2. Download the cloudflared binary (see below)
-3. Open in Android Studio (Hedgehog or later recommended)
-4. Build & run on Android 8+ device (API 26+)
+2. Open in Android Studio (Hedgehog or later recommended)
+3. Build & run on Android 8+ device (API 26+) — the cloudflared binary is bundled, no setup needed
 
 ## How to get your Victron Encryption Key
 
@@ -79,23 +78,13 @@ app/
 │   │   │   └── CloudflaredManager.kt
 │   │   └── ui/...
 │   ├── jniLibs/arm64-v8a/
-│   │   └── libcloudflared.so   ← YOU MUST PLACE THIS
+│   │   └── libcloudflared.so   ← bundled cloudflared (arm64-v8a only)
 │   └── res/...
 ```
 
-## Cloudflared Setup (Critical)
+## Cloudflared Setup
 
-**Download the binary yourself** (the repo does not contain the binary for size/legal reasons):
-
-```bash
-# From your computer or the Android device via adb
-curl -L -o libcloudflared.so https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64
-# or for x86_64 emulator:
-# curl -L -o libcloudflared.so https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-```
-
-Place it at:
-`app/src/main/jniLibs/arm64-v8a/libcloudflared.so`
+cloudflared 2026.7.3 is bundled in the repo at `app/src/main/jniLibs/arm64-v8a/libcloudflared.so` — no download or manual placement needed. It is bundled for **arm64-v8a only**; on other ABIs the app reports `cloudflared bundled for arm64 only — unsupported device ABI` and does not start a tunnel.
 
 In `build.gradle.kts` we set:
 ```kotlin
