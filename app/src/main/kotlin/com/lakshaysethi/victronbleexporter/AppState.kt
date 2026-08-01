@@ -6,6 +6,13 @@ object AppState {
     @Volatile var tunnelStatus: String = "Stopped"
     @Volatile var tunnelUrl: String? = null
 
+    /**
+     * Last tunnel URL that was auto-copied to the clipboard. Process-scoped so a
+     * fresh (re)start — new process or a new URL after a stop — auto-copies again,
+     * while rotation/recomposition of the same URL does not re-toast.
+     */
+    @Volatile var lastAutoCopiedTunnelUrl: String? = null
+
     /** Last DNS/network self-test report text (also embedded in shareable debug logs). */
     @Volatile var dnsSelfTestResult: String? = null
 
