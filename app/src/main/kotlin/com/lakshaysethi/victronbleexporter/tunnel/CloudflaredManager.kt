@@ -16,6 +16,7 @@ import java.util.Locale
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 import com.lakshaysethi.victronbleexporter.AppState
 
@@ -275,6 +276,7 @@ class CloudflaredManager(
         generation: Long,
     ) {
         var started: Process? = null
+        val lastOutputLine = AtomicReference<String?>()
         try {
             // nativeLibraryDir is extracted with exec permission; no chmod needed.
             val fullCommand = listOf(bin.absolutePath) + args
@@ -343,6 +345,7 @@ class CloudflaredManager(
                     var line: String?
                     while (reader.readLine().also { line = it } != null) {
                         val text = line ?: continue
+                        lastOutputLine.set(text)
                         Log.d(TAG, "cloudflared: $text")
                         synchronized(logBufferLock) { TunnelLog.append(logBuffer, text) }
                         if (generation != runGeneration.get()) continue
@@ -383,7 +386,7 @@ class CloudflaredManager(
                     lastExitCode = exit
                     val durationMs = System.currentTimeMillis() - (lastRunStartedAtMs ?: System.currentTimeMillis())
                     lastRunDurationMs = durationMs
-                    val lastLine = synchronized(logBufferLock) { TunnelLog.lastLine(logBuffer) }
+                    val lastLine = lastOutputLine.get()
                     val finalStatus = if (manualStopRequested) {
                         "Stopped"
                     } else {
@@ -486,7 +489,7 @@ class CloudflaredManager(
             lastDnsSelfTest = report
             AppState.dnsSelfTestResult = report.asText()
             // If a tunnel is not running, ensure we are not left bound from the test.
-            if (!isRunning()) {
+            if (AppState.cloudflaredManager === this && !isRunning()) {
                 try {
                     networkController?.clearProcessNetworkBinding()
                 } catch (e: Exception) {
