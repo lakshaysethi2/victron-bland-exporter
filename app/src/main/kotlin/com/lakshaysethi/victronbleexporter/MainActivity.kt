@@ -24,6 +24,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -70,6 +71,8 @@ class MainActivity : ComponentActivity() {
                     onStopTunnel = { stopTunnel() },
                     onShareDebugLogs = { shareDebugLogs() },
                     onCopyDebugLog = { copyDebugLog() },
+                    onCopyTunnelUrl = { url -> copyTunnelUrl(url) },
+                    onShareTunnelUrl = { url -> shareTunnelUrl(url) },
                     onDnsSelfTest = { runDnsSelfTest() },
                     onDisableBatteryOpt = { requestDisableBatteryOptimizations() }
                 )
@@ -248,6 +251,26 @@ class MainActivity : ComponentActivity() {
         Toast.makeText(this, "Debug log copied to clipboard", Toast.LENGTH_SHORT).show()
     }
 
+    private fun copyTunnelUrl(url: String) {
+        copyTextToClipboard(url, "victron-tunnel-url")
+        Toast.makeText(this, "Tunnel URL copied", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun shareTunnelUrl(url: String) {
+        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Victron MPPT tunnel URL")
+            putExtra(Intent.EXTRA_TEXT, url)
+        }
+        try {
+            startActivity(Intent.createChooser(sendIntent, "Share tunnel URL"))
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Share sheet unavailable", e)
+            copyTextToClipboard(url, "victron-tunnel-url")
+            Toast.makeText(this, "Share unavailable — tunnel URL copied to clipboard", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun runDnsSelfTest() {
         // Ensure a manager exists even if the exporter service has not been started yet.
         val manager = AppState.cloudflaredManager ?: CloudflaredManager(applicationContext)
@@ -258,10 +281,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun copyTextToClipboard(text: String) {
+    private fun copyTextToClipboard(text: String, label: String = "victron-debug-log") {
         try {
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            cm.setPrimaryClip(ClipData.newPlainText("victron-debug-log", text))
+            cm.setPrimaryClip(ClipData.newPlainText(label, text))
         } catch (e: Exception) {
             android.util.Log.w("MainActivity", "Clipboard copy failed", e)
         }
@@ -297,6 +320,8 @@ fun VictronBleExporterScreen(
     onStopTunnel: () -> Unit,
     onShareDebugLogs: () -> Unit,
     onCopyDebugLog: () -> Unit,
+    onCopyTunnelUrl: (String) -> Unit,
+    onShareTunnelUrl: (String) -> Unit,
     onDnsSelfTest: () -> Unit,
     onDisableBatteryOpt: () -> Unit
 ) {
@@ -316,7 +341,7 @@ fun VictronBleExporterScreen(
     var dnsSelfTestResult by remember { mutableStateOf(AppState.dnsSelfTestResult) }
     var isScanning by remember { mutableStateOf(false) }
 
-    // Clipboard helper
+    // Clipboard helpers
     fun pasteFromClipboard(): String {
         return try {
             val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -326,6 +351,15 @@ fun VictronBleExporterScreen(
             } else ""
         } catch (e: Exception) {
             ""
+        }
+    }
+
+    fun copyToClipboard(text: String, label: String) {
+        try {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText(label, text))
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Clipboard copy failed", e)
         }
     }
 
@@ -436,7 +470,19 @@ fun VictronBleExporterScreen(
                 }
 
                 tunnelStatus = AppState.tunnelStatus
-                tunnelUrl = AppState.tunnelUrl
+                // Auto-copy the tunnel URL the moment it appears (or reappears after a
+                // stop/restart with a new URL) so it is instantly shareable — even right
+                // after a fresh app start. AppState-scoped marker avoids re-toasting the
+                // same URL on rotation/recomposition.
+                val url = AppState.tunnelUrl
+                if (url == null) {
+                    AppState.lastAutoCopiedTunnelUrl = null
+                } else if (url != AppState.lastAutoCopiedTunnelUrl) {
+                    AppState.lastAutoCopiedTunnelUrl = url
+                    copyToClipboard(url, "victron-tunnel-url")
+                    Toast.makeText(context, "Tunnel URL copied", Toast.LENGTH_SHORT).show()
+                }
+                tunnelUrl = url
                 dnsSelfTestResult = AppState.dnsSelfTestResult
             } catch (e: Exception) {
                 android.util.Log.w("MainActivity", "UI loop error", e)
@@ -813,8 +859,19 @@ fun VictronBleExporterScreen(
         Text("Cloudflare Tunnel (optional)", style = MaterialTheme.typography.titleMedium)
         Text("Expose metrics to internet", style = MaterialTheme.typography.bodySmall)
         Text("Tunnel: $tunnelStatus", style = MaterialTheme.typography.bodyMedium)
-        tunnelUrl?.let {
-            Text("Public URL: $it", fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 4.dp))
+        tunnelUrl?.let { url ->
+            SelectionContainer {
+                Text("Public URL: $url", fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 4.dp))
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = { onShareTunnelUrl(url) }, modifier = Modifier.weight(1f)) {
+                    Text("Share URL")
+                }
+                OutlinedButton(onClick = { onCopyTunnelUrl(url) }, modifier = Modifier.weight(1f)) {
+                    Text("Copy URL")
+                }
+            }
         }
 
         Spacer(Modifier.height(8.dp))
