@@ -38,6 +38,7 @@ import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevice
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
 import com.lakshaysethi.victronbleexporter.service.VictronBleExporterService
+import com.lakshaysethi.victronbleexporter.tunnel.CloudflaredManager
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
@@ -69,6 +70,7 @@ class MainActivity : ComponentActivity() {
                     onStopTunnel = { stopTunnel() },
                     onShareDebugLogs = { shareDebugLogs() },
                     onCopyDebugLog = { copyDebugLog() },
+                    onDnsSelfTest = { runDnsSelfTest() },
                     onDisableBatteryOpt = { requestDisableBatteryOptimizations() }
                 )
             }
@@ -246,6 +248,16 @@ class MainActivity : ComponentActivity() {
         Toast.makeText(this, "Debug log copied to clipboard", Toast.LENGTH_SHORT).show()
     }
 
+    private fun runDnsSelfTest() {
+        // Ensure a manager exists even if the exporter service has not been started yet.
+        val manager = AppState.cloudflaredManager ?: CloudflaredManager(applicationContext)
+        Toast.makeText(this, "Running DNS self-test…", Toast.LENGTH_SHORT).show()
+        manager.runDnsSelfTest { result ->
+            val firstLine = result.lineSequence().firstOrNull().orEmpty()
+            Toast.makeText(this, firstLine.ifBlank { "DNS self-test finished" }, Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun copyTextToClipboard(text: String) {
         try {
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -285,6 +297,7 @@ fun VictronBleExporterScreen(
     onStopTunnel: () -> Unit,
     onShareDebugLogs: () -> Unit,
     onCopyDebugLog: () -> Unit,
+    onDnsSelfTest: () -> Unit,
     onDisableBatteryOpt: () -> Unit
 ) {
     val context = LocalContext.current
@@ -300,6 +313,7 @@ fun VictronBleExporterScreen(
     var localIp by remember { mutableStateOf("Unknown IP") }
     var tunnelStatus by remember { mutableStateOf(AppState.tunnelStatus) }
     var tunnelUrl by remember { mutableStateOf(AppState.tunnelUrl) }
+    var dnsSelfTestResult by remember { mutableStateOf(AppState.dnsSelfTestResult) }
     var isScanning by remember { mutableStateOf(false) }
 
     // Clipboard helper
@@ -423,6 +437,7 @@ fun VictronBleExporterScreen(
 
                 tunnelStatus = AppState.tunnelStatus
                 tunnelUrl = AppState.tunnelUrl
+                dnsSelfTestResult = AppState.dnsSelfTestResult
             } catch (e: Exception) {
                 android.util.Log.w("MainActivity", "UI loop error", e)
             }
@@ -830,6 +845,31 @@ fun VictronBleExporterScreen(
             }
             OutlinedButton(onClick = onCopyDebugLog, modifier = Modifier.weight(1f)) {
                 Text("Copy Log")
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = onDnsSelfTest, modifier = Modifier.fillMaxWidth()) {
+            Text("DNS Self-Test")
+        }
+        dnsSelfTestResult?.let { report ->
+            Spacer(Modifier.height(8.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        "DNS / network self-test",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        report,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
         }
 

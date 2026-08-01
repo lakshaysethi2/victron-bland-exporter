@@ -1,6 +1,7 @@
 package com.lakshaysethi.victronbleexporter.tunnel
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 import java.util.ArrayDeque
@@ -74,5 +75,41 @@ class TunnelLogTest {
     fun `named tunnel args include no-autoupdate and token`() {
         val args = TunnelArgs.namedTunnel("abc123")
         assertEquals(listOf("--no-autoupdate", "tunnel", "run", "--token", "abc123"), args)
+    }
+
+    @Test
+    fun `redactCommand scrubs token value from shareable command line`() {
+        val args = listOf(
+            "/data/app/libcloudflared.so",
+            "--no-autoupdate",
+            "tunnel",
+            "run",
+            "--token",
+            "super-secret-tunnel-token",
+        )
+        val rendered = TunnelLog.redactCommand(args)
+        assertEquals(
+            "/data/app/libcloudflared.so --no-autoupdate tunnel run --token <redacted>",
+            rendered,
+        )
+        assertFalse(rendered.contains("super-secret"))
+    }
+
+    @Test
+    fun `redactCommand leaves quick-tunnel args unchanged`() {
+        val args = listOf(
+            "/data/app/libcloudflared.so",
+            "--no-autoupdate",
+            "tunnel",
+            "--url",
+            "http://localhost:5338",
+        )
+        assertEquals(args.joinToString(" "), TunnelLog.redactCommand(args))
+    }
+
+    @Test
+    fun `redactCommand handles null and trailing token flag`() {
+        assertEquals("n/a", TunnelLog.redactCommand(null))
+        assertEquals("tunnel run --token", TunnelLog.redactCommand(listOf("tunnel", "run", "--token")))
     }
 }
