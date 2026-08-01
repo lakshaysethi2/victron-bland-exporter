@@ -52,7 +52,12 @@ internal object TunnelArgs {
         listOf(NO_AUTOUPDATE, "tunnel", "run", "--token", token)
 }
 
-class CloudflaredManager(private val context: Context) {
+class CloudflaredManager(context: Context) {
+
+    // Application context only: AppState holds a static reference to this manager
+    // so the UI can share debug logs even after the process died; never retain the
+    // service/activity context here or the static field would leak it.
+    private val appContext: Context = context.applicationContext
 
     private var process: Process? = null
     var tunnelUrl: String? = null
@@ -92,7 +97,7 @@ class CloudflaredManager(private val context: Context) {
      */
     private fun getBinaryFile(): File? {
         if (!isSupportedAbi()) return null
-        val bundled = File(context.applicationInfo.nativeLibraryDir, binaryName)
+        val bundled = File(appContext.applicationInfo.nativeLibraryDir, binaryName)
         return bundled.takeIf { it.exists() && it.length() > 100_000 }
     }
 
@@ -127,8 +132,8 @@ class CloudflaredManager(private val context: Context) {
             // Go binaries need a writable temp dir; cloudflared also reads its config
             // from HOME. The app's own dirs are the only guaranteed-writable locations.
             val env = pb.environment()
-            val homeDir = context.filesDir.absolutePath
-            val tmpDir = context.cacheDir.absolutePath
+            val homeDir = appContext.filesDir.absolutePath
+            val tmpDir = appContext.cacheDir.absolutePath
             env["HOME"] = homeDir
             env["TMPDIR"] = tmpDir
             env["TMP"] = tmpDir
@@ -290,17 +295,17 @@ class CloudflaredManager(private val context: Context) {
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
 
     private fun appVersionName(): String = try {
-        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
+        appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName ?: "?"
     } catch (e: Exception) {
         "?"
     }
 
     private fun appVersionCode(): Long = try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode
+            appContext.packageManager.getPackageInfo(appContext.packageName, 0).longVersionCode
         } else {
             @Suppress("DEPRECATION")
-            context.packageManager.getPackageInfo(context.packageName, 0).versionCode.toLong()
+            appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionCode.toLong()
         }
     } catch (e: Exception) {
         -1L
