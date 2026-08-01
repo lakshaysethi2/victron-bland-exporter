@@ -224,6 +224,7 @@ scrape_configs:
   - job_name: 'victron-mppt'
     scheme: https
     metrics_path: '/metrics'
+    scrape_interval: 5s
     static_configs:
       - targets: ['victron.yourdomain.com']
     # If your tunnel host is behind a proxy with a non-443 port, use e.g. 'host:8443'
