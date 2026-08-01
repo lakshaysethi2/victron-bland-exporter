@@ -80,6 +80,11 @@ class CloudflaredManager(context: Context) {
     private val runStateLock = Any()
     private val runGeneration = AtomicLong(0)
 
+    // Last network bind + DNS preflight (surfaced in buildDebugLog).
+    @Volatile private var lastNetworkPrep: NetworkPrepResult? = null
+    private val networkController: ProcessNetworkController? =
+        processNetworkControllerFrom(appContext)
+
     init {
         // Self-register so the UI can build a debug log without the service wiring it up.
         AppState.cloudflaredManager = this
@@ -119,6 +124,22 @@ class CloudflaredManager(context: Context) {
             setStatus(reason, onStatus)
             return
         }
+
+        // Bind this process to the active network BEFORE exec'ing cloudflared.
+        // Go's resolver talks to Android netd at [::1]:53; without the bind the
+        // stub refuses the query (connection refused) even though the app itself
+        // can resolve hosts. Preflight DNS via Android APIs surfaces a clear
+        // "no working network/DNS" status instead of a cryptic cloudflared exit.
+        val prep = TunnelNetworkPrep.prepare(networkController)
+        lastNetworkPrep = prep
+        prep.debugLines().forEach { Log.i(TAG, "network prep: $it") }
+        if (!prep.canStart) {
+            val reason = prep.blockedStatus ?: "No working network/DNS"
+            Log.e(TAG, "Refusing to start cloudflared: $reason")
+            setStatus(reason, onStatus)
+            return
+        }
+
         runBinary(bin, args, onStatus)
     }
 
@@ -246,6 +267,14 @@ class CloudflaredManager(context: Context) {
         AppState.tunnelUrl = null
         status = "Stopped"
         AppState.tunnelStatus = status
+        // Drop the process↔network binding established in prepareAndRun so we do
+        // not keep the app pinned to a network that may go away after the tunnel
+        // stops (e.g. Wi‑Fi → cellular handoff while idle).
+        try {
+            networkController?.clearProcessNetworkBinding()
+        } catch (e: Exception) {
+            Log.w(TAG, "clearProcessNetworkBinding failed", e)
+        }
     }
 
     fun isRunning(): Boolean = process?.isAlive == true
@@ -276,6 +305,14 @@ class CloudflaredManager(context: Context) {
         sb.appendLine("Last exit code: ${lastExitCode?.toString() ?: "never exited"}")
         sb.appendLine("Last run duration: ${lastRunDurationMs?.let { "$it ms" } ?: "n/a"}")
         sb.appendLine("Cloudflared binary: ${lastBinary?.absolutePath ?: "n/a"} (${lastBinary?.length() ?: 0} bytes)")
+        sb.appendLine()
+        sb.appendLine("--- Network bind / DNS preflight ---")
+        val prep = lastNetworkPrep
+        if (prep == null) {
+            sb.appendLine("(no preflight recorded yet — start the tunnel first)")
+        } else {
+            prep.debugLines().forEach { sb.appendLine(it) }
+        }
         sb.appendLine()
         sb.appendLine("--- cloudflared invocation ---")
         sb.appendLine("Command: ${lastCommand?.joinToString(" ") ?: "n/a"}")
