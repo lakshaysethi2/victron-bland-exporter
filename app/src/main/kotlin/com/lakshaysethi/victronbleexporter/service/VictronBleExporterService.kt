@@ -21,9 +21,13 @@ import com.lakshaysethi.victronbleexporter.charger.ChargerDebugLog
 import com.lakshaysethi.victronbleexporter.charger.ChargerSchedule
 import com.lakshaysethi.victronbleexporter.data.ChargerScheduleStore
 import com.lakshaysethi.victronbleexporter.data.DeviceRepository
+import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
+import com.lakshaysethi.victronbleexporter.exporter.ChargerCommandSender
+import com.lakshaysethi.victronbleexporter.exporter.ChargerStatusSnapshot
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
 import com.lakshaysethi.victronbleexporter.exporter.PrometheusExporter
+import com.lakshaysethi.victronbleexporter.exporter.RemoteChargerHttp
 import com.lakshaysethi.victronbleexporter.parser.VictronParser
 import com.lakshaysethi.victronbleexporter.tunnel.CloudflaredManager
 import kotlinx.coroutines.*
@@ -50,6 +54,33 @@ class VictronBleExporterService : Service() {
     private val chargerScheduleStore: ChargerScheduleStore by lazy { ChargerScheduleStore(this) }
     private var lastScheduledMode: Boolean? = null
     private var scheduleRetryAt = 0L
+
+    /**
+     * Remote charger-control HTTP surface. Commands are forwarded to this
+     * service via the same CHARGER_SET intent the UI uses, so a remote flip
+     * goes through performChargerSet() -> ChargerController.setMode() and gets
+     * the same manual-override/schedule semantics as a local tap.
+     */
+    private val remoteChargerControl: RemoteChargerHttp by lazy {
+        RemoteChargerHttp(
+            settingsProvider = { RemoteChargerStore(this).load() },
+            statusProvider = { ChargerStatusSnapshot.fromAppState() },
+            macProvider = { AppState.chargerMac ?: chargerScheduleStore.load().chargerMac.ifBlank { null } },
+            commandSender = ChargerCommandSender { enable, mac ->
+                try {
+                    val intent = Intent(this, VictronBleExporterService::class.java).apply {
+                        action = "CHARGER_SET"
+                        putExtra("mac", mac)
+                        putExtra("enable", enable)
+                    }
+                    startForegroundService(intent)
+                    Log.i(TAG, "Remote charger command: ${if (enable) "ENABLE" else "DISABLE"} for $mac")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Remote charger command could not be sent", e)
+                }
+            },
+        )
+    }
 
     // Device encryption keys: MAC -> key (hex) - in-memory cache, persisted via DeviceRepository
     private val deviceKeys = mutableMapOf<String, String>()
@@ -119,7 +150,7 @@ class VictronBleExporterService : Service() {
         }
 
         try {
-            prometheusExporter = PrometheusExporter(5338)
+            prometheusExporter = PrometheusExporter(5338, remoteChargerControl)
             prometheusExporter.startServer()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start exporter", e)

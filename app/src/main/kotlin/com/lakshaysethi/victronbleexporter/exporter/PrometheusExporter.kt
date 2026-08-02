@@ -15,16 +15,58 @@ private const val DEFAULT_PORT = 5338
  * Serves /metrics in Prometheus text format.
  */
 class PrometheusExporter(
-    private val port: Int = DEFAULT_PORT
+    private val port: Int = DEFAULT_PORT,
+    /** Optional remote charger-control surface (GET /charger, /charger/status, POST /charger). */
+    private val remoteChargerControl: RemoteChargerHttp? = null,
 ) : NanoHTTPD(port) {
 
     override fun serve(session: IHTTPSession): Response {
-        return when (session.uri) {
+        val uri = session.uri
+        if (uri.startsWith("/charger")) {
+            return serveRemoteCharger(session)
+        }
+        return when (uri) {
             "/metrics" -> serveMetrics()
             "/health" -> newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "OK\n")
             "/devices" -> serveDevicesJson()
             else -> newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not Found\n")
         }
+    }
+
+    private fun serveRemoteCharger(session: IHTTPSession): Response {
+        val control = remoteChargerControl
+        if (control == null) {
+            return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not Found\n")
+        }
+        // Read the raw POST body once: NanoHTTPD puts non-form payloads into
+        // files["postData"] when parseBody() is called for a POST request.
+        val body = if (session.method == NanoHTTPD.Method.POST) {
+            try {
+                val files = HashMap<String, String>()
+                session.parseBody(files)
+                files["postData"] ?: ""
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to read request body", e)
+                ""
+            }
+        } else {
+            ""
+        }
+        val result = control.handle(
+            uri = session.uri,
+            method = session.method.name,
+            headers = session.headers,
+            body = body,
+        )
+        val response = newFixedLengthResponse(
+            Response.Status.lookup(result.statusCode) ?: Response.Status.INTERNAL_ERROR,
+            result.mimeType,
+            result.body,
+        )
+        for ((name, value) in result.headers) {
+            response.addHeader(name, value)
+        }
+        return response
     }
 
     private fun serveMetrics(): Response {

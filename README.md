@@ -49,6 +49,7 @@ The full, beginner-friendly walkthrough is in **[`guide.md`](guide.md)** — bui
 - 🌐 **Cloudflare Tunnel with working child DNS** — embedded `cloudflared`, rebuilt with cgo/NDK so DNS resolves through Android's netd instead of dying on the loopback `[::1]:53` trap
 - 📈 **Prometheus `/metrics` endpoint** (OpenMetrics, port 5338) — voltage, current, solar power, yield today, state of charge, charge state, RSSI, device count
 - ⚡ **Charger control over BLE** — enable/disable the MPPT charger (register `0x0200` device mode via the VictronConnect GATT service) with visible state, readback verification, and a configurable daily on/off schedule (default 08:30 → 18:00)
+- 🌐 **Remote charger control** — flip the charger from any browser at `https://mppt.lak.nz/charger` (named tunnel) or `http://<phone-ip>:5338/charger` (LAN), protected by a shared secret you set in the app
 - 🖥️ **Importable Grafana dashboard** — [`deploy/grafana-dashboard.json`](deploy/grafana-dashboard.json): solar power, battery voltage/current, yield, devices online
 - 🐞 **Share Debug Logs** — one tap bundles the last 200 cloudflared lines, exit code, network-bind/DNS preflight, and a DNS self-test report, with clipboard fallback — *the* tool for diagnosing tunnel issues
 - 🔍 **DNS Self-Test button** — verifies on-device that the bundled binary is the dynamic cgo build (fails hard if a static binary sneaks back in)
@@ -73,6 +74,16 @@ In the app's **Charger Control** section:
 4. Optionally enable the **daily schedule** (on time / off time, defaults 08:30 / 18:00). The service re-checks and applies it every 30 seconds while running; a manual Enable/Disable pauses the schedule until the next window boundary (shown in the UI).
 
 The current state is exposed as the `victron_charger_enabled` metric (`1` = charger on, `0` = off, `-1` = unknown).
+
+### Remote control (browser / tunnel)
+
+In the app's **Remote Charger Control** section, enable remote control and set a secret (min 8 chars). The app then serves:
+
+- `GET  /charger` — mobile control page (login shell; everything on it requires the secret)
+- `GET  /charger/status` — JSON state (`mode`, `busy`, `lastAction`, …)
+- `POST /charger` — `{"action":"on"|"off"}` flips the charger
+
+Auth: every status/command call must send the secret as an `X-Remote-Secret` (or `Authorization: Bearer`) header. It is compared constant-time and **never logged or placed in a URL**; the page keeps it only in the browser session. When remote control is disabled, all `/charger*` routes answer 404. A remote flip goes through the same `CHARGER_SET` path as a local tap, so it gets the same readback verification and manual-override/schedule semantics.
 
 Pairing: the first connection prompts for a Bluetooth PIN. Use the PIN printed on the product sticker, or `000000` (the common Victron default).
 
