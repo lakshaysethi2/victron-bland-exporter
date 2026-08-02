@@ -32,9 +32,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.compose.foundation.text.KeyboardOptions
 import com.lakshaysethi.victronbleexporter.data.DeviceRepository
+import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevice
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
@@ -71,6 +75,7 @@ class MainActivity : ComponentActivity() {
                     onChargerScheduleSave = { mac, enabled, enableTime, disableTime ->
                         saveChargerSchedule(mac, enabled, enableTime, disableTime)
                     },
+                    onSaveRemoteSettings = { enabled, secret -> saveRemoteSettings(enabled, secret) },
                     onStartTunnel = { token -> startTunnel(token) },
                     onQuickTunnel = { startQuickTunnel() },
                     onStopTunnel = { stopTunnel() },
@@ -243,6 +248,15 @@ class MainActivity : ComponentActivity() {
         Toast.makeText(this, "Schedule saved", Toast.LENGTH_SHORT).show()
     }
 
+    private fun saveRemoteSettings(enabled: Boolean, secret: String) {
+        try {
+            RemoteChargerStore(this).save(enabled, secret.trim())
+            Toast.makeText(this, if (enabled) "Remote control enabled" else "Remote control disabled", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Save failed: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun startTunnel(token: String) {
         val intent = Intent(this, VictronBleExporterService::class.java).apply {
             action = "START_TUNNEL"
@@ -376,6 +390,7 @@ fun VictronBleExporterScreen(
     onChargerSet: (String, Boolean) -> Unit,
     onChargerRead: (String) -> Unit,
     onChargerScheduleSave: (String, Boolean, String, String) -> Unit,
+    onSaveRemoteSettings: (Boolean, String) -> Unit,
     onStartTunnel: (String) -> Unit,
     onQuickTunnel: () -> Unit,
     onStopTunnel: () -> Unit,
@@ -407,6 +422,11 @@ fun VictronBleExporterScreen(
     var enableTime by remember { mutableStateOf("08:30") }
     var disableTime by remember { mutableStateOf("18:00") }
     var scheduleLoaded by remember { mutableStateOf(false) }
+
+    // Remote control settings (HTTP + tunnel surface)
+    var remoteEnabled by remember { mutableStateOf(false) }
+    var remoteSecret by remember { mutableStateOf("") }
+    var remoteSettingsLoaded by remember { mutableStateOf(false) }
 
     var localIp by remember { mutableStateOf("Unknown IP") }
     var tunnelStatus by remember { mutableStateOf(AppState.tunnelStatus) }
@@ -581,6 +601,17 @@ fun VictronBleExporterScreen(
                         disableTime = store.disableTime
                         if (store.chargerMac.isNotBlank()) chargerMac = store.chargerMac
                         scheduleLoaded = true
+                    } catch (e: Exception) {
+                        // ignore
+                    }
+                }
+                // Load persisted remote-control settings once
+                if (!remoteSettingsLoaded) {
+                    try {
+                        val store = RemoteChargerStore(context)
+                        remoteEnabled = store.enabled
+                        remoteSecret = store.authSecret
+                        remoteSettingsLoaded = true
                     } catch (e: Exception) {
                         // ignore
                     }
@@ -1101,6 +1132,66 @@ fun VictronBleExporterScreen(
                 Text(
                     "Note: the schedule applies while the app is open (foreground service running). " +
                         "Manual Enable/Disable pauses the schedule until the next window boundary.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        // ===== REMOTE CHARGER CONTROL (HTTP + Cloudflare tunnel) =====
+        Text("Remote Charger Control", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(
+            "Flip the charger from any browser via the named tunnel: https://mppt.lak.nz/charger. " +
+                "Every request must carry the secret below — never share it or put it in a URL.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Enable remote control", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Text(
+                            "Serves /charger, /charger/status on port 5338 (also reachable over the tunnel).",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Switch(checked = remoteEnabled, onCheckedChange = { remoteEnabled = it })
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = remoteSecret,
+                    onValueChange = { remoteSecret = it },
+                    label = { Text("Remote control secret") },
+                    placeholder = { Text("Pick a strong secret") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = { onSaveRemoteSettings(remoteEnabled, remoteSecret) },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !remoteEnabled || remoteSecret.trim().length >= 8
+                ) {
+                    Text("Save Remote Settings")
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Secret is stored only on this phone and never logged. Anyone who has it can flip the charger.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

@@ -21,6 +21,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - The device requires BLE pairing; PIN is on the sticker or `000000`. Writes are write-without-response; the device echoes the new mode in `08 03 19 02 00 41 <mode>` notifications (status 133 in `onCharacteristicWrite` is a known no-response-write quirk, not an error).
 - Implementation: `charger/ChargerController.kt` (one GATT session per op, latches + dedicated HandlerThread, serialized by a Mutex), `charger/ChargerSchedule.kt` + `data/ChargerScheduleStore.kt` (daily window, manual override until next boundary), `ChargerDebugLog` ring buffer (200 lines) included in Share Debug Logs. Schedule is enforced only while the foreground service runs — by design, called out in UI + README.
 
+## Remote charger control over HTTP/tunnel
+
+- The app serves a remote charger-control surface on the same NanoHTTPD server (port 5338): `GET /charger` (mobile control page), `GET /charger/status` (JSON snapshot of AppState.chargerMode), `POST /charger` with `{"action":"on"|"off"}`. Authoritative code: `exporter/RemoteChargerHttp.kt` + `data/RemoteChargerStore.kt` (auth secret in plain SharedPreferences, master `enabled` switch — disabled = every /charger* route 404s).
+- Auth: the secret must be sent as `X-Remote-Secret` (or `Authorization: Bearer`) header; compared constant-time via `MessageDigest.isEqual`; never logged, never in URLs. The control page is a static shell (login form) because browsers can't attach custom headers to navigations — all functional routes still require the secret.
+- Commands are forwarded via the same `CHARGER_SET` service intent as the local UI, so remote flips get the identical BLE readback verification and manual-override/schedule semantics (`performChargerSet` in the service). The HTTP layer is a pure seam (settings/status/mac providers + `ChargerCommandSender`) so `exporter/RemoteChargerHttpTest` runs on the JVM; `RemoteChargerHttpServerTest` exercises real NanoHTTPD over loopback under Robolectric (`@ConscryptMode(OFF)` — same host limitation as TunnelUrlCopyShareTest).
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
