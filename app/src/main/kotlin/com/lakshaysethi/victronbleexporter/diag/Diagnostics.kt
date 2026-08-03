@@ -13,14 +13,19 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Calendar
+import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
 
 /**
  * Remote diagnostics: collects the app log buffer + device info and POSTs it to
  * the mppt-log-server. Never blocks the UI thread (all work on an IO scope).
  *
- * Server contract (POST https://mppt.lak.nz/api/logs):
- *   {"device_id", "app_version", "entries": [{"ts", "level", "msg"}]} -> 201 {"ok": true}
+ * Server contract (verified live at https://mppt-logs.lak.nz):
+ *   POST /api/logs with {"device_id", "app_version", "entries": [{"ts", "level", "msg"]}
+ *   where ts is a STRING (ISO-8601 works) and level is one of "info" | "warn" | "error"
+ *   (uppercase/other levels are rejected with 422) -> 201 {"ok": true}.
  *
  * Failures degrade gracefully: the log buffer stays local (persisted) and the
  * next auto-send / manual tap retries. Auto-sends are rate-limited to once an
@@ -28,7 +33,7 @@ import java.util.UUID
  */
 object Diagnostics {
 
-    const val LOGS_URL = "https://mppt.lak.nz/api/logs"
+    const val LOGS_URL = "https://mppt-logs.lak.nz/api/logs"
     const val AUTO_SEND_INTERVAL_MS = 60 * 60 * 1000L // once per hour
 
     private const val PREFS_NAME = "victron_diagnostics"
@@ -69,6 +74,36 @@ object Diagnostics {
     // ------------------------------------------------------------ payload (pure)
 
     /**
+     * Map our free-form log levels onto the server's allowed literal set
+     * (info | warn | error); anything unknown falls back to "info".
+     */
+    fun serverLevel(level: String): String = when (level.uppercase()) {
+        "ERROR" -> "error"
+        "WARN" -> "warn"
+        else -> "info"
+    }
+
+    /**
+     * Format epoch millis as an ISO-8601 UTC string. The server requires ts to
+     * be a string; ISO-8601 keeps the captain's log viewer sortable/parseable.
+     */
+    fun isoTime(ts: Long): String {
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
+        cal.timeInMillis = ts
+        return String.format(
+            Locale.US,
+            "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+            cal.get(Calendar.YEAR),
+            cal.get(Calendar.MONTH) + 1,
+            cal.get(Calendar.DAY_OF_MONTH),
+            cal.get(Calendar.HOUR_OF_DAY),
+            cal.get(Calendar.MINUTE),
+            cal.get(Calendar.SECOND),
+            cal.get(Calendar.MILLISECOND)
+        )
+    }
+
+    /**
      * Build the POST body. Pure function (no Android types) so it is unit-testable
      * on the JVM. Extra device fields beyond the contract are additive and harmless.
      */
@@ -94,8 +129,8 @@ object Diagnostics {
         sb.append("\"entries\":[")
         for ((i, e) in entries.withIndex()) {
             if (i > 0) sb.append(',')
-            sb.append("{\"ts\":").append(e.ts)
-                .append(",\"level\":").append(Json.str(e.level))
+            sb.append("{\"ts\":").append(Json.str(isoTime(e.ts)))
+                .append(",\"level\":").append(Json.str(serverLevel(e.level)))
                 .append(",\"msg\":").append(Json.str(e.msg)).append('}')
         }
         sb.append("]}")

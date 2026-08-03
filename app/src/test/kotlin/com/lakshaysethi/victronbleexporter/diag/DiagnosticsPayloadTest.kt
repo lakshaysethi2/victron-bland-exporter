@@ -1,5 +1,6 @@
 package com.lakshaysethi.victronbleexporter.diag
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -37,14 +38,33 @@ class DiagnosticsPayloadTest {
         assertTrue(payload.contains("\"uptime_ms\":42000"))
         assertTrue(payload.contains("\"tunnel_status\":\"Connected\""))
         assertTrue(payload.contains("\"charger_state\":\"ON\""))
-        assertTrue(payload.contains("\"ts\":1000"))
-        assertTrue(payload.contains("\"level\":\"INFO\""))
+        // ts is emitted as an ISO-8601 UTC string per the live server contract.
+        assertTrue(payload.contains("\"ts\":\"1970-01-01T00:00:01.000Z\""))
+        assertTrue(payload.contains("\"level\":\"info\""))
         assertTrue(payload.contains("\"msg\":\"hello\""))
-        assertTrue(payload.contains("\"ts\":2000"))
-        assertTrue(payload.contains("\"level\":\"ERROR\""))
+        assertTrue(payload.contains("\"ts\":\"1970-01-01T00:00:02.000Z\""))
+        assertTrue(payload.contains("\"level\":\"error\""))
         assertTrue(payload.contains("\"msg\":\"boom\""))
         assertTrue(payload.startsWith("{"))
         assertTrue(payload.endsWith("}"))
+    }
+
+    @Test
+    fun `levels are mapped to the server literal set`() {
+        assertEquals("info", Diagnostics.serverLevel("INFO"))
+        assertEquals("warn", Diagnostics.serverLevel("WARN"))
+        assertEquals("error", Diagnostics.serverLevel("ERROR"))
+        // Charger BLE lines (level CHARGER) fall back to info.
+        assertEquals("info", Diagnostics.serverLevel("CHARGER"))
+        assertEquals("info", Diagnostics.serverLevel(""))
+        assertEquals("info", Diagnostics.serverLevel("DEBUG"))
+    }
+
+    @Test
+    fun `isoTime formats epoch millis as UTC`() {
+        assertEquals("1970-01-01T00:00:00.000Z", Diagnostics.isoTime(0L))
+        assertEquals("1970-01-01T00:00:01.000Z", Diagnostics.isoTime(1000L))
+        assertEquals("2025-08-03T13:00:00.000Z", Diagnostics.isoTime(1754226000000L))
     }
 
     @Test

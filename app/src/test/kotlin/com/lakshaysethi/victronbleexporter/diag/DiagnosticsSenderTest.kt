@@ -19,7 +19,8 @@ import kotlin.concurrent.thread
 /**
  * End-to-end against a local mock HTTP server: verifies the diagnostics sender
  * POSTs a JSON body with device info + entries to the logs endpoint and treats a
- * 201 as success. (The live mppt.lak.nz endpoints were still 404 at build time.)
+ * 201 as success. (Tests stay server-independent; the live mppt-logs.lak.nz
+ * endpoints are verified manually.)
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34])
@@ -90,9 +91,9 @@ class DiagnosticsSenderTest {
         assertTrue(body.contains("\"device_id\":\""))
         assertTrue(body.contains("\"app_version\":\""))
         assertTrue(body.contains("\"entries\":["))
-        assertTrue(body.contains("\"level\":\"INFO\""))
+        assertTrue(body.contains("\"level\":\"info\""))
         assertTrue(body.contains("\"msg\":\"boot\""))
-        assertTrue(body.contains("\"level\":\"ERROR\""))
+        assertTrue(body.contains("\"level\":\"error\""))
         assertTrue(body.contains("\"msg\":\"ble failure\""))
 
         AppLog.clear()

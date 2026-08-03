@@ -23,12 +23,12 @@ class UpdateCheckerParseTest {
     @Test
     fun `parses a valid latest json`() {
         val release = UpdateChecker.parseLatest(
-            """{"versionCode":2,"versionName":"0.2.0","apkUrl":"https://mppt.lak.nz/apk/latest.apk","notes":"fixed charger enable"}"""
+            """{"versionCode":2,"versionName":"0.2.0","apkUrl":"https://mppt-logs.lak.nz/apk/latest.apk","notes":"fixed charger enable"}"""
         )
         assertNotNull(release)
         assertEquals(2, release!!.versionCode)
         assertEquals("0.2.0", release.versionName)
-        assertEquals("https://mppt.lak.nz/apk/latest.apk", release.apkUrl)
+        assertEquals("https://mppt-logs.lak.nz/apk/latest.apk", release.apkUrl)
         assertEquals("fixed charger enable", release.notes)
     }
 
@@ -38,6 +38,25 @@ class UpdateCheckerParseTest {
         assertNotNull(release)
         assertNull(release!!.notes)
         assertEquals(UpdateChecker.DEFAULT_APK_URL, release.apkUrl)
+    }
+
+    @Test
+    fun `relative apk path is resolved against the log server base`() {
+        // The live server serves apkUrl as a relative path (e.g. "/apk/latest.apk").
+        val release = UpdateChecker.parseLatest(
+            """{"versionCode":2,"versionName":"0.2.0","apkUrl":"/apk/latest.apk"}"""
+        )
+        assertNotNull(release)
+        assertEquals("https://mppt-logs.lak.nz/apk/latest.apk", release!!.apkUrl)
+    }
+
+    @Test
+    fun `absolute apk url passes through unchanged`() {
+        val release = UpdateChecker.parseLatest(
+            """{"versionCode":2,"versionName":"0.2.0","apkUrl":"https://cdn.example.com/app.apk"}"""
+        )
+        assertNotNull(release)
+        assertEquals("https://cdn.example.com/app.apk", release!!.apkUrl)
     }
 
     @Test

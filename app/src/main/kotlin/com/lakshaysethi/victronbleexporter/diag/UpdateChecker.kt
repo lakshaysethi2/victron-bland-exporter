@@ -8,7 +8,7 @@ import java.net.URL
 
 /**
  * In-app update check against the mppt-log-server:
- *   GET https://mppt.lak.nz/api/latest.json
+ *   GET https://mppt-logs.lak.nz/api/latest.json
  *     -> {"versionCode", "versionName", "apkUrl", "notes"}
  *
  * The versionCode comparison ([isNewer]) is a pure function so the decision is
@@ -16,8 +16,10 @@ import java.net.URL
  */
 object UpdateChecker {
 
-    const val LATEST_URL = "https://mppt.lak.nz/api/latest.json"
-    const val DEFAULT_APK_URL = "https://mppt.lak.nz/apk/latest.apk"
+    private const val BASE_URL = "https://mppt-logs.lak.nz"
+
+    const val LATEST_URL = "$BASE_URL/api/latest.json"
+    const val DEFAULT_APK_URL = "$BASE_URL/apk/latest.apk"
 
     data class LatestRelease(
         val versionCode: Int,
@@ -30,6 +32,16 @@ object UpdateChecker {
     fun isNewer(servedVersionCode: Int, currentVersionCode: Int): Boolean =
         servedVersionCode > currentVersionCode
 
+    /**
+     * The server may serve a relative apk path (e.g. "/apk/latest.apk"); resolve
+     * it against the log-server base so ACTION_VIEW gets an absolute URL.
+     */
+    fun resolveApkUrl(apkUrl: String): String = when {
+        apkUrl.isBlank() -> DEFAULT_APK_URL
+        apkUrl.startsWith("http://") || apkUrl.startsWith("https://") -> apkUrl
+        else -> "$BASE_URL/${apkUrl.trimStart('/')}"
+    }
+
     /** Parse the latest.json body; null when malformed. */
     fun parseLatest(json: String): LatestRelease? {
         return try {
@@ -37,7 +49,7 @@ object UpdateChecker {
             LatestRelease(
                 versionCode = o.getInt("versionCode"),
                 versionName = o.optString("versionName", "unknown"),
-                apkUrl = o.optString("apkUrl", DEFAULT_APK_URL),
+                apkUrl = resolveApkUrl(o.optString("apkUrl", DEFAULT_APK_URL)),
                 notes = if (o.has("notes")) o.getString("notes") else null
             )
         } catch (e: Exception) {
