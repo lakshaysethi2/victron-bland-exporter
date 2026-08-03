@@ -395,25 +395,23 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             try {
                 val latest = UpdateChecker.fetchLatest()
-                if (latest == null) {
-                    if (showResult) {
-                        AppState.updateCheckMessage = "Update check failed — server unreachable. Try again later."
+                if (latest != null) {
+                    AppState.updateVersionName = latest.versionName
+                    AppState.updateNotes = latest.notes
+                    AppState.updateApkUrl = latest.apkUrl
+                    if (UpdateChecker.isNewer(latest.versionCode, BuildConfig.VERSION_CODE)) {
+                        AppState.updateAvailable = true
+                        if (showResult) {
+                            AppState.updateCheckMessage = "Update available (v${latest.versionName}) — tap Download to install."
+                        }
+                    } else {
+                        AppState.updateAvailable = false
+                        if (showResult) {
+                            AppState.updateCheckMessage = "You're on the latest version (v${BuildConfig.VERSION_NAME})."
+                        }
                     }
-                    return@try
-                }
-                AppState.updateVersionName = latest.versionName
-                AppState.updateNotes = latest.notes
-                AppState.updateApkUrl = latest.apkUrl
-                if (UpdateChecker.isNewer(latest.versionCode, BuildConfig.VERSION_CODE)) {
-                    AppState.updateAvailable = true
-                    if (showResult) {
-                        AppState.updateCheckMessage = "Update available (v${latest.versionName}) — tap Download to install."
-                    }
-                } else {
-                    AppState.updateAvailable = false
-                    if (showResult) {
-                        AppState.updateCheckMessage = "You're on the latest version (v${BuildConfig.VERSION_NAME})."
-                    }
+                } else if (showResult) {
+                    AppState.updateCheckMessage = "Update check failed — server unreachable. Try again later."
                 }
             } finally {
                 // Always clear the in-flight flag, even when the coroutine is
