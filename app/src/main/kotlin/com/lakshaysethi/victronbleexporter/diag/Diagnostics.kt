@@ -41,6 +41,7 @@ object Diagnostics {
     private const val KEY_LAST_AUTO_SEND = "last_auto_send_ms"
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val autoSendLock = Any()
 
     // ------------------------------------------------------------------ device
 
@@ -177,10 +178,20 @@ object Diagnostics {
     suspend fun tryAutoSend(context: Context): Boolean {
         val p = prefs(context)
         val now = System.currentTimeMillis()
-        val last = p.getLong(KEY_LAST_AUTO_SEND, 0L)
-        if (now - last < AUTO_SEND_INTERVAL_MS) return false
-        // Stamp BEFORE sending so a failed send still rate-limits hammering.
-        p.edit().putLong(KEY_LAST_AUTO_SEND, now).apply()
+        // Check + stamp under a lock: app start fires autoSend from both
+        // MainActivity.onCreate and the service onCreate, and without this an
+        // interleaving would let both pass the rate limit and double-POST.
+        val allowed = synchronized(autoSendLock) {
+            val last = p.getLong(KEY_LAST_AUTO_SEND, 0L)
+            if (now - last < AUTO_SEND_INTERVAL_MS) {
+                false
+            } else {
+                // Stamp BEFORE sending so a failed send still rate-limits hammering.
+                p.edit().putLong(KEY_LAST_AUTO_SEND, now).apply()
+                true
+            }
+        }
+        if (!allowed) return false
         val result = sendLogs(context)
         if (result.isSuccess) {
             AppLog.i("Auto diagnostics sent (${currentEntries().size} entries)")

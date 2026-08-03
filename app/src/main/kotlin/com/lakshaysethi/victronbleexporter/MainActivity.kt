@@ -393,27 +393,32 @@ class MainActivity : ComponentActivity() {
         AppState.updateChecking = true
         if (showResult) AppState.updateCheckMessage = null
         lifecycleScope.launch {
-            val latest = UpdateChecker.fetchLatest()
-            AppState.updateChecking = false
-            if (latest == null) {
-                if (showResult) {
-                    AppState.updateCheckMessage = "Update check failed — server unreachable. Try again later."
+            try {
+                val latest = UpdateChecker.fetchLatest()
+                if (latest == null) {
+                    if (showResult) {
+                        AppState.updateCheckMessage = "Update check failed — server unreachable. Try again later."
+                    }
+                    return@try
                 }
-                return@launch
-            }
-            AppState.updateVersionName = latest.versionName
-            AppState.updateNotes = latest.notes
-            AppState.updateApkUrl = latest.apkUrl
-            if (UpdateChecker.isNewer(latest.versionCode, BuildConfig.VERSION_CODE)) {
-                AppState.updateAvailable = true
-                if (showResult) {
-                    AppState.updateCheckMessage = "Update available (v${latest.versionName}) — tap Download to install."
+                AppState.updateVersionName = latest.versionName
+                AppState.updateNotes = latest.notes
+                AppState.updateApkUrl = latest.apkUrl
+                if (UpdateChecker.isNewer(latest.versionCode, BuildConfig.VERSION_CODE)) {
+                    AppState.updateAvailable = true
+                    if (showResult) {
+                        AppState.updateCheckMessage = "Update available (v${latest.versionName}) — tap Download to install."
+                    }
+                } else {
+                    AppState.updateAvailable = false
+                    if (showResult) {
+                        AppState.updateCheckMessage = "You're on the latest version (v${BuildConfig.VERSION_NAME})."
+                    }
                 }
-            } else {
-                AppState.updateAvailable = false
-                if (showResult) {
-                    AppState.updateCheckMessage = "You're on the latest version (v${BuildConfig.VERSION_NAME})."
-                }
+            } finally {
+                // Always clear the in-flight flag, even when the coroutine is
+                // cancelled by activity destruction mid-check.
+                AppState.updateChecking = false
             }
         }
     }
@@ -422,13 +427,18 @@ class MainActivity : ComponentActivity() {
         AppState.diagnosticsSending = true
         AppState.diagnosticsResult = null
         lifecycleScope.launch {
-            val result = Diagnostics.sendLogs(applicationContext)
-            AppState.diagnosticsSending = false
-            AppState.diagnosticsResult = result.fold(
-                onSuccess = { "Diagnostics sent ✓ (${Diagnostics.currentEntries().size} entries)" },
-                onFailure = { "Send failed: ${it.message ?: "no connection"} — logs kept locally." }
-            )
-            Toast.makeText(this@MainActivity, AppState.diagnosticsResult, Toast.LENGTH_SHORT).show()
+            try {
+                val result = Diagnostics.sendLogs(applicationContext)
+                AppState.diagnosticsResult = result.fold(
+                    onSuccess = { "Diagnostics sent ✓ (${Diagnostics.currentEntries().size} entries)" },
+                    onFailure = { "Send failed: ${it.message ?: "no connection"} — logs kept locally." }
+                )
+                Toast.makeText(this@MainActivity, AppState.diagnosticsResult, Toast.LENGTH_SHORT).show()
+            } finally {
+                // try/finally so the button never sticks on "Sending…" even when the
+                // activity is destroyed mid-send and the coroutine is cancelled.
+                AppState.diagnosticsSending = false
+            }
         }
     }
 
