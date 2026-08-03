@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.cancellation.CancellationException
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -160,6 +161,8 @@ object Diagnostics {
             AppLog.flush()
             val body = httpPost(url, payload)
             Result.success(body)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         }

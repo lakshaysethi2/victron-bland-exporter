@@ -2,6 +2,7 @@ package com.lakshaysethi.victronbleexporter.diag
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.cancellation.CancellationException
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -71,6 +72,8 @@ object UpdateChecker {
             } finally {
                 conn.disconnect()
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             null
         }
