@@ -21,6 +21,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - The device requires BLE pairing; PIN is on the sticker or `000000`. Writes are write-without-response; the device echoes the new mode in `08 03 19 02 00 41 <mode>` notifications (status 133 in `onCharacteristicWrite` is a known no-response-write quirk, not an error).
 - Implementation: `charger/ChargerController.kt` (one GATT session per op, latches + dedicated HandlerThread, serialized by a Mutex), `charger/ChargerSchedule.kt` + `data/ChargerScheduleStore.kt` (daily window, manual override until next boundary), `ChargerDebugLog` ring buffer (200 lines) included in Share Debug Logs. Schedule is enforced only while the foreground service runs — by design, called out in UI + README.
 
+## Remote diagnostics + in-app updates
+
+- `diag/` package: `AppLog` (bounded 500-entry log persisted in SharedPreferences, throttled ~2s; `reload()` re-reads for restart tests), `Diagnostics` (payload builder + HttpURLConnection POST to `https://mppt.lak.nz/api/logs`, stable persisted device_id, auto-send rate-limited to 1/hour), `UpdateChecker` (`GET /api/latest.json`, versionCode comparison). No new HTTP deps — plain `HttpURLConnection` on `Dispatchers.IO`.
+- `ChargerDebugLog.append` mirrors every line into `AppLog` (level CHARGER) so the diagnostics payload captures the raw BLE exchange; do not double-include charger lines when sending.
+- Auto-send fires on app start (MainActivity + service onCreate for the boot path) and on significant errors (BLE scan fail/disabled, charger set/read/schedule failures, cloudflared start refusals). Manual "Send Diagnostics" button bypasses the rate limit; the buffer is never cleared on send (it's the retry queue).
+- Update banner shows when `versionCode` served > local `BuildConfig.VERSION_CODE`; "Download & Install" opens `apkUrl` via `ACTION_VIEW`.
+- Tests: pure JVM for `LogBuffer`/payload/`isNewer`; Robolectric (`@ConscryptMode(Mode.OFF)` — Conscrypt's aarch64 native is missing on this host) for persistence, latest.json parsing, and an end-to-end POST against a local `ServerSocket` mock. The live `mppt.lak.nz/api/*` endpoints were 404 at build time — tests must not depend on them.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
