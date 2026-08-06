@@ -47,6 +47,9 @@ object ChargerProtocol {
     /** Register that holds the charger mode (device mode). */
     const val REG_DEVICE_MODE = 0x0200
 
+    /** Solar panel (PV) input voltage in 0.01 V (VE_REG_DC_INPUT_VOLTAGE). */
+    const val REG_PANEL_VOLTAGE = 0xEDBB
+
     /** Value written to / read from REG_DEVICE_MODE. */
     const val MODE_CHARGER_ON = 0x01
     const val MODE_CHARGER_OFF = 0x04
@@ -142,6 +145,13 @@ object ChargerProtocol {
             pos = valueStart + length
         }
         return result
+    }
+
+    /** Panel voltage in volts from the register value bytes (null when not reported / NA 0xFFFF). */
+    fun panelVoltageOf(raw: ByteArray?): Double? {
+        if (raw == null || raw.size < 2) return null
+        val centivolts = ((raw[1].toInt() and 0xFF) shl 8) or (raw[0].toInt() and 0xFF)
+        return if (centivolts == 0xFFFF) null else centivolts / 100.0
     }
 
     /** Device-mode value from parsed registers (null if not reported). */

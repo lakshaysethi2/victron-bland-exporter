@@ -33,6 +33,9 @@ private const val TAG = "VictronBleExporterService"
 private const val NOTIFICATION_ID = 1337
 private const val CHANNEL_ID = "victron_exporter_channel"
 
+/** How often the panel-voltage register read runs while the service is up. */
+private const val PANEL_VOLTAGE_INTERVAL_MS = 60_000L
+
 class VictronBleExporterService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -146,6 +149,7 @@ class VictronBleExporterService : Service() {
         }
 
         startChargerScheduleLoop()
+        startPanelVoltageLoop()
     }
 
     // ---- Charger control (enable/disable over BLE + daily schedule) ----
@@ -262,6 +266,35 @@ class VictronBleExporterService : Service() {
             ChargerDebugLog.append("ERROR: ${e.message}")
         } finally {
             AppState.chargerBusy = false
+        }
+    }
+
+    // ---- Solar panel voltage (GATT register 0xEDBB read, reusing the charger session) ----
+
+    private fun startPanelVoltageLoop() {
+        serviceScope.launch {
+            while (isActive) {
+                try {
+                    readPanelVoltageTick()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Panel voltage read tick failed", e)
+                }
+                delay(PANEL_VOLTAGE_INTERVAL_MS)
+            }
+        }
+    }
+
+    /** Reads the MPPT's panel voltage over the charger GATT service and caches it in AppState. */
+    private suspend fun readPanelVoltageTick() {
+        val mac = chargerScheduleStore.load().chargerMac
+        if (mac.isBlank()) return
+        val result = chargerController.readPanelVoltage(mac)
+        if (result.success) {
+            AppState.panelVoltageVolts = result.panelVoltageVolts
+            AppState.panelVoltageUpdatedAt = System.currentTimeMillis()
+            ChargerDebugLog.append("Panel voltage: ${result.message}")
+        } else {
+            ChargerDebugLog.append("Panel voltage read failed: ${result.message}")
         }
     }
 

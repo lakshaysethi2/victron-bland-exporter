@@ -47,6 +47,12 @@ object AppState {
     /** Epoch millis until which a manual override pauses the schedule; 0 = none. */
     @Volatile var chargerOverrideUntil: Long = 0L
 
+    /** Last solar panel (PV) voltage in volts read via the charger GATT service; null = unknown. */
+    @Volatile var panelVoltageVolts: Double? = null
+
+    /** Epoch millis of the last successful panel-voltage read. */
+    @Volatile var panelVoltageUpdatedAt: Long = 0L
+
     val chargerModeText: String get() = ChargerProtocol.chargerModeText(chargerMode)
 
     /** Section appended to the shared debug log so the captain can diagnose BLE writes. */
@@ -55,6 +61,7 @@ object AppState {
         sb.appendLine("=== Charger control ===")
         sb.appendLine("Target MAC: ${chargerMac ?: "not configured"}")
         sb.appendLine("Charger state: $chargerModeText (mode=${chargerMode ?: "n/a"})")
+        sb.appendLine("Panel voltage: ${panelVoltageVolts?.let { "%.2f V".format(it) } ?: "not read yet"}")
         sb.appendLine("Last action: $chargerLastAction")
         sb.appendLine("Last error: ${chargerLastError ?: "none"}")
         sb.appendLine("Manual override until: ${chargerOverrideUntil.takeIf { it > 0 }?.let { java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(it)) } ?: "none"}")

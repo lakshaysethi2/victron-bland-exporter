@@ -44,6 +44,17 @@ class PrometheusExporter(
                 "${when (chargerMode) { ChargerProtocol.MODE_CHARGER_ON -> 1; ChargerProtocol.MODE_CHARGER_OFF, ChargerProtocol.MODE_CHARGER_OFF_LEGACY -> 0; else -> -1 }}\n\n"
         )
 
+        // Solar panel voltage, read over the charger GATT service (register 0xEDBB) while the service runs
+        sb.append("# HELP victron_panel_voltage_volts Solar panel (PV) input voltage, read over the charger GATT service\n")
+        sb.append("# TYPE victron_panel_voltage_volts gauge\n")
+        appendMetric(
+            sb,
+            "victron_panel_voltage_volts",
+            AppState.chargerMac?.let { "{device=\"$it\"}" } ?: "",
+            AppState.panelVoltageVolts,
+        )
+        sb.append("\n")
+
         for ((mac, device) in all) {
             val labels = buildLabels(mac, device)
             val data = device.data
