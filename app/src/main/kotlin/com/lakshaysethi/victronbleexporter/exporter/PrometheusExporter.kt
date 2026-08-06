@@ -10,6 +10,9 @@ import java.io.IOException
 private const val TAG = "PrometheusExporter"
 private const val DEFAULT_PORT = 5338
 
+/** Devices with no broadcast for longer than this are treated as stale (data metrics omitted). */
+private const val STALE_AFTER_MS = 120_000L
+
 /**
  * Tiny embedded Prometheus exporter using NanoHTTPD.
  * Serves /metrics in Prometheus text format.
@@ -30,10 +33,12 @@ class PrometheusExporter(
     private fun serveMetrics(): Response {
         val sb = StringBuilder()
         val all = MetricsStore.getAll()
+        val now = System.currentTimeMillis()
 
-        sb.append("# HELP victron_devices_total Number of Victron devices discovered\n")
+        val online = all.filter { (mac, _) -> now - MetricsStore.lastSeenMillis(mac) <= STALE_AFTER_MS }
+        sb.append("# HELP victron_devices_total Number of Victron devices reporting fresh data\n")
         sb.append("# TYPE victron_devices_total gauge\n")
-        sb.append("victron_devices_total ${all.size}\n\n")
+        sb.append("victron_devices_total ${online.size}\n\n")
 
         // Charger control state (1 = charger enabled, 0 = disabled, -1 = unknown)
         val chargerMode = AppState.chargerMode
@@ -44,9 +49,46 @@ class PrometheusExporter(
                 "${when (chargerMode) { ChargerProtocol.MODE_CHARGER_ON -> 1; ChargerProtocol.MODE_CHARGER_OFF, ChargerProtocol.MODE_CHARGER_OFF_LEGACY -> 0; else -> -1 }}\n\n"
         )
 
+        // Solar panel voltage, read over the charger GATT service (register 0xEDBB) while the service runs.
+        // Only a fresh, non-null value is served: a null value (device answered 0xFFFF = no panel
+        // voltage, e.g. in darkness) or a value not refreshed within PANEL_VOLTAGE_TTL_MS (MPPT
+        // offline) omits the gauge — the state metric carries the reason, matching the
+        // device-expiry semantics for broadcast data.
+        val pvLabels = buildString {
+            append("{")
+            AppState.chargerMac?.let { append("device=\"$it\"") }
+            AppState.panelVoltageLastError?.let {
+                if (AppState.chargerMac != null) append(",")
+                append("error=\"${it.replace("\"", "'")}\"")
+            }
+            append("}")
+        }
+        val pvFresh = AppState.panelVoltageUpdatedAt != 0L &&
+            now - AppState.panelVoltageUpdatedAt <= AppState.PANEL_VOLTAGE_TTL_MS
+        sb.append("# HELP victron_panel_voltage_volts Solar panel (PV) input voltage, read over the charger GATT service (omitted when unknown or stale)\n")
+        sb.append("# TYPE victron_panel_voltage_volts gauge\n")
+        if (pvFresh) appendMetric(sb, "victron_panel_voltage_volts", pvLabels, AppState.panelVoltageVolts)
+        sb.append("# HELP victron_panel_voltage_state 0=ok, 1=no charger MAC configured, 2=last GATT read failed, 3=no value (never read / device answered NA), 4=stale (no fresh read in ${AppState.PANEL_VOLTAGE_TTL_MS / 60_000} min)\n")
+        sb.append("# TYPE victron_panel_voltage_state gauge\n")
+        val pvState = when {
+            pvFresh && AppState.panelVoltageVolts != null -> 0
+            AppState.panelVoltageLastError != null -> 2
+            AppState.chargerMac.isNullOrBlank() -> 1
+            !pvFresh && AppState.panelVoltageUpdatedAt != 0L -> 4
+            else -> 3
+        }
+        sb.append("victron_panel_voltage_state$pvLabels $pvState\n")
+        sb.append("\n")
+
         for ((mac, device) in all) {
+            val lastSeen = MetricsStore.lastSeenMillis(mac)
             val labels = buildLabels(mac, device)
             val data = device.data
+
+            // Liveness is always emitted; data metrics are omitted once the device goes stale
+            // so Prometheus/Grafana show no data instead of a frozen last value.
+            appendMetric(sb, "victron_last_seen_timestamp", labels, lastSeen / 1000.0)
+            if (now - lastSeen > STALE_AFTER_MS) continue
 
             appendMetric(sb, "victron_battery_voltage_volts", labels, data["battery_voltage"] as? Number)
             appendMetric(sb, "victron_battery_current_amps", labels, data["battery_current"] as? Number)
@@ -56,7 +98,6 @@ class PrometheusExporter(
 
             // Common
             appendMetric(sb, "victron_rssi_dbm", labels, device.rssi.toDouble())
-            appendMetric(sb, "victron_last_seen_timestamp", labels, System.currentTimeMillis() / 1000.0)
 
             if (data.containsKey("charge_state")) {
                 val stateStr = data["charge_state"] as? String

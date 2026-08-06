@@ -246,6 +246,8 @@ Reload Prometheus (`curl -X POST localhost:9090/-/reload` or restart the contain
 | Metric | Unit | Meaning |
 |---|---|---|
 | `victron_battery_voltage_volts` | V | Battery voltage |
+| `victron_panel_voltage_volts` | V | Solar panel (PV) voltage — read over the charger GATT service (register `0xEDBB`) ~every 60 s while the app runs. Omitted (not served) when unknown, a device-answered `0xFFFF` (e.g. no panel voltage in darkness), or not refreshed within 5 minutes — never a stale number |
+| `victron_panel_voltage_state` | enum | 0=ok, 1=no charger MAC configured, 2=last GATT read failed (reason in `error` label), 3=no value (never read or device answered NA), 4=stale — lets you see remotely why the panel voltage isn't landing |
 | `victron_battery_current_amps` | A | Battery current (sign = charge/discharge) |
 | `victron_solar_power_watts` | W | Current solar yield |
 | `victron_yield_today_wh` | Wh | Yield since midnight |
@@ -253,7 +255,10 @@ Reload Prometheus (`curl -X POST localhost:9090/-/reload` or restart the contain
 | `victron_soc_percent` | % | State of charge (SmartShunt/battery monitor) |
 | `victron_charge_state` | enum | 0=OFF, 3=BULK, 4=ABSORPTION, 5=FLOAT |
 | `victron_rssi_dbm` | dBm | BLE signal strength to the phone |
-| `victron_devices_total` | count | Number of Victron devices being served |
+| `victron_last_seen_timestamp` | unix s | Last broadcast received from the device (always emitted — the liveness signal) |
+| `victron_devices_total` | count | Number of Victron devices reporting fresh data |
+
+> **Stale devices**: every data metric (voltage, current, power, yield, charge state, RSSI) is omitted once the device's last broadcast is older than ~2 minutes — no data means no data, so Grafana shows a gap instead of a frozen last value. `victron_last_seen_timestamp` is always emitted, and the app restarts its BLE scan automatically if no broadcasts arrive for ~3 minutes.
 
 Every device-scoped metric carries `device` (model name), `mac` (device MAC — see the privacy note), and `type` labels.
 
@@ -276,11 +281,12 @@ Click **Save & test** — it should report success.
 3. **Upload dashboard JSON file** (or paste the JSON) → **Load**.
 4. When prompted, select your **Prometheus** datasource for the `DS_PROMETHEUS` variable → **Import**.
 
-That's it. The **Solar — Victron MPPT** dashboard appears with five panels:
+That's it. The **Solar — Victron MPPT** dashboard appears with six panels:
 
 - **Yield today** (stat, Wh)
 - **Solar power** (time series, W)
 - **Battery voltage** (time series, V)
+- **Panel voltage** (time series, V)
 - **Battery current** (time series, A)
 - **Devices online** (stat, count)
 

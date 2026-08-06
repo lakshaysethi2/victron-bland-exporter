@@ -60,6 +60,25 @@ class ChargerProtocolTest {
     }
 
     @Test
+    fun `panel voltage read frame and decode`() {
+        // Read frame for the panel-voltage register (VE_REG_DC_INPUT_VOLTAGE 0xEDBB)
+        assertEquals("05038119edbb", ChargerProtocol.makeReadFrame(ChargerProtocol.REG_PANEL_VOLTAGE).toHex())
+
+        // Device notification 08 03 19 ed bb 42 b8 56 -> raw 0x56B8 = 222.00 V (captain's 6-panel array)
+        val values = ChargerProtocol.parseRegisterValues("080319edbb42b856".hexToByteArray())
+        assertEquals(222.0, ChargerProtocol.panelVoltageOf(values[ChargerProtocol.REG_PANEL_VOLTAGE])!!, 0.001)
+
+        // NA value 0xFFFF -> null
+        val na = ChargerProtocol.parseRegisterValues("080319edbb42ffff".hexToByteArray())
+        assertNull(ChargerProtocol.panelVoltageOf(na[ChargerProtocol.REG_PANEL_VOLTAGE]))
+
+        // Missing / short / null raw -> null; 0x0000 is a valid 0.0 V reading (panels dark at night)
+        assertNull(ChargerProtocol.panelVoltageOf(null))
+        assertNull(ChargerProtocol.panelVoltageOf(byteArrayOf(0x56)))
+        assertEquals(0.0, ChargerProtocol.panelVoltageOf(byteArrayOf(0x00, 0x00))!!, 0.001)
+    }
+
+    @Test
     fun `parses battery voltage notification`() {
         // Real capture: 08 03 19 ed 8d 42 35 05 -> register 0xED8D, 2 value bytes (13.33 V)
         val values = ChargerProtocol.parseRegisterValues("080319ed8d423505".hexToByteArray())

@@ -47,7 +47,49 @@ object AppState {
     /** Epoch millis until which a manual override pauses the schedule; 0 = none. */
     @Volatile var chargerOverrideUntil: Long = 0L
 
+    /** Last solar panel (PV) voltage in volts read via the charger GATT service; null = unknown. */
+    @Volatile var panelVoltageVolts: Double? = null
+
+    /** Epoch millis of the last successful panel-voltage read. */
+    @Volatile var panelVoltageUpdatedAt: Long = 0L
+
+    /** Last panel-voltage read failure message; null when the last read succeeded (or none attempted). */
+    @Volatile var panelVoltageLastError: String? = null
+
+    /**
+     * Panel voltage is served on /metrics only while it is fresher than this — mirrors the
+     * device-expiry semantics for broadcast data (a stale value is treated as unknown).
+     */
+    const val PANEL_VOLTAGE_TTL_MS = 5 * 60_000L
+
+    /**
+     * Backoff (ms) after [failures] consecutive panel-voltage read failures: 1 min, doubling
+     * each failure, capped at 15 min (Android 12+ throttles connectGatt after repeated failures).
+     */
+    fun panelVoltageBackoffMs(failures: Int): Long =
+        (60_000L shl failures.coerceIn(0, 4)).coerceAtMost(15 * 60_000L)
+
     val chargerModeText: String get() = ChargerProtocol.chargerModeText(chargerMode)
+
+    // ---- remote diagnostics + in-app updates (written by MainActivity / Diagnostics) ----
+
+    /** True while the manual "Send diagnostics" button is in flight. */
+    @Volatile var diagnosticsSending: Boolean = false
+
+    /** Human-readable outcome of the last manual send (shown under the button). */
+    @Volatile var diagnosticsResult: String? = null
+
+    /** True while a manual/silent update check is in flight. */
+    @Volatile var updateChecking: Boolean = false
+
+    /** Set when a newer release is served; drives the banner. */
+    @Volatile var updateAvailable: Boolean = false
+    @Volatile var updateVersionName: String? = null
+    @Volatile var updateNotes: String? = null
+    @Volatile var updateApkUrl: String? = null
+
+    /** Outcome of the last manual check ("You're on the latest version" / error). */
+    @Volatile var updateCheckMessage: String? = null
 
     /** Section appended to the shared debug log so the captain can diagnose BLE writes. */
     fun chargerDebugSection(): String {
@@ -55,6 +97,8 @@ object AppState {
         sb.appendLine("=== Charger control ===")
         sb.appendLine("Target MAC: ${chargerMac ?: "not configured"}")
         sb.appendLine("Charger state: $chargerModeText (mode=${chargerMode ?: "n/a"})")
+        sb.appendLine("Panel voltage: ${panelVoltageVolts?.let { String.format(java.util.Locale.US, "%.2f V", it) } ?: "not read yet"}")
+        panelVoltageLastError?.let { sb.appendLine("Panel voltage error: $it") }
         sb.appendLine("Last action: $chargerLastAction")
         sb.appendLine("Last error: ${chargerLastError ?: "none"}")
         sb.appendLine("Manual override until: ${chargerOverrideUntil.takeIf { it > 0 }?.let { java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(it)) } ?: "none"}")
