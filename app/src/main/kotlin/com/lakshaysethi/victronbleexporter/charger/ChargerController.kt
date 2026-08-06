@@ -500,6 +500,7 @@ class ChargerController(private val context: Context) {
                     } else {
                         @Suppress("DEPRECATION")
                         char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                        char.value = payload
                         @Suppress("DEPRECATION")
                         gatt.writeCharacteristic(char)
                     }

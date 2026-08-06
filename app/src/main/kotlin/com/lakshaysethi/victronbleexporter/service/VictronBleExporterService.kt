@@ -551,6 +551,7 @@ class VictronBleExporterService : Service() {
 
         try {
             bluetoothLeScanner?.startScan(listOf(scanFilter), scanSettings, scanCallback)
+            lastScanResultAt = System.currentTimeMillis()
             Log.i(TAG, "BLE scan started for Victron devices")
         } catch (e: SecurityException) {
             Log.e(TAG, "Missing BLE permission", e)
