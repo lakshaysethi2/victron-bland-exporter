@@ -288,11 +288,12 @@ class VictronBleExporterService : Service() {
     private suspend fun readPanelVoltageTick() {
         val mac = chargerScheduleStore.load().chargerMac
         if (mac.isBlank()) return
+        AppState.chargerMac = mac
         val result = chargerController.readPanelVoltage(mac)
         if (result.success) {
             AppState.panelVoltageVolts = result.panelVoltageVolts
             AppState.panelVoltageUpdatedAt = System.currentTimeMillis()
-            ChargerDebugLog.append("Panel voltage: ${result.message}")
+            ChargerDebugLog.append(result.message)
         } else {
             ChargerDebugLog.append("Panel voltage read failed: ${result.message}")
         }

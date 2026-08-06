@@ -72,7 +72,7 @@ class ChargerController(private val context: Context) {
     /** Read the solar panel voltage (register 0xEDBB) from the device. */
     suspend fun readPanelVoltage(mac: String): PanelVoltageResult = opMutex.withLock {
         withContext(Dispatchers.IO) {
-            val session = Session(mac)
+            val session = Session(mac, debugLog = false)
             try {
                 if (!session.bootstrap("panel-voltage")) return@withContext session.failedPanelVoltageResult()
                 session.requestRegisterRead(ChargerProtocol.REG_PANEL_VOLTAGE)
@@ -138,7 +138,7 @@ class ChargerController(private val context: Context) {
     }
 
     /** One connect/operate/disconnect session. */
-    private inner class Session(private val mac: String) {
+    private inner class Session(private val mac: String, private val debugLog: Boolean = true) {
 
         private val connectedLatch = CountDownLatch(1)
         private val servicesLatch = CountDownLatch(1)
@@ -159,7 +159,7 @@ class ChargerController(private val context: Context) {
         private fun log(line: String) {
             steps.add(line)
             Log.i(TAG, line)
-            ChargerDebugLog.append(line)
+            if (debugLog) ChargerDebugLog.append(line)
         }
 
         private fun error(line: String) {
