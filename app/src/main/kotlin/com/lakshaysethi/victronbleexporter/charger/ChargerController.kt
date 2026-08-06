@@ -472,6 +472,15 @@ class ChargerController(private val context: Context) {
                 else -> firstError ?: "No panel-voltage readback received"
             }
             log(message)
+            if (!answered) {
+                // Evidence for the register-whitelist question: list which registers the device DID
+                // stream in this session, so a silently-ignored 0xEDBB is distinguishable from a dead
+                // session. (0x0200 arriving while 0xEDBB never does = unsupported register.)
+                val seen = synchronized(registersLock) {
+                    registers.keys.sorted().joinToString(",") { "0x${it.toString(16).padStart(4, '0')}" }
+                }
+                ChargerDebugLog.append("Panel session: no 0xEDBB answer; registers seen: $seen")
+            }
             return PanelVoltageResult(success = answered, panelVoltageVolts = volts, deviceMode = mode, message = message)
         }
 
