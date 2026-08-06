@@ -246,8 +246,8 @@ Reload Prometheus (`curl -X POST localhost:9090/-/reload` or restart the contain
 | Metric | Unit | Meaning |
 |---|---|---|
 | `victron_battery_voltage_volts` | V | Battery voltage |
-| `victron_panel_voltage_volts` | V | Solar panel (PV) voltage — read over the charger GATT service (register `0xEDBB`) ~every 60 s while the app runs. `-1` = unknown (never read or last read failed) |
-| `victron_panel_voltage_state` | enum | 0=ok, 1=no charger MAC configured, 2=last GATT read failed (reason in `error` label), 3=never read — lets you see remotely why the panel voltage isn't landing |
+| `victron_panel_voltage_volts` | V | Solar panel (PV) voltage — read over the charger GATT service (register `0xEDBB`) ~every 60 s while the app runs. Omitted (not served) when unknown, a device-answered `0xFFFF` (e.g. no panel voltage in darkness), or not refreshed within 5 minutes — never a stale number |
+| `victron_panel_voltage_state` | enum | 0=ok, 1=no charger MAC configured, 2=last GATT read failed (reason in `error` label), 3=no value (never read or device answered NA), 4=stale — lets you see remotely why the panel voltage isn't landing |
 | `victron_battery_current_amps` | A | Battery current (sign = charge/discharge) |
 | `victron_solar_power_watts` | W | Current solar yield |
 | `victron_yield_today_wh` | Wh | Yield since midnight |

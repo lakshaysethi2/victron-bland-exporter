@@ -16,6 +16,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
@@ -48,8 +49,16 @@ class ChargerController(private val context: Context) {
     private val bleThread: HandlerThread = HandlerThread("charger-ble").apply { start() }
     private val bleHandler: Handler = Handler(bleThread.looper)
 
-    /** Serializes BLE sessions so a manual tap and the schedule never collide on one GATT connection. */
+    /** Serializes charger-control BLE sessions so a manual tap and the schedule never collide on one GATT connection. */
     private val opMutex = Mutex()
+
+    /**
+     * Separate lock for the background panel-voltage poll: it holds its lock for the whole
+     * connect+read (seconds), so it must never make user-initiated charger control wait.
+     * # ponytail: two sessions to the same device can briefly overlap; if the MPPT rejects
+     * concurrent connections the loser self-heals (poll backoff / user retry).
+     */
+    private val panelPollMutex = Mutex()
 
     private val bluetoothAdapter: BluetoothAdapter? by lazy {
         try {
@@ -71,17 +80,18 @@ class ChargerController(private val context: Context) {
     }
 
     /** Read the solar panel voltage (register 0xEDBB) from the device, plus the device mode (0x0200). */
-    suspend fun readPanelVoltage(mac: String): PanelVoltageResult = opMutex.withLock {
+    suspend fun readPanelVoltage(mac: String): PanelVoltageResult = panelPollMutex.withLock {
         withContext(Dispatchers.IO) {
             val session = Session(mac, debugLog = false)
             try {
                 if (!session.bootstrap("panel-voltage")) return@withContext session.failedPanelVoltageResult()
                 session.requestRegisterRead(ChargerProtocol.REG_PANEL_VOLTAGE)
                 session.requestRegisterRead(ChargerProtocol.REG_DEVICE_MODE)
-                val volts = ChargerProtocol.panelVoltageOf(session.awaitRegisterValue(ChargerProtocol.REG_PANEL_VOLTAGE, READBACK_TIMEOUT_MS))
+                val voltsRaw = session.awaitRegisterValue(ChargerProtocol.REG_PANEL_VOLTAGE, READBACK_TIMEOUT_MS)
+                val volts = ChargerProtocol.panelVoltageOf(voltsRaw)
                 val modeRaw = session.awaitRegisterValue(ChargerProtocol.REG_DEVICE_MODE, READBACK_TIMEOUT_MS)
                 val mode = modeRaw?.let { ChargerProtocol.chargerModeOf(mapOf(ChargerProtocol.REG_DEVICE_MODE to it)) }
-                return@withContext session.finishPanelVoltage(volts, mode)
+                return@withContext session.finishPanelVoltage(answered = voltsRaw != null, volts = volts, mode = mode)
             } catch (e: SecurityException) {
                 return@withContext session.failPanelVoltage("BLE permission denied: ${e.message}")
             } catch (e: Exception) {
@@ -156,6 +166,9 @@ class ChargerController(private val context: Context) {
         private val registers = LinkedHashMap<Int, ByteArray>()
         private val registersLock = Any()
         private val registerMonitor = Object()
+
+        /** Set when a characteristic write was not accepted by the stack; waiters fail fast instead of sitting out the timeout. */
+        private var writeFailed = false
 
         private val steps = mutableListOf<String>()
         private var firstError: String? = null
@@ -401,11 +414,11 @@ class ChargerController(private val context: Context) {
         }
 
         fun awaitModeReadback(): Int? {
-            val deadline = System.currentTimeMillis() + READBACK_TIMEOUT_MS
+            val deadline = SystemClock.elapsedRealtime() + READBACK_TIMEOUT_MS
             val mode: Int
             synchronized(modeMonitor) {
-                while (modeValue < 0 && !readbackClosed) {
-                    val remaining = deadline - System.currentTimeMillis()
+                while (modeValue < 0 && !readbackClosed && !writeFailed) {
+                    val remaining = deadline - SystemClock.elapsedRealtime()
                     if (remaining <= 0) break
                     try {
                         modeMonitor.wait(remaining)
@@ -423,15 +436,19 @@ class ChargerController(private val context: Context) {
             return mode
         }
 
-        /** Wait for a register value to arrive via notifications; null on timeout/disconnect. */
+        /** Wait for a register value to arrive via notifications; null on timeout/disconnect/write failure. */
         fun awaitRegisterValue(registerId: Int, timeoutMs: Long): ByteArray? {
-            val deadline = System.currentTimeMillis() + timeoutMs
+            val deadline = SystemClock.elapsedRealtime() + timeoutMs
             synchronized(registerMonitor) {
                 while (true) {
                     val raw = synchronized(registersLock) { registers[registerId] }
                     if (raw != null) return raw
-                    val remaining = deadline - System.currentTimeMillis()
-                    if (remaining <= 0 || readbackClosed) return null
+                    if (writeFailed || readbackClosed) return null
+                    val remaining = deadline - SystemClock.elapsedRealtime()
+                    if (remaining <= 0) {
+                        error("no readback for register 0x${registerId.toString(16).padStart(4, '0')} within ${timeoutMs}ms")
+                        return null
+                    }
                     try {
                         registerMonitor.wait(remaining)
                     } catch (e: InterruptedException) {
@@ -442,11 +459,19 @@ class ChargerController(private val context: Context) {
             }
         }
 
-        fun finishPanelVoltage(volts: Double?, mode: Int?): PanelVoltageResult {
-            val ok = volts != null
-            val message = if (ok) "Panel voltage: ${String.format(Locale.US, "%.2f", volts)} V" else "No panel-voltage readback received"
+        /**
+         * Success = the device answered the register. A 0xFFFF "not available" answer (e.g. no
+         * panel voltage in darkness) is valid, so [volts] may be null on success; only a genuine
+         * timeout/disconnect (no answer) is a failure.
+         */
+        fun finishPanelVoltage(answered: Boolean, volts: Double?, mode: Int?): PanelVoltageResult {
+            val message = when {
+                volts != null -> "Panel voltage: ${String.format(Locale.US, "%.2f", volts)} V"
+                answered -> "Panel voltage: not available (0xFFFF — device reports no panel voltage)"
+                else -> firstError ?: "No panel-voltage readback received"
+            }
             log(message)
-            return PanelVoltageResult(success = ok, panelVoltageVolts = volts, deviceMode = mode, message = message)
+            return PanelVoltageResult(success = answered, panelVoltageVolts = volts, deviceMode = mode, message = message)
         }
 
         fun failPanelVoltage(message: String): PanelVoltageResult {
@@ -470,17 +495,23 @@ class ChargerController(private val context: Context) {
                     null
                 } ?: continue
                 try {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        gatt.writeCharacteristic(char, payload, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+                    val queued = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        gatt.writeCharacteristic(char, payload, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) == BluetoothGatt.GATT_SUCCESS
                     } else {
                         @Suppress("DEPRECATION")
                         char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                         @Suppress("DEPRECATION")
                         gatt.writeCharacteristic(char)
                     }
+                    if (!queued) {
+                        error("write not accepted by the stack (${shortUuid(uuid)})")
+                        writeFailed = true
+                        return
+                    }
                     log("Write ${shortUuid(uuid)}: ${payload.toHex()}")
                 } catch (e: SecurityException) {
                     error("write failed (permission): ${e.message}")
+                    writeFailed = true
                     return
                 }
                 sleepQuietly(WRITE_GAP_MS)
@@ -505,6 +536,13 @@ class ChargerController(private val context: Context) {
 
         fun close() {
             val gatt = gattRef.getAndSet(null)
+            // Wake any waiter blocked on a register/mode readback so it fails fast instead of
+            // sitting out the full timeout after a give-up or disconnect.
+            synchronized(modeMonitor) {
+                readbackClosed = true
+                modeMonitor.notifyAll()
+            }
+            synchronized(registerMonitor) { registerMonitor.notifyAll() }
             if (gatt != null) {
                 try {
                     gatt.disconnect()

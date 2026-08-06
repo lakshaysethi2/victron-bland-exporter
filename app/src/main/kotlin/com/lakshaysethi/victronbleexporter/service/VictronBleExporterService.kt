@@ -1,5 +1,6 @@
 package com.lakshaysethi.victronbleexporter.service
 
+import android.Manifest
 import android.os.PowerManager
 
 import android.annotation.SuppressLint
@@ -9,11 +10,13 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.le.*
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.lakshaysethi.victronbleexporter.AppState
 import com.lakshaysethi.victronbleexporter.R
 import com.lakshaysethi.victronbleexporter.charger.ChargerController
@@ -39,9 +42,6 @@ private const val PANEL_VOLTAGE_INTERVAL_MS = 60_000L
 /** No scan results for this long -> the BLE scan is considered dead and is restarted. */
 private const val SCAN_RESTART_AFTER_MS = 180_000L
 
-/** After a failed panel-voltage/charger GATT session, back off this long before retrying. */
-private const val GATT_RETRY_BACKOFF_MS = 5 * 60_000L
-
 class VictronBleExporterService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -66,8 +66,10 @@ class VictronBleExporterService : Service() {
     // BLE scan health: epoch millis of the last advertisement that produced a scan result.
     @Volatile private var lastScanResultAt = 0L
 
-    // Panel-voltage GATT read: don't retry immediately after a failure (reduces BLE churn).
+    // Panel-voltage GATT read: don't retry immediately after a failure (reduces BLE churn and
+    // avoids the Android 12+ connectGatt throttling loop); failures count up for the backoff.
     private var panelVoltageRetryAt = 0L
+    private var panelVoltageFailures = 0
 
     fun addDeviceKey(mac: String, key: String) {
         val normalizedMac = DeviceRepository.normalizeMacInput(mac)
@@ -225,7 +227,6 @@ class VictronBleExporterService : Service() {
     private suspend fun performChargerSet(mac: String, enable: Boolean) {
         val store = chargerScheduleStore
         store.chargerMac = mac
-        AppState.chargerMac = mac
         AppState.chargerBusy = true
         AppState.chargerLastAction = if (enable) "Enabling charger…" else "Disabling charger…"
         AppState.chargerLastError = null
@@ -235,6 +236,9 @@ class VictronBleExporterService : Service() {
             AppState.chargerMode = result.mode
             AppState.chargerStateUpdatedAt = System.currentTimeMillis()
             if (result.success) {
+                // Only claim the MAC once the device actually answered — a failed/wrong read
+                // must not make /metrics label old state with a new MAC.
+                AppState.chargerMac = mac
                 // Manual override: pause the schedule until the next window boundary.
                 val cal = Calendar.getInstance()
                 val minutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
@@ -261,7 +265,6 @@ class VictronBleExporterService : Service() {
     private suspend fun performChargerRead(mac: String) {
         val store = chargerScheduleStore
         store.chargerMac = mac
-        AppState.chargerMac = mac
         AppState.chargerBusy = true
         AppState.chargerLastAction = "Reading charger state…"
         AppState.chargerLastError = null
@@ -270,6 +273,7 @@ class VictronBleExporterService : Service() {
             val result = chargerController.readMode(mac)
             AppState.chargerMode = result.mode
             AppState.chargerStateUpdatedAt = System.currentTimeMillis()
+            if (result.success) AppState.chargerMac = mac
             AppState.chargerLastAction = if (result.success) "Read: ${result.modeText}" else "Read failed: ${result.message}"
             if (!result.success) AppState.chargerLastError = result.message
         } catch (e: Exception) {
@@ -327,42 +331,74 @@ class VictronBleExporterService : Service() {
     /**
      * Reads the MPPT's panel voltage over the charger GATT service and caches it in AppState.
      * The same session also reads the device mode so `victron_charger_enabled` stays live even
-     * when the schedule is off; failures are surfaced in AppState (and thus in /metrics) instead
-     * of failing silently.
+     * when the schedule is off. A device-answered 0xFFFF (no panel voltage, e.g. at night) is a
+     * valid success with a null value; only a genuine timeout/error is a failure and backs off.
      */
     private suspend fun readPanelVoltageTick() {
         val mac = chargerScheduleStore.load().chargerMac
+        val now = System.currentTimeMillis()
+
+        // Expire a cached value we have not refreshed in time (MPPT offline / loop stalled) so
+        // /metrics never serves a stale panel voltage.
+        if (AppState.panelVoltageUpdatedAt != 0L && now - AppState.panelVoltageUpdatedAt > AppState.PANEL_VOLTAGE_TTL_MS) {
+            AppState.panelVoltageVolts = null
+        }
+
         if (mac.isBlank()) {
+            // No configured device: nothing to show, and old state must not linger under a cleared MAC.
             AppState.panelVoltageVolts = null
             AppState.panelVoltageLastError = null
+            AppState.chargerMac = null
+            AppState.chargerMode = null
             return
         }
-        val now = System.currentTimeMillis()
         if (now < panelVoltageRetryAt) return
-        AppState.chargerMac = mac
+        if (!bleReady()) return // BLE off or permission missing: skip the tick, no GATT churn
+
         val result = chargerController.readPanelVoltage(mac)
         if (result.success) {
             panelVoltageRetryAt = 0L
+            panelVoltageFailures = 0
             AppState.panelVoltageVolts = result.panelVoltageVolts
             AppState.panelVoltageUpdatedAt = now
             AppState.panelVoltageLastError = null
+            AppState.chargerMac = mac
             result.deviceMode?.let {
                 AppState.chargerMode = it
                 AppState.chargerStateUpdatedAt = now
             }
             ChargerDebugLog.append(result.message)
         } else {
-            // Clear the stale value so /metrics shows the -1 unknown fallback instead of a flat stale line.
+            // Clear the stale value so /metrics never shows a flat stale line.
             AppState.panelVoltageVolts = null
             AppState.panelVoltageLastError = result.message
-            panelVoltageRetryAt = now + GATT_RETRY_BACKOFF_MS
-            ChargerDebugLog.append("Panel voltage read failed: ${result.message} (retry in ${GATT_RETRY_BACKOFF_MS / 60_000} min)")
+            val backoff = AppState.panelVoltageBackoffMs(panelVoltageFailures)
+            panelVoltageFailures = (panelVoltageFailures + 1).coerceAtMost(4)
+            panelVoltageRetryAt = now + backoff
+            ChargerDebugLog.append("Panel voltage read failed: ${result.message} (retry in ${backoff / 60_000} min)")
         }
+    }
+
+    /** True when Bluetooth is on and (on Android 12+) BLUETOOTH_CONNECT is granted. */
+    private fun bleReady(): Boolean {
+        val adapter = try {
+            (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+        } catch (e: Exception) {
+            return false
+        } ?: return false
+        if (!adapter.isEnabled) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return false
+        }
+        return true
     }
 
     private fun saveChargerSchedule(mac: String, enabled: Boolean, enableTime: String, disableTime: String) {
         chargerScheduleStore.save(enabled, enableTime, disableTime, mac)
-        AppState.chargerMac = mac
+        // AppState.chargerMac is intentionally NOT set here: it only reflects a device that
+        // actually answered, so a saved-but-unreachable MAC cannot expose stale state.
         AppState.chargerOverrideUntil = 0L
         lastScheduledMode = null // force a fresh apply on the next tick
         ChargerDebugLog.append(

@@ -50,7 +50,10 @@ class PrometheusExporter(
         )
 
         // Solar panel voltage, read over the charger GATT service (register 0xEDBB) while the service runs.
-        // -1 = unknown (never read or last read failed); the state metric carries the reason.
+        // Only a fresh, non-null value is served: a null value (device answered 0xFFFF = no panel
+        // voltage, e.g. in darkness) or a value not refreshed within PANEL_VOLTAGE_TTL_MS (MPPT
+        // offline) omits the gauge — the state metric carries the reason, matching the
+        // device-expiry semantics for broadcast data.
         val pvLabels = buildString {
             append("{")
             AppState.chargerMac?.let { append("device=\"$it\"") }
@@ -60,15 +63,18 @@ class PrometheusExporter(
             }
             append("}")
         }
-        sb.append("# HELP victron_panel_voltage_volts Solar panel (PV) input voltage, read over the charger GATT service (-1 = unknown)\n")
+        val pvFresh = AppState.panelVoltageUpdatedAt != 0L &&
+            now - AppState.panelVoltageUpdatedAt <= AppState.PANEL_VOLTAGE_TTL_MS
+        sb.append("# HELP victron_panel_voltage_volts Solar panel (PV) input voltage, read over the charger GATT service (omitted when unknown or stale)\n")
         sb.append("# TYPE victron_panel_voltage_volts gauge\n")
-        appendMetric(sb, "victron_panel_voltage_volts", pvLabels, AppState.panelVoltageVolts ?: -1.0)
-        sb.append("# HELP victron_panel_voltage_state 0=ok, 1=no charger MAC configured, 2=last GATT read failed, 3=never read\n")
+        if (pvFresh) appendMetric(sb, "victron_panel_voltage_volts", pvLabels, AppState.panelVoltageVolts)
+        sb.append("# HELP victron_panel_voltage_state 0=ok, 1=no charger MAC configured, 2=last GATT read failed, 3=no value (never read / device answered NA), 4=stale (no fresh read in ${AppState.PANEL_VOLTAGE_TTL_MS / 60_000} min)\n")
         sb.append("# TYPE victron_panel_voltage_state gauge\n")
         val pvState = when {
-            AppState.panelVoltageVolts != null -> 0
+            pvFresh && AppState.panelVoltageVolts != null -> 0
             AppState.panelVoltageLastError != null -> 2
             AppState.chargerMac.isNullOrBlank() -> 1
+            !pvFresh && AppState.panelVoltageUpdatedAt != 0L -> 4
             else -> 3
         }
         sb.append("victron_panel_voltage_state$pvLabels $pvState\n")

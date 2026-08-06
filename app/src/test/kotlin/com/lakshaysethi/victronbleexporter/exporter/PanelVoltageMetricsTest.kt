@@ -5,6 +5,7 @@ import com.lakshaysethi.victronbleexporter.AppState
 import com.lakshaysethi.victronbleexporter.charger.ChargerProtocol
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -65,11 +66,24 @@ class PanelVoltageMetricsTest {
             assertTrue(metrics.contains("# TYPE victron_panel_voltage_volts gauge"))
             assertTrue(metrics.contains("victron_panel_voltage_state{device=\"AA:BB:CC:DD:EE:FF\"} 0"))
 
-            // Before any read (unknown), the gauge emits the -1 fallback and state=3 instead of vanishing.
+            // A fresh read that answers 0xFFFF (no panel voltage, e.g. at night) is a valid
+            // success: the gauge is omitted (no value to serve) and state=3 says why, not an error.
             AppState.panelVoltageVolts = null
-            val fresh = httpGet(exporter.listeningPort)
-            assertTrue(fresh.contains("victron_panel_voltage_volts{device=\"AA:BB:CC:DD:EE:FF\"} -1.0"))
-            assertTrue(fresh.contains("victron_panel_voltage_state{device=\"AA:BB:CC:DD:EE:FF\"} 3"))
+            AppState.panelVoltageLastError = null
+            val na = httpGet(exporter.listeningPort)
+            assertFalse(na.contains("victron_panel_voltage_volts{device=\"AA:BB:CC:DD:EE:FF\"}"))
+            assertTrue(na.contains("victron_panel_voltage_state{device=\"AA:BB:CC:DD:EE:FF\"} 3"))
+
+            // A value not refreshed within the TTL (MPPT offline) is stale: gauge omitted, state=4.
+            AppState.panelVoltageVolts = 222.0
+            AppState.panelVoltageUpdatedAt = System.currentTimeMillis() - AppState.PANEL_VOLTAGE_TTL_MS - 1000
+            AppState.panelVoltageLastError = null
+            val stale = httpGet(exporter.listeningPort)
+            println("=====METRICS_STALE_LINES_BEGIN=====")
+            stale.lines().filter { it.contains("panel_voltage") }.forEach { println(it) }
+            println("=====METRICS_STALE_LINES_END=====")
+            assertFalse(stale.contains("victron_panel_voltage_volts{device=\"AA:BB:CC:DD:EE:FF\"}"))
+            assertTrue(stale.contains("victron_panel_voltage_state{device=\"AA:BB:CC:DD:EE:FF\"} 4"))
 
             // A failed read surfaces its reason remotely: state=2 with an error label.
             AppState.panelVoltageLastError = "connect timed out (panel-voltage)"
@@ -77,6 +91,7 @@ class PanelVoltageMetricsTest {
             println("=====METRICS_FAILED_LINES_BEGIN=====")
             failed.lines().filter { it.contains("panel_voltage") }.forEach { println(it) }
             println("=====METRICS_FAILED_LINES_END=====")
+            assertFalse(failed.contains("victron_panel_voltage_volts{device=\"AA:BB:CC:DD:EE:FF\"}"))
             assertTrue(failed.contains("victron_panel_voltage_state{device=\"AA:BB:CC:DD:EE:FF\",error=\"connect timed out (panel-voltage)\"} 2"))
         } finally {
             exporter.stop()
