@@ -53,6 +53,9 @@ object AppState {
     /** Epoch millis of the last successful panel-voltage read. */
     @Volatile var panelVoltageUpdatedAt: Long = 0L
 
+    /** Last panel-voltage read failure message; null when the last read succeeded (or none attempted). */
+    @Volatile var panelVoltageLastError: String? = null
+
     val chargerModeText: String get() = ChargerProtocol.chargerModeText(chargerMode)
 
     /** Section appended to the shared debug log so the captain can diagnose BLE writes. */
@@ -62,6 +65,7 @@ object AppState {
         sb.appendLine("Target MAC: ${chargerMac ?: "not configured"}")
         sb.appendLine("Charger state: $chargerModeText (mode=${chargerMode ?: "n/a"})")
         sb.appendLine("Panel voltage: ${panelVoltageVolts?.let { String.format(java.util.Locale.US, "%.2f V", it) } ?: "not read yet"}")
+        panelVoltageLastError?.let { sb.appendLine("Panel voltage error: $it") }
         sb.appendLine("Last action: $chargerLastAction")
         sb.appendLine("Last error: ${chargerLastError ?: "none"}")
         sb.appendLine("Manual override until: ${chargerOverrideUntil.takeIf { it > 0 }?.let { java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(it)) } ?: "none"}")

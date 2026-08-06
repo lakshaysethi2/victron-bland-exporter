@@ -36,6 +36,12 @@ private const val CHANNEL_ID = "victron_exporter_channel"
 /** How often the panel-voltage register read runs while the service is up. */
 private const val PANEL_VOLTAGE_INTERVAL_MS = 60_000L
 
+/** No scan results for this long -> the BLE scan is considered dead and is restarted. */
+private const val SCAN_RESTART_AFTER_MS = 180_000L
+
+/** After a failed panel-voltage/charger GATT session, back off this long before retrying. */
+private const val GATT_RETRY_BACKOFF_MS = 5 * 60_000L
+
 class VictronBleExporterService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -56,6 +62,12 @@ class VictronBleExporterService : Service() {
 
     // Device encryption keys: MAC -> key (hex) - in-memory cache, persisted via DeviceRepository
     private val deviceKeys = mutableMapOf<String, String>()
+
+    // BLE scan health: epoch millis of the last advertisement that produced a scan result.
+    @Volatile private var lastScanResultAt = 0L
+
+    // Panel-voltage GATT read: don't retry immediately after a failure (reduces BLE churn).
+    private var panelVoltageRetryAt = 0L
 
     fun addDeviceKey(mac: String, key: String) {
         val normalizedMac = DeviceRepository.normalizeMacInput(mac)
@@ -150,6 +162,7 @@ class VictronBleExporterService : Service() {
 
         startChargerScheduleLoop()
         startPanelVoltageLoop()
+        startScanWatchdog()
     }
 
     // ---- Charger control (enable/disable over BLE + daily schedule) ----
@@ -269,6 +282,33 @@ class VictronBleExporterService : Service() {
         }
     }
 
+    /** Restarts the BLE scan if it has gone silent (Android scans can die without a callback). */
+    private fun startScanWatchdog() {
+        serviceScope.launch {
+            while (isActive) {
+                try {
+                    val last = lastScanResultAt
+                    if (last != 0L && System.currentTimeMillis() - last > SCAN_RESTART_AFTER_MS) {
+                        Log.w(TAG, "No scan results for ${SCAN_RESTART_AFTER_MS}ms — restarting BLE scan")
+                        restartScan()
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Scan watchdog tick failed", e)
+                }
+                delay(60_000)
+            }
+        }
+    }
+
+    private fun restartScan() {
+        try {
+            stopBleScan()
+        } catch (e: Exception) {
+            Log.w(TAG, "stopBleScan failed", e)
+        }
+        startBleScan()
+    }
+
     // ---- Solar panel voltage (GATT register 0xEDBB read, reusing the charger session) ----
 
     private fun startPanelVoltageLoop() {
@@ -284,18 +324,39 @@ class VictronBleExporterService : Service() {
         }
     }
 
-    /** Reads the MPPT's panel voltage over the charger GATT service and caches it in AppState. */
+    /**
+     * Reads the MPPT's panel voltage over the charger GATT service and caches it in AppState.
+     * The same session also reads the device mode so `victron_charger_enabled` stays live even
+     * when the schedule is off; failures are surfaced in AppState (and thus in /metrics) instead
+     * of failing silently.
+     */
     private suspend fun readPanelVoltageTick() {
         val mac = chargerScheduleStore.load().chargerMac
-        if (mac.isBlank()) return
+        if (mac.isBlank()) {
+            AppState.panelVoltageVolts = null
+            AppState.panelVoltageLastError = null
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (now < panelVoltageRetryAt) return
         AppState.chargerMac = mac
         val result = chargerController.readPanelVoltage(mac)
         if (result.success) {
+            panelVoltageRetryAt = 0L
             AppState.panelVoltageVolts = result.panelVoltageVolts
-            AppState.panelVoltageUpdatedAt = System.currentTimeMillis()
+            AppState.panelVoltageUpdatedAt = now
+            AppState.panelVoltageLastError = null
+            result.deviceMode?.let {
+                AppState.chargerMode = it
+                AppState.chargerStateUpdatedAt = now
+            }
             ChargerDebugLog.append(result.message)
         } else {
-            ChargerDebugLog.append("Panel voltage read failed: ${result.message}")
+            // Clear the stale value so /metrics shows the -1 unknown fallback instead of a flat stale line.
+            AppState.panelVoltageVolts = null
+            AppState.panelVoltageLastError = result.message
+            panelVoltageRetryAt = now + GATT_RETRY_BACKOFF_MS
+            ChargerDebugLog.append("Panel voltage read failed: ${result.message} (retry in ${GATT_RETRY_BACKOFF_MS / 60_000} min)")
         }
     }
 
@@ -387,6 +448,7 @@ class VictronBleExporterService : Service() {
         scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 try {
+                    lastScanResultAt = System.currentTimeMillis()
                     val device = result.device
                     val scanRecord = result.scanRecord ?: return
                     val mfgData = scanRecord.getManufacturerSpecificData(0x02E1) ?: return
@@ -442,7 +504,12 @@ class VictronBleExporterService : Service() {
             }
 
             override fun onScanFailed(errorCode: Int) {
-                Log.e(TAG, "BLE Scan failed: $errorCode")
+                Log.e(TAG, "BLE Scan failed: $errorCode — restarting scan")
+                lastScanResultAt = 0L
+                serviceScope.launch {
+                    delay(5_000)
+                    restartScan()
+                }
             }
         }
 

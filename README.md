@@ -74,7 +74,7 @@ In the app's **Charger Control** section:
 
 The current state is exposed as the `victron_charger_enabled` metric (`1` = charger on, `0` = off, `-1` = unknown).
 
-While the app runs it also reads the solar **panel voltage** (register `0xEDBB` over the same GATT service, ~every 60 s) and exposes it as `victron_panel_voltage_volts` — the Instant Readout broadcast does not carry it.
+While the app runs it also reads the solar **panel voltage** (register `0xEDBB` over the same GATT service, ~every 60 s) and exposes it as `victron_panel_voltage_volts` — the Instant Readout broadcast does not carry it. Before the first successful read the gauge reports `-1`; `victron_panel_voltage_state` carries the reason (0=ok, 1=no MAC configured, 2=last read failed with the message in the `error` label, 3=never read) so a silent GATT failure is visible on `/metrics` without needing the debug log.
 
 Pairing: the first connection prompts for a Bluetooth PIN. Use the PIN printed on the product sticker, or `000000` (the common Victron default).
 

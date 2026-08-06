@@ -70,15 +70,18 @@ class ChargerController(private val context: Context) {
         }
     }
 
-    /** Read the solar panel voltage (register 0xEDBB) from the device. */
+    /** Read the solar panel voltage (register 0xEDBB) from the device, plus the device mode (0x0200). */
     suspend fun readPanelVoltage(mac: String): PanelVoltageResult = opMutex.withLock {
         withContext(Dispatchers.IO) {
             val session = Session(mac, debugLog = false)
             try {
                 if (!session.bootstrap("panel-voltage")) return@withContext session.failedPanelVoltageResult()
                 session.requestRegisterRead(ChargerProtocol.REG_PANEL_VOLTAGE)
+                session.requestRegisterRead(ChargerProtocol.REG_DEVICE_MODE)
                 val volts = ChargerProtocol.panelVoltageOf(session.awaitRegisterValue(ChargerProtocol.REG_PANEL_VOLTAGE, READBACK_TIMEOUT_MS))
-                return@withContext session.finishPanelVoltage(volts)
+                val modeRaw = session.awaitRegisterValue(ChargerProtocol.REG_DEVICE_MODE, READBACK_TIMEOUT_MS)
+                val mode = modeRaw?.let { ChargerProtocol.chargerModeOf(mapOf(ChargerProtocol.REG_DEVICE_MODE to it)) }
+                return@withContext session.finishPanelVoltage(volts, mode)
             } catch (e: SecurityException) {
                 return@withContext session.failPanelVoltage("BLE permission denied: ${e.message}")
             } catch (e: Exception) {
@@ -259,6 +262,7 @@ class ChargerController(private val context: Context) {
                     BluetoothProfile.STATE_CONNECTED -> {
                         log("Connected (status=$status) — discovering services")
                         connected.set(1)
+                        connectedLatch.countDown()
                         gatt.discoverServices()
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
@@ -438,22 +442,22 @@ class ChargerController(private val context: Context) {
             }
         }
 
-        fun finishPanelVoltage(volts: Double?): PanelVoltageResult {
+        fun finishPanelVoltage(volts: Double?, mode: Int?): PanelVoltageResult {
             val ok = volts != null
             val message = if (ok) "Panel voltage: ${String.format(Locale.US, "%.2f", volts)} V" else "No panel-voltage readback received"
             log(message)
-            return PanelVoltageResult(success = ok, panelVoltageVolts = volts, message = message)
+            return PanelVoltageResult(success = ok, panelVoltageVolts = volts, deviceMode = mode, message = message)
         }
 
         fun failPanelVoltage(message: String): PanelVoltageResult {
             error(message)
-            return PanelVoltageResult(success = false, panelVoltageVolts = null, message = message)
+            return PanelVoltageResult(success = false, panelVoltageVolts = null, deviceMode = null, message = message)
         }
 
         /** Result for a panel-voltage bootstrap failure (the specific error was already logged). */
         fun failedPanelVoltageResult(): PanelVoltageResult {
             val message = firstError ?: "session failed"
-            return PanelVoltageResult(success = false, panelVoltageVolts = null, message = message)
+            return PanelVoltageResult(success = false, panelVoltageVolts = null, deviceMode = null, message = message)
         }
 
         private fun writeFrames(frames: List<Pair<String, ByteArray>>) {
@@ -556,9 +560,10 @@ data class ChargerOpResult(
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
 }
 
-/** Outcome of a solar panel voltage register read. */
+/** Outcome of a solar panel voltage register read (device mode read in the same session). */
 data class PanelVoltageResult(
     val success: Boolean,
     val panelVoltageVolts: Double?,
+    val deviceMode: Int?,
     val message: String,
 )

@@ -5,7 +5,6 @@ import com.lakshaysethi.victronbleexporter.AppState
 import com.lakshaysethi.victronbleexporter.charger.ChargerProtocol
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -31,6 +30,7 @@ class PanelVoltageMetricsTest {
         AppState.chargerMac = null
         AppState.panelVoltageVolts = null
         AppState.panelVoltageUpdatedAt = 0L
+        AppState.panelVoltageLastError = null
     }
 
     private fun httpGet(port: Int): String {
@@ -63,11 +63,21 @@ class PanelVoltageMetricsTest {
             assertTrue(metrics.contains("victron_panel_voltage_volts{device=\"AA:BB:CC:DD:EE:FF\"} 222.0"))
             assertTrue(metrics.contains("# HELP victron_panel_voltage_volts"))
             assertTrue(metrics.contains("# TYPE victron_panel_voltage_volts gauge"))
+            assertTrue(metrics.contains("victron_panel_voltage_state{device=\"AA:BB:CC:DD:EE:FF\"} 0"))
 
-            // Before any read (NA / not read yet), the gauge is absent from /metrics.
+            // Before any read (unknown), the gauge emits the -1 fallback and state=3 instead of vanishing.
             AppState.panelVoltageVolts = null
             val fresh = httpGet(exporter.listeningPort)
-            assertFalse(fresh.contains("victron_panel_voltage_volts{device="))
+            assertTrue(fresh.contains("victron_panel_voltage_volts{device=\"AA:BB:CC:DD:EE:FF\"} -1.0"))
+            assertTrue(fresh.contains("victron_panel_voltage_state{device=\"AA:BB:CC:DD:EE:FF\"} 3"))
+
+            // A failed read surfaces its reason remotely: state=2 with an error label.
+            AppState.panelVoltageLastError = "connect timed out (panel-voltage)"
+            val failed = httpGet(exporter.listeningPort)
+            println("=====METRICS_FAILED_LINES_BEGIN=====")
+            failed.lines().filter { it.contains("panel_voltage") }.forEach { println(it) }
+            println("=====METRICS_FAILED_LINES_END=====")
+            assertTrue(failed.contains("victron_panel_voltage_state{device=\"AA:BB:CC:DD:EE:FF\",error=\"connect timed out (panel-voltage)\"} 2"))
         } finally {
             exporter.stop()
         }
