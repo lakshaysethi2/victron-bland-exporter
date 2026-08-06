@@ -22,6 +22,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -439,7 +440,7 @@ class ChargerController(private val context: Context) {
 
         fun finishPanelVoltage(volts: Double?): PanelVoltageResult {
             val ok = volts != null
-            val message = if (ok) "Panel voltage: ${String.format("%.2f", volts)} V" else "No panel-voltage readback received"
+            val message = if (ok) "Panel voltage: ${String.format(Locale.US, "%.2f", volts)} V" else "No panel-voltage readback received"
             log(message)
             return PanelVoltageResult(success = ok, panelVoltageVolts = volts, message = message)
         }

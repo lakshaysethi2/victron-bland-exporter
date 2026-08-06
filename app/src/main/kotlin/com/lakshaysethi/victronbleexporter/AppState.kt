@@ -61,7 +61,7 @@ object AppState {
         sb.appendLine("=== Charger control ===")
         sb.appendLine("Target MAC: ${chargerMac ?: "not configured"}")
         sb.appendLine("Charger state: $chargerModeText (mode=${chargerMode ?: "n/a"})")
-        sb.appendLine("Panel voltage: ${panelVoltageVolts?.let { "%.2f V".format(it) } ?: "not read yet"}")
+        sb.appendLine("Panel voltage: ${panelVoltageVolts?.let { String.format(java.util.Locale.US, "%.2f V", it) } ?: "not read yet"}")
         sb.appendLine("Last action: $chargerLastAction")
         sb.appendLine("Last error: ${chargerLastError ?: "none"}")
         sb.appendLine("Manual override until: ${chargerOverrideUntil.takeIf { it > 0 }?.let { java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(it)) } ?: "none"}")
