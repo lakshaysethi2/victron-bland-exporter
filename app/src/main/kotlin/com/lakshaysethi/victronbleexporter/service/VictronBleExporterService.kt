@@ -427,7 +427,7 @@ class VictronBleExporterService : Service() {
                         cloudflaredManager.startNamedTunnel(token) { status ->
                             updateNotification(status)
                         }
-                    } else {
+                    } else if (!restoreSavedTunnel()) {
                         // Quick tunnel fallback
                         cloudflaredManager.startQuickTunnel(5338) { status ->
                             updateNotification(status)
@@ -458,8 +458,24 @@ class VictronBleExporterService : Service() {
                 }
             }
         }
+        if (intent?.action == null) {
+            // Boot / sticky restart with no command: restore the named tunnel from the persisted token.
+            restoreSavedTunnel()
+        }
         updateNotification("Running")
         return START_STICKY
+    }
+
+    /** Starts the named tunnel from the persisted token; returns false when no token is saved. */
+    private fun restoreSavedTunnel(): Boolean {
+        val token = try {
+            deviceRepository.getTunnelToken()
+        } catch (e: Exception) {
+            null
+        }
+        if (token.isNullOrBlank()) return false
+        cloudflaredManager.startNamedTunnel(token) { status -> updateNotification(status) }
+        return true
     }
 
     private fun startBleScan() {

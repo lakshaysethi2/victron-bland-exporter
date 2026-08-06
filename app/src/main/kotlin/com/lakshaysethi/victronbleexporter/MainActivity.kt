@@ -244,6 +244,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startTunnel(token: String) {
+        // Persist so the named tunnel can be restored after app/service restart or reboot.
+        try {
+            DeviceRepository(this).saveTunnelToken(token)
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Failed to persist tunnel token", e)
+        }
         val intent = Intent(this, VictronBleExporterService::class.java).apply {
             action = "START_TUNNEL"
             putExtra("tunnel_token", token)
