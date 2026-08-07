@@ -34,13 +34,18 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.lakshaysethi.victronbleexporter.data.DeviceRepository
+import com.lakshaysethi.victronbleexporter.diag.AppLog
+import com.lakshaysethi.victronbleexporter.diag.Diagnostics
+import com.lakshaysethi.victronbleexporter.diag.UpdateChecker
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevice
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
 import com.lakshaysethi.victronbleexporter.service.VictronBleExporterService
 import com.lakshaysethi.victronbleexporter.tunnel.CloudflaredManager
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -79,12 +84,22 @@ class MainActivity : ComponentActivity() {
                     onCopyTunnelUrl = { url -> copyTunnelUrl(url) },
                     onShareTunnelUrl = { url -> shareTunnelUrl(url) },
                     onDnsSelfTest = { runDnsSelfTest() },
-                    onDisableBatteryOpt = { requestDisableBatteryOptimizations() }
+                    onDisableBatteryOpt = { requestDisableBatteryOptimizations() },
+                    onCheckUpdates = { checkForUpdates() },
+                    onSendDiagnostics = { sendDiagnostics() },
+                    onDownloadUpdate = { url -> downloadUpdate(url) }
                 )
             }
         }
 
         checkAndRequestPermissions()
+
+        // Remote diagnostics: fire-and-forget auto-send (rate-limited to 1/hour) and a
+        // silent update check that only surfaces a banner when a newer APK is served.
+        AppLog.init(this)
+        AppLog.i("App opened — app v${BuildConfig.VERSION_NAME}")
+        Diagnostics.autoSend(applicationContext)
+        lifecycleScope.launch { runUpdateCheck(showResult = false) }
     }
 
     private fun checkAndRequestPermissions() {
@@ -365,6 +380,73 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Failed to open battery settings: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
+
+    // ---- Remote diagnostics + in-app updates ----
+
+    private fun checkForUpdates() = runUpdateCheck(showResult = true)
+
+    /**
+     * Fetch latest.json and update AppState. Silent (no message) on app start;
+     * the manual "Check for updates" path shows an outcome message.
+     */
+    private fun runUpdateCheck(showResult: Boolean) {
+        AppState.updateChecking = true
+        if (showResult) AppState.updateCheckMessage = null
+        lifecycleScope.launch {
+            try {
+                val latest = UpdateChecker.fetchLatest()
+                if (latest != null) {
+                    AppState.updateVersionName = latest.versionName
+                    AppState.updateNotes = latest.notes
+                    AppState.updateApkUrl = latest.apkUrl
+                    if (UpdateChecker.isNewer(latest.versionCode, BuildConfig.VERSION_CODE)) {
+                        AppState.updateAvailable = true
+                        if (showResult) {
+                            AppState.updateCheckMessage = "Update available (v${latest.versionName}) — tap Download to install."
+                        }
+                    } else {
+                        AppState.updateAvailable = false
+                        if (showResult) {
+                            AppState.updateCheckMessage = "You're on the latest version (v${BuildConfig.VERSION_NAME})."
+                        }
+                    }
+                } else if (showResult) {
+                    AppState.updateCheckMessage = "Update check failed — server unreachable. Try again later."
+                }
+            } finally {
+                // Always clear the in-flight flag, even when the coroutine is
+                // cancelled by activity destruction mid-check.
+                AppState.updateChecking = false
+            }
+        }
+    }
+
+    private fun sendDiagnostics() {
+        AppState.diagnosticsSending = true
+        AppState.diagnosticsResult = null
+        lifecycleScope.launch {
+            try {
+                val result = Diagnostics.sendLogs(applicationContext)
+                AppState.diagnosticsResult = result.fold(
+                    onSuccess = { "Diagnostics sent ✓ (${Diagnostics.currentEntries().size} entries)" },
+                    onFailure = { "Send failed: ${it.message ?: "no connection"} — logs kept locally." }
+                )
+                Toast.makeText(this@MainActivity, AppState.diagnosticsResult, Toast.LENGTH_SHORT).show()
+            } finally {
+                // try/finally so the button never sticks on "Sending…" even when the
+                // activity is destroyed mid-send and the coroutine is cancelled.
+                AppState.diagnosticsSending = false
+            }
+        }
+    }
+
+    private fun downloadUpdate(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (e: Exception) {
+            Toast.makeText(this, "No app found to open $url", Toast.LENGTH_LONG).show()
+        }
+    }
 }
 
 @Composable
@@ -384,7 +466,10 @@ fun VictronBleExporterScreen(
     onCopyTunnelUrl: (String) -> Unit,
     onShareTunnelUrl: (String) -> Unit,
     onDnsSelfTest: () -> Unit,
-    onDisableBatteryOpt: () -> Unit
+    onDisableBatteryOpt: () -> Unit,
+    onCheckUpdates: () -> Unit,
+    onSendDiagnostics: () -> Unit,
+    onDownloadUpdate: (String) -> Unit
 ) {
     val context = LocalContext.current
     var deviceCount by remember { mutableStateOf(0) }
@@ -413,6 +498,16 @@ fun VictronBleExporterScreen(
     var tunnelUrl by remember { mutableStateOf(AppState.tunnelUrl) }
     var dnsSelfTestResult by remember { mutableStateOf(AppState.dnsSelfTestResult) }
     var isScanning by remember { mutableStateOf(false) }
+
+    // Diagnostics + update-check UI state (polled from AppState like the rest)
+    var updateChecking by remember { mutableStateOf(AppState.updateChecking) }
+    var updateAvailable by remember { mutableStateOf(AppState.updateAvailable) }
+    var updateVersionName by remember { mutableStateOf(AppState.updateVersionName) }
+    var updateNotes by remember { mutableStateOf(AppState.updateNotes) }
+    var updateApkUrl by remember { mutableStateOf(AppState.updateApkUrl) }
+    var updateCheckMessage by remember { mutableStateOf(AppState.updateCheckMessage) }
+    var diagnosticsSending by remember { mutableStateOf(AppState.diagnosticsSending) }
+    var diagnosticsResult by remember { mutableStateOf(AppState.diagnosticsResult) }
 
     // Clipboard helpers
     fun pasteFromClipboard(): String {
@@ -566,6 +661,16 @@ fun VictronBleExporterScreen(
                 chargerLastAction = AppState.chargerLastAction
                 chargerLastError = AppState.chargerLastError
                 chargerOverrideUntil = AppState.chargerOverrideUntil
+
+                // Diagnostics + update-check state
+                updateChecking = AppState.updateChecking
+                updateAvailable = AppState.updateAvailable
+                updateVersionName = AppState.updateVersionName
+                updateNotes = AppState.updateNotes
+                updateApkUrl = AppState.updateApkUrl
+                updateCheckMessage = AppState.updateCheckMessage
+                diagnosticsSending = AppState.diagnosticsSending
+                diagnosticsResult = AppState.diagnosticsResult
                 if (AppState.chargerMac != null && chargerMac.isBlank()) {
                     chargerMac = AppState.chargerMac!!
                 }
@@ -1183,6 +1288,73 @@ fun VictronBleExporterScreen(
                     )
                 }
             }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        // ===== DIAGNOSTICS & UPDATES =====
+        Text("Diagnostics & Updates", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(
+            "Sends the last ${AppLog.MAX_ENTRIES} app/charger log entries plus device info to the " +
+                "captain's server. Auto-sends on app start and after significant errors (max once/hour); " +
+                "the button below sends immediately.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+
+        if (updateAvailable) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "Update available (v${updateVersionName ?: ""})",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    updateNotes?.takeIf { it.isNotBlank() }?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall)
+                    }
+                    Button(onClick = { onDownloadUpdate(updateApkUrl ?: UpdateChecker.DEFAULT_APK_URL) }) {
+                        Text("Download & Install")
+                    }
+                    Text(
+                        "Opens the APK in your browser for download/install.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(
+                onClick = onCheckUpdates,
+                modifier = Modifier.weight(1f),
+                enabled = !updateChecking
+            ) {
+                Text(if (updateChecking) "Checking…" else "Check for Updates")
+            }
+            Button(
+                onClick = onSendDiagnostics,
+                modifier = Modifier.weight(1f),
+                enabled = !diagnosticsSending
+            ) {
+                Text(if (diagnosticsSending) "Sending…" else "Send Diagnostics")
+            }
+        }
+        updateCheckMessage?.let {
+            Spacer(Modifier.height(6.dp))
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        diagnosticsResult?.let {
+            Spacer(Modifier.height(6.dp))
+            Text(it, style = MaterialTheme.typography.bodySmall)
         }
 
         Spacer(Modifier.height(32.dp))

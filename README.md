@@ -51,10 +51,12 @@ The full, beginner-friendly walkthrough is in **[`guide.md`](guide.md)** — bui
 - ⚡ **Charger control over BLE** — enable/disable the MPPT charger (register `0x0200` device mode via the VictronConnect GATT service) with visible state, readback verification, and a configurable daily on/off schedule (default 08:30 → 18:00)
 - 🖥️ **Importable Grafana dashboard** — [`deploy/grafana-dashboard.json`](deploy/grafana-dashboard.json): solar power, battery voltage/current, yield, devices online
 - 🐞 **Share Debug Logs** — one tap bundles the last 200 cloudflared lines, exit code, network-bind/DNS preflight, and a DNS self-test report, with clipboard fallback — *the* tool for diagnosing tunnel issues
+- 🐛 **Remote diagnostics** — "Send Diagnostics" button (and auto-send on app start + significant errors, 1/hour) POSTs the last 500 log lines plus device info to the captain's log server (`https://mppt-logs.lak.nz`) so failures can be debugged without visiting the room; offline logs are queued locally
+- 🔄 **In-app update checks** — checks `https://mppt-logs.lak.nz/api/latest.json`; when a newer `versionCode` is served the banner shows **"Update available (v… ) — Download"** (with notes) and opens `apkUrl` in the browser — no manual APK transfer needed
 - 🔍 **DNS Self-Test button** — verifies on-device that the bundled binary is the dynamic cgo build (fails hard if a static binary sneaks back in)
 - 📱 **Easy discovery UX** — auto-scans nearby Victron devices, tap to auto-fill the MAC, paste the key
 - 🔋 **Runs unattended** — foreground service, auto-start on boot, battery-optimization handling, multi-device support
-- 🌳 **Open source (MIT)** — no cloud dependency for the app itself; quick tunnels need no account at all
+- 🌳 **Open source (MIT)** — quick tunnels need no account at all; diagnostics/updates are optional and degrade gracefully when the server is unreachable
 
 ---
 
@@ -120,7 +122,7 @@ app/src/main/jniLibs/arm64-v8a/libcloudflared.so                        (bundled
 
 ## Project status
 
-Core functionality is complete and battle-tested on real hardware: BLE parsing, Prometheus export, tunnel with working child DNS, debug-log sharing, charger control, and the Grafana dashboard. Community help welcome on:
+Core functionality is complete and battle-tested on real hardware: BLE parsing, Prometheus export, tunnel with working child DNS, debug-log sharing, charger control, remote diagnostics + in-app updates, and the Grafana dashboard. Community help welcome on:
 
 - More device types (Inverter, DC/DC converters, etc.)
 - Nicer onboarding UI and encrypted key storage

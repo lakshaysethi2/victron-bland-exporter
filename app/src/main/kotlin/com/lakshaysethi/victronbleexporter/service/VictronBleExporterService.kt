@@ -15,12 +15,15 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.lakshaysethi.victronbleexporter.AppState
+import com.lakshaysethi.victronbleexporter.BuildConfig
 import com.lakshaysethi.victronbleexporter.R
 import com.lakshaysethi.victronbleexporter.charger.ChargerController
 import com.lakshaysethi.victronbleexporter.charger.ChargerDebugLog
 import com.lakshaysethi.victronbleexporter.charger.ChargerSchedule
 import com.lakshaysethi.victronbleexporter.data.ChargerScheduleStore
 import com.lakshaysethi.victronbleexporter.data.DeviceRepository
+import com.lakshaysethi.victronbleexporter.diag.AppLog
+import com.lakshaysethi.victronbleexporter.diag.Diagnostics
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
 import com.lakshaysethi.victronbleexporter.exporter.PrometheusExporter
@@ -89,6 +92,10 @@ class VictronBleExporterService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "Service onCreate")
+        AppLog.init(this)
+        AppLog.i("Service starting — app v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+        // Boot path (no MainActivity): still auto-send logs + let diagnostics run.
+        Diagnostics.autoSend(this)
 
         try {
             createNotificationChannel()
@@ -201,6 +208,8 @@ class VictronBleExporterService : Service() {
         } else {
             AppState.chargerLastAction = "Schedule apply failed: ${result.message}"
             AppState.chargerLastError = result.message
+            AppLog.e("Charger schedule apply failed: ${result.message}")
+            Diagnostics.autoSend(this)
             scheduleRetryAt = now + 10 * 60_000L
         }
     }
@@ -230,12 +239,16 @@ class VictronBleExporterService : Service() {
             } else {
                 AppState.chargerLastAction = "Failed: ${result.message}"
                 AppState.chargerLastError = result.message
+                AppLog.e("Charger ${if (enable) "enable" else "disable"} failed: ${result.message}")
+                Diagnostics.autoSend(this)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Charger set failed", e)
             AppState.chargerLastAction = "Failed: ${e.message}"
             AppState.chargerLastError = e.message
             ChargerDebugLog.append("ERROR: ${e.message}")
+            AppLog.e("Charger set failed: ${e.message}")
+            Diagnostics.autoSend(this)
         } finally {
             AppState.chargerBusy = false
         }
@@ -254,12 +267,18 @@ class VictronBleExporterService : Service() {
             AppState.chargerMode = result.mode
             AppState.chargerStateUpdatedAt = System.currentTimeMillis()
             AppState.chargerLastAction = if (result.success) "Read: ${result.modeText}" else "Read failed: ${result.message}"
-            if (!result.success) AppState.chargerLastError = result.message
+            if (!result.success) {
+                AppState.chargerLastError = result.message
+                AppLog.e("Charger state read failed: ${result.message}")
+                Diagnostics.autoSend(this)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Charger read failed", e)
             AppState.chargerLastAction = "Read failed: ${e.message}"
             AppState.chargerLastError = e.message
             ChargerDebugLog.append("ERROR: ${e.message}")
+            AppLog.e("Charger read failed: ${e.message}")
+            Diagnostics.autoSend(this)
         } finally {
             AppState.chargerBusy = false
         }
@@ -336,6 +355,8 @@ class VictronBleExporterService : Service() {
         val adapter = bluetoothManager.adapter
         if (adapter == null || !adapter.isEnabled) {
             Log.w(TAG, "Bluetooth not available or disabled")
+            AppLog.e("BLE unavailable/disabled — scan skipped")
+            Diagnostics.autoSend(this)
             return
         }
 
@@ -409,6 +430,8 @@ class VictronBleExporterService : Service() {
 
             override fun onScanFailed(errorCode: Int) {
                 Log.e(TAG, "BLE Scan failed: $errorCode")
+                AppLog.e("BLE scan failed: errorCode=$errorCode")
+                Diagnostics.autoSend(this@VictronBleExporterService)
             }
         }
 
@@ -417,6 +440,8 @@ class VictronBleExporterService : Service() {
             Log.i(TAG, "BLE scan started for Victron devices")
         } catch (e: SecurityException) {
             Log.e(TAG, "Missing BLE permission", e)
+            AppLog.e("BLE scan start blocked — permission missing")
+            Diagnostics.autoSend(this)
         }
     }
 
@@ -496,6 +521,7 @@ class VictronBleExporterService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Log.i(TAG, "Service onDestroy")
+        AppLog.i("Service stopped")
         try { stopBleScan() } catch (e: Exception) { Log.w(TAG, "stopBleScan failed", e) }
         try {
             if (::prometheusExporter.isInitialized) prometheusExporter.stopServer()
