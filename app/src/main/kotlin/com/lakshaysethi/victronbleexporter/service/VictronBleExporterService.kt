@@ -440,6 +440,8 @@ class VictronBleExporterService : Service() {
             Log.i(TAG, "BLE scan started for Victron devices")
         } catch (e: SecurityException) {
             Log.e(TAG, "Missing BLE permission", e)
+            AppLog.e("BLE scan start blocked — permission missing")
+            Diagnostics.autoSend(this)
         }
     }
 
