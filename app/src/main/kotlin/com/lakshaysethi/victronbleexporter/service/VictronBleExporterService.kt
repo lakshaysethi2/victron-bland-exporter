@@ -25,6 +25,7 @@ import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
 import com.lakshaysethi.victronbleexporter.exporter.ChargerCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.ChargerStatusSnapshot
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
+import com.lakshaysethi.victronbleexporter.exporter.VoltageCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
 import com.lakshaysethi.victronbleexporter.exporter.PrometheusExporter
 import com.lakshaysethi.victronbleexporter.exporter.RemoteChargerHttp
@@ -79,7 +80,43 @@ class VictronBleExporterService : Service() {
                     Log.e(TAG, "Remote charger command could not be sent", e)
                 }
             },
-        )
+        ).also { http ->
+            http.attachVoltageSender(object : VoltageCommandSender {
+                override fun sendBatteryVoltageSetting(mac: String, volts: Int) {
+                    try {
+                        startForegroundService(Intent(this@VictronBleExporterService, VictronBleExporterService::class.java).apply {
+                            action = "VOLTAGE_SET_BATTERY"
+                            putExtra("mac", mac)
+                            putExtra("volts", volts)
+                        })
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Remote battery voltage command failed", e)
+                    }
+                }
+                override fun sendChargingVoltages(mac: String, absorptionVolts: Double?, floatVolts: Double?) {
+                    try {
+                        startForegroundService(Intent(this@VictronBleExporterService, VictronBleExporterService::class.java).apply {
+                            action = "VOLTAGE_SET_CHARGING"
+                            putExtra("mac", mac)
+                            if (absorptionVolts != null) putExtra("absorption_volts", absorptionVolts)
+                            if (floatVolts != null) putExtra("float_volts", floatVolts)
+                        })
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Remote charging voltage command failed", e)
+                    }
+                }
+                override fun requestVoltageRead(mac: String) {
+                    try {
+                        startForegroundService(Intent(this@VictronBleExporterService, VictronBleExporterService::class.java).apply {
+                            action = "VOLTAGE_READ"
+                            putExtra("mac", mac)
+                        })
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Remote voltage read failed", e)
+                    }
+                }
+            })
+        }
     }
 
     // Device encryption keys: MAC -> key (hex) - in-memory cache, persisted via DeviceRepository
@@ -296,6 +333,89 @@ class VictronBleExporterService : Service() {
         }
     }
 
+    // ---- voltage settings (battery system voltage + absorption/float) ----
+
+    private suspend fun performVoltageRead(mac: String) {
+        chargerScheduleStore.chargerMac = mac
+        AppState.chargerMac = mac
+        AppState.chargerBusy = true
+        AppState.chargerLastAction = "Reading voltage settings…"
+        AppState.voltageSettingsLastError = null
+        ChargerDebugLog.append("Voltage settings read requested for $mac")
+        try {
+            val result = chargerController.readVoltageSettings(mac)
+            if (result.success) {
+                AppState.voltageSettings = result.settings
+                AppState.voltageSettingsUpdatedAt = System.currentTimeMillis()
+                AppState.chargerLastAction = "Voltage: ${'$'}result"
+            } else {
+                AppState.chargerLastAction = "Voltage read failed: ${'$'}{result.message}"
+                AppState.voltageSettingsLastError = result.message
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Voltage read failed", e)
+            AppState.chargerLastAction = "Voltage read failed: ${'$'}{e.message}"
+            AppState.voltageSettingsLastError = e.message
+            ChargerDebugLog.append("ERROR: ${'$'}{e.message}")
+        } finally {
+            AppState.chargerBusy = false
+        }
+    }
+
+    private suspend fun performSetBatteryVoltage(mac: String, volts: Int) {
+        chargerScheduleStore.chargerMac = mac
+        AppState.chargerMac = mac
+        AppState.chargerBusy = true
+        AppState.chargerLastAction = "Setting battery voltage to ${'$'}volts V…"
+        AppState.voltageSettingsLastError = null
+        ChargerDebugLog.append("Set battery voltage ${'$'}volts V for $mac")
+        try {
+            val result = chargerController.setBatteryVoltageSetting(mac, volts)
+            if (result.success) {
+                AppState.voltageSettings = result.settings
+                AppState.voltageSettingsUpdatedAt = System.currentTimeMillis()
+                AppState.chargerLastAction = "Battery voltage set to ${'$'}volts V"
+            } else {
+                AppState.chargerLastAction = "Battery voltage write failed: ${'$'}{result.message}"
+                AppState.voltageSettingsLastError = result.message
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Battery voltage set failed", e)
+            AppState.chargerLastAction = "Failed: ${'$'}{e.message}"
+            AppState.voltageSettingsLastError = e.message
+            ChargerDebugLog.append("ERROR: ${'$'}{e.message}")
+        } finally {
+            AppState.chargerBusy = false
+        }
+    }
+
+    private suspend fun performSetChargingVoltages(mac: String, absorptionVolts: Double?, floatVolts: Double?) {
+        chargerScheduleStore.chargerMac = mac
+        AppState.chargerMac = mac
+        AppState.chargerBusy = true
+        AppState.chargerLastAction = "Setting charge voltages…"
+        AppState.voltageSettingsLastError = null
+        ChargerDebugLog.append("Set charging voltages abs=${'$'}absorptionVolts float=${'$'}floatVolts for $mac")
+        try {
+            val result = chargerController.setChargingVoltages(mac, absorptionVolts, floatVolts)
+            if (result.success) {
+                AppState.voltageSettings = result.settings
+                AppState.voltageSettingsUpdatedAt = System.currentTimeMillis()
+                AppState.chargerLastAction = "Charge voltages updated: ${'$'}result"
+            } else {
+                AppState.chargerLastAction = "Charge voltage write failed: ${'$'}{result.message}"
+                AppState.voltageSettingsLastError = result.message
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Charge voltage set failed", e)
+            AppState.chargerLastAction = "Failed: ${'$'}{e.message}"
+            AppState.voltageSettingsLastError = e.message
+            ChargerDebugLog.append("ERROR: ${'$'}{e.message}")
+        } finally {
+            AppState.chargerBusy = false
+        }
+    }
+
     private fun saveChargerSchedule(mac: String, enabled: Boolean, enableTime: String, disableTime: String) {
         chargerScheduleStore.save(enabled, enableTime, disableTime, mac)
         AppState.chargerMac = mac
@@ -355,6 +475,25 @@ class VictronBleExporterService : Service() {
                     val enableTime = it.getStringExtra("enable_time") ?: ChargerSchedule.DEFAULT_ENABLE
                     val disableTime = it.getStringExtra("disable_time") ?: ChargerSchedule.DEFAULT_DISABLE
                     saveChargerSchedule(mac, enabled, enableTime, disableTime)
+                }
+                "VOLTAGE_READ" -> {
+                    val mac = it.getStringExtra("mac") ?: return@let
+                    serviceScope.launch { performVoltageRead(mac) }
+                }
+                "VOLTAGE_SET_BATTERY" -> {
+                    val mac = it.getStringExtra("mac") ?: return@let
+                    val volts = it.getIntExtra("volts", -1)
+                    if (volts < 0) return@let
+                    serviceScope.launch { performSetBatteryVoltage(mac, volts) }
+                }
+                "VOLTAGE_SET_CHARGING" -> {
+                    val mac = it.getStringExtra("mac") ?: return@let
+                    val hasAbs = it.hasExtra("absorption_volts")
+                    val hasFloat = it.hasExtra("float_volts")
+                    val abs = if (hasAbs) it.getDoubleExtra("absorption_volts", Double.NaN).takeIf { !it.isNaN() } else null
+                    val fl = if (hasFloat) it.getDoubleExtra("float_volts", Double.NaN).takeIf { !it.isNaN() } else null
+                    if (abs == null && fl == null) return@let
+                    serviceScope.launch { performSetChargingVoltages(mac, abs, fl) }
                 }
             }
         }

@@ -32,11 +32,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.compose.foundation.text.KeyboardOptions
 import com.lakshaysethi.victronbleexporter.data.DeviceRepository
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevice
@@ -75,6 +75,9 @@ class MainActivity : ComponentActivity() {
                     onChargerScheduleSave = { mac, enabled, enableTime, disableTime ->
                         saveChargerSchedule(mac, enabled, enableTime, disableTime)
                     },
+                    onVoltageRead = { mac -> sendVoltageRead(mac) },
+                    onSetBatteryVoltage = { mac, volts -> sendSetBatteryVoltage(mac, volts) },
+                    onSetChargingVoltages = { mac, abs, fl -> sendSetChargingVoltages(mac, abs, fl) },
                     onSaveRemoteSettings = { enabled, secret -> saveRemoteSettings(enabled, secret) },
                     onStartTunnel = { token -> startTunnel(token) },
                     onQuickTunnel = { startQuickTunnel() },
@@ -248,6 +251,80 @@ class MainActivity : ComponentActivity() {
         Toast.makeText(this, "Schedule saved", Toast.LENGTH_SHORT).show()
     }
 
+    private fun sendVoltageRead(mac: String) {
+        if (mac.isBlank()) {
+            Toast.makeText(this, "Enter the charger device MAC first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        sendToService(Intent(this, VictronBleExporterService::class.java).apply {
+            action = "VOLTAGE_READ"
+            putExtra("mac", mac.trim().uppercase())
+        })
+        Toast.makeText(this, "Reading voltage settings…", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun sendSetBatteryVoltage(mac: String, voltsStr: String) {
+        val volts = voltsStr.trim().toIntOrNull()
+        if (volts == null || volts !in 0..48) {
+            Toast.makeText(this, "Battery voltage must be 0–48 V", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (mac.isBlank()) {
+            Toast.makeText(this, "Enter the charger device MAC first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // Confirm: changing the battery voltage setting can affect charging — require explicit ack.
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Change battery voltage?")
+            .setMessage("Set battery system voltage to $volts V on $mac? This changes how the MPPT charges — only proceed if you know this device's battery bank.")
+            .setPositiveButton("Set $volts V") { _, _ ->
+                sendToService(Intent(this, VictronBleExporterService::class.java).apply {
+                    action = "VOLTAGE_SET_BATTERY"
+                    putExtra("mac", mac.trim().uppercase())
+                    putExtra("volts", volts)
+                })
+                Toast.makeText(this, "Setting battery voltage to $volts V…", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun sendSetChargingVoltages(mac: String, absorptionStr: String, floatStr: String) {
+        if (mac.isBlank()) {
+            Toast.makeText(this, "Enter the charger device MAC first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val abs = absorptionStr.trim().takeIf { it.isNotBlank() }?.toDoubleOrNull()
+        val fl = floatStr.trim().takeIf { it.isNotBlank() }?.toDoubleOrNull()
+        if (abs == null && fl == null) {
+            Toast.makeText(this, "Enter absorption and/or float voltage", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (abs != null && (abs < 0 || abs > 80)) {
+            Toast.makeText(this, "Absorption voltage must be 0–80 V", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (fl != null && (fl < 0 || fl > 80)) {
+            Toast.makeText(this, "Float voltage must be 0–80 V", Toast.LENGTH_LONG).show()
+            return
+        }
+        val detail = listOfNotNull(abs?.let { "absorption $it V" }, fl?.let { "float $it V" }).joinToString(", ")
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Change charge voltages?")
+            .setMessage("Set $detail on $mac?")
+            .setPositiveButton("Set") { _, _ ->
+                sendToService(Intent(this, VictronBleExporterService::class.java).apply {
+                    action = "VOLTAGE_SET_CHARGING"
+                    putExtra("mac", mac.trim().uppercase())
+                    if (abs != null) putExtra("absorption_volts", abs)
+                    if (fl != null) putExtra("float_volts", fl)
+                })
+                Toast.makeText(this, "Setting $detail…", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun saveRemoteSettings(enabled: Boolean, secret: String) {
         try {
             RemoteChargerStore(this).save(enabled, secret.trim())
@@ -390,6 +467,9 @@ fun VictronBleExporterScreen(
     onChargerSet: (String, Boolean) -> Unit,
     onChargerRead: (String) -> Unit,
     onChargerScheduleSave: (String, Boolean, String, String) -> Unit,
+    onVoltageRead: (String) -> Unit,
+    onSetBatteryVoltage: (String, String) -> Unit,
+    onSetChargingVoltages: (String, String, String) -> Unit,
     onSaveRemoteSettings: (Boolean, String) -> Unit,
     onStartTunnel: (String) -> Unit,
     onQuickTunnel: () -> Unit,
@@ -422,6 +502,12 @@ fun VictronBleExporterScreen(
     var enableTime by remember { mutableStateOf("08:30") }
     var disableTime by remember { mutableStateOf("18:00") }
     var scheduleLoaded by remember { mutableStateOf(false) }
+
+    // Voltage settings UI state
+    var voltageSnapshot by remember { mutableStateOf(AppState.voltageSettings) }
+    var batteryVoltageInput by remember { mutableStateOf("") }
+    var absorptionInput by remember { mutableStateOf("") }
+    var floatInput by remember { mutableStateOf("") }
 
     // Remote control settings (HTTP + tunnel surface)
     var remoteEnabled by remember { mutableStateOf(false) }
@@ -586,6 +672,16 @@ fun VictronBleExporterScreen(
                 chargerLastAction = AppState.chargerLastAction
                 chargerLastError = AppState.chargerLastError
                 chargerOverrideUntil = AppState.chargerOverrideUntil
+                voltageSnapshot = AppState.voltageSettings
+                if (voltageSnapshot != null && batteryVoltageInput.isBlank() && voltageSnapshot?.batteryVoltageSetting != null) {
+                    batteryVoltageInput = voltageSnapshot!!.batteryVoltageSetting.toString()
+                }
+                if (voltageSnapshot != null && absorptionInput.isBlank() && voltageSnapshot?.absorptionVolts != null) {
+                    absorptionInput = voltageSnapshot!!.absorptionVolts.toString()
+                }
+                if (voltageSnapshot != null && floatInput.isBlank() && voltageSnapshot?.floatVolts != null) {
+                    floatInput = voltageSnapshot!!.floatVolts.toString()
+                }
                 if (AppState.chargerMac != null && chargerMac.isBlank()) {
                     chargerMac = AppState.chargerMac!!
                 }
@@ -1135,6 +1231,69 @@ fun VictronBleExporterScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        // ===== VOLTAGE CONTROL (battery system voltage + charge voltages) =====
+        Text("Voltage Settings", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(
+            "Read and set battery system voltage (20V / 40V etc — register 0xEDEF) and absorption/float voltages. " +
+                "Changes write to the MPPT over BLE and are confirmed by reading the value back. Confirm each change.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                val vs = voltageSnapshot
+                if (vs == null) {
+                    Text("No voltage settings read yet — tap Read.", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    Text("Battery setting: ${vs.batteryVoltageSetting?.let { "$it V" } ?: "—"}", style = MaterialTheme.typography.bodySmall)
+                    Text("Absorption: ${vs.absorptionVolts?.let { "$it V" } ?: "—"}  •  Float: ${vs.floatVolts?.let { "$it V" } ?: "—"}", style = MaterialTheme.typography.bodySmall)
+                    vs.equalisationVolts?.let { Text("Equalisation: $it V", style = MaterialTheme.typography.bodySmall) }
+                    vs.chargerVolts?.let { Text("Live charger voltage: $it V", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+                }
+                AppState.voltageSettingsLastError?.let {
+                    Spacer(Modifier.height(4.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = { onVoltageRead(chargerMac) }, modifier = Modifier.fillMaxWidth(), enabled = !chargerBusy && chargerMac.isNotBlank()) {
+                    Text("Read Voltage Settings")
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("Battery system voltage (0xEDEF)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                Text("Common values: 12, 24, 48 — device-dependent.", style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(value = batteryVoltageInput, onValueChange = { batteryVoltageInput = it.filter { c -> c.isDigit() }.take(2) }, label = { Text("System V") }, placeholder = { Text("e.g. 24") }, modifier = Modifier.weight(1f), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                    Button(onClick = { onSetBatteryVoltage(chargerMac, batteryVoltageInput) }, enabled = !chargerBusy && chargerMac.isNotBlank() && batteryVoltageInput.toIntOrNull() in 0..48) { Text("Set") }
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("Charge voltages (0xEDF7 / 0xEDF6)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(value = absorptionInput, onValueChange = { absorptionInput = it.filter { c -> c.isDigit() || c == '.' }.take(6) }, label = { Text("Absorption V") }, placeholder = { Text("e.g. 28.8") }, modifier = Modifier.weight(1f), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                    OutlinedTextField(value = floatInput, onValueChange = { floatInput = it.filter { c -> c.isDigit() || c == '.' }.take(6) }, label = { Text("Float V") }, placeholder = { Text("e.g. 27.6") }, modifier = Modifier.weight(1f), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                }
+                Spacer(Modifier.height(6.dp))
+                Button(onClick = { onSetChargingVoltages(chargerMac, absorptionInput, floatInput) }, modifier = Modifier.fillMaxWidth(), enabled = !chargerBusy && chargerMac.isNotBlank()) { Text("Set Absorption / Float") }
             }
         }
 

@@ -2,6 +2,7 @@ package com.lakshaysethi.victronbleexporter
 
 import com.lakshaysethi.victronbleexporter.charger.ChargerDebugLog
 import com.lakshaysethi.victronbleexporter.charger.ChargerProtocol
+import com.lakshaysethi.victronbleexporter.charger.VoltageSettings
 import com.lakshaysethi.victronbleexporter.tunnel.CloudflaredManager
 
 object AppState {
@@ -47,6 +48,13 @@ object AppState {
     /** Epoch millis until which a manual override pauses the schedule; 0 = none. */
     @Volatile var chargerOverrideUntil: Long = 0L
 
+    /** Last read/written voltage settings (null = not read yet). Written by VictronBleExporterService. */
+    @Volatile var voltageSettings: VoltageSettings? = null
+
+    @Volatile var voltageSettingsUpdatedAt: Long = 0L
+
+    @Volatile var voltageSettingsLastError: String? = null
+
     val chargerModeText: String get() = ChargerProtocol.chargerModeText(chargerMode)
 
     /** Section appended to the shared debug log so the captain can diagnose BLE writes. */
@@ -58,6 +66,7 @@ object AppState {
         sb.appendLine("Last action: $chargerLastAction")
         sb.appendLine("Last error: ${chargerLastError ?: "none"}")
         sb.appendLine("Manual override until: ${chargerOverrideUntil.takeIf { it > 0 }?.let { java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(it)) } ?: "none"}")
+        sb.appendLine("Voltage settings: ${voltageSettings ?: "not read yet"} (updated ${if (voltageSettingsUpdatedAt > 0) java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(voltageSettingsUpdatedAt)) else "never"}; error=${voltageSettingsLastError ?: "none"})")
         sb.appendLine("--- last ${ChargerDebugLog.snapshot().size} charger log lines ---")
         val lines = ChargerDebugLog.snapshot()
         if (lines.isEmpty()) {

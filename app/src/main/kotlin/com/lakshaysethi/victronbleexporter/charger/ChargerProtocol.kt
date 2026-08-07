@@ -52,6 +52,13 @@ object ChargerProtocol {
     const val MODE_CHARGER_OFF = 0x04
     const val MODE_CHARGER_OFF_LEGACY = 0x00
 
+    /** Battery / system-voltage settings (writable, see Mrkvak mppt_registers.json). */
+    const val REG_BATTERY_VOLTAGE_SETTING = 0xEDEF // un8, V, 0..48  – "20V / 40V mode" in the UI
+    const val REG_ABSORPTION_VOLTAGE = 0xEDF7 // un16, 0.01 V
+    const val REG_FLOAT_VOLTAGE = 0xEDF6 // un16, 0.01 V
+    const val REG_EQUALISATION_VOLTAGE = 0xEDF4 // un16, 0.01 V
+    const val REG_CHARGER_VOLTAGE = 0xEDD5 // un16, 0.01 V – live read-only
+
     /**
      * Session bootstrap, byte-for-byte from verified captures of what
      * VictronConnect sends (pysmartsolar / Mrkvak-victron-linux). Sending this
@@ -109,6 +116,31 @@ object ChargerProtocol {
     /** Frame for "set charger on/off" (register 0x0200). */
     fun makeChargerModeWriteFrame(on: Boolean): ByteArray =
         makeWriteFrame(REG_DEVICE_MODE, byteArrayOf((if (on) MODE_CHARGER_ON else MODE_CHARGER_OFF).toByte()))
+
+    /** Write frame for the battery system-voltage setting (register 0xEDEF, un8 volts). */
+    fun makeBatteryVoltageSettingWriteFrame(volts: Int): ByteArray {
+        require(volts in 0..48) { "battery_voltage_setting must be 0..48 V" }
+        return makeWriteFrame(REG_BATTERY_VOLTAGE_SETTING, byteArrayOf(volts.toByte()))
+    }
+
+    /** Write frame for absorption / float / equalisation voltages (un16, 0.01 V, little-endian). */
+    fun makeVoltageWriteFrame(registerId: Int, voltageVolts: Double): ByteArray {
+        val raw = (voltageVolts * 100).toInt().coerceIn(0, 0xFFFF)
+        return makeWriteFrame(registerId, byteArrayOf((raw and 0xFF).toByte(), ((raw ushr 8) and 0xFF).toByte()))
+    }
+
+    /** Decode a little-endian u16 voltage value (scale 0.01 V). */
+    fun decodeVoltage(raw: ByteArray): Double? {
+        if (raw.size < 2) return null
+        val u16 = (raw[0].toInt() and 0xFF) or ((raw[1].toInt() and 0xFF) shl 8)
+        return u16 / 100.0
+    }
+
+    /** Decode a u8 voltage setting (register 0xEDEF, volts as integer). */
+    fun decodeBatteryVoltageSetting(raw: ByteArray): Int? {
+        if (raw.isEmpty()) return null
+        return raw[0].toInt() and 0xFF
+    }
 
     /**
      * Parse raw notification bytes into registerId -> value bytes.

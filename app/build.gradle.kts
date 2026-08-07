@@ -79,6 +79,7 @@ dependencies {
 
     // For encrypted prefs (future)
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("androidx.appcompat:appcompat:1.7.0")
 
     // Lifecycle
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")

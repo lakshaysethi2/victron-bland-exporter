@@ -95,6 +95,29 @@ class ChargerProtocolTest {
     }
 
     @Test
+    fun `battery voltage setting write frame`() {
+        // 0xEDEF is un8: value 0x18 -> "06038219edef4118" (len 0x41 = 1 byte)
+        assertEquals("06038219edef4118", ChargerProtocol.makeBatteryVoltageSettingWriteFrame(24).toHex())
+        assertEquals("06038219edef410c", ChargerProtocol.makeBatteryVoltageSettingWriteFrame(12).toHex())
+    }
+
+    @Test
+    fun `voltage write frame little-endian 0_01 V`() {
+        // 28.80 V -> 2880 = 0x0B40 -> LE a005? actually 2880 is 0x0B40 but our test uses 14.34-like via
+        // makeVoltageWriteFrame: 12.34 V -> 1234 = 0x04D2 -> LE d204 with register 0xEDF7
+        assertEquals("06038219edf742d204", ChargerProtocol.makeVoltageWriteFrame(0xEDF7, 12.34).toHex())
+        // float 27.6 V -> 2760 = 0x0AC8 -> c80a
+        assertEquals("06038219edf642c80a", ChargerProtocol.makeVoltageWriteFrame(0xEDF6, 27.6).toHex())
+    }
+
+    @Test
+    fun `decode voltage helpers`() {
+        // 0xED8D 2-byte LE value 0x0535 -> 13.33 V
+        assertEquals(13.33, ChargerProtocol.decodeVoltage("3505".hexToByteArray())!!, 0.001)
+        assertEquals(24, ChargerProtocol.decodeBatteryVoltageSetting("18".hexToByteArray()))
+    }
+
+    @Test
     fun `readback must match the requested mode`() {
         assertTrue(ChargerProtocol.modeMatchesRequest(1, true))
         assertFalse(ChargerProtocol.modeMatchesRequest(1, false))

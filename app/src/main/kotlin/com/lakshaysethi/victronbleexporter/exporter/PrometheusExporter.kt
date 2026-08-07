@@ -86,6 +86,18 @@ class PrometheusExporter(
                 "${when (chargerMode) { ChargerProtocol.MODE_CHARGER_ON -> 1; ChargerProtocol.MODE_CHARGER_OFF, ChargerProtocol.MODE_CHARGER_OFF_LEGACY -> 0; else -> -1 }}\n\n"
         )
 
+        // Voltage settings (read via GATT registers 0xEDEF/0xEDF7/0xEDF6 etc; null = not read yet)
+        val vs = AppState.voltageSettings
+        val vsLabel = AppState.chargerMac?.let { "{device=\"$it\"}" } ?: ""
+        sb.append("# HELP victron_battery_voltage_setting_volts Battery system-voltage setting (register 0xEDEF)\n")
+        sb.append("# TYPE victron_battery_voltage_setting_volts gauge\n")
+        appendMetric(sb, "victron_battery_voltage_setting_volts", vsLabel, vs?.batteryVoltageSetting?.toDouble())
+        appendMetric(sb, "victron_absorption_voltage_volts", vsLabel, vs?.absorptionVolts)
+        appendMetric(sb, "victron_float_voltage_volts", vsLabel, vs?.floatVolts)
+        appendMetric(sb, "victron_equalisation_voltage_volts", vsLabel, vs?.equalisationVolts)
+        appendMetric(sb, "victron_charger_voltage_volts", vsLabel, vs?.chargerVolts)
+        if (vs != null) sb.append("\n")
+
         for ((mac, device) in all) {
             val labels = buildLabels(mac, device)
             val data = device.data

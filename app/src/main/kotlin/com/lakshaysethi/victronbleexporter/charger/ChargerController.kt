@@ -81,6 +81,42 @@ class ChargerController(private val context: Context) {
         }
     }
 
+    /** Read battery / voltage settings from the device (same GATT service, writable regs). */
+    suspend fun readVoltageSettings(mac: String): VoltageSettingsResult = opMutex.withLock {
+        withContext(Dispatchers.IO) {
+            runVoltageSession(mac, "readVoltageSettings") { session ->
+                session.requestVoltageReadback()
+            }
+        }
+    }
+
+    /** Write battery system-voltage setting (register 0xEDEF, e.g. 12/24/48 V) with readback. */
+    suspend fun setBatteryVoltageSetting(mac: String, volts: Int): VoltageSettingsResult = opMutex.withLock {
+        withContext(Dispatchers.IO) {
+            runVoltageSession(mac, "setBatteryVoltageSetting=$volts") { session ->
+                session.writeBatteryVoltageSetting(volts)
+                session.rearmVoltageReadback()
+                session.requestVoltageReadback()
+            }
+        }
+    }
+
+    /** Write absorption / float voltages (0xEDF7 / 0xEDF6) with readback. Null = leave unchanged. */
+    suspend fun setChargingVoltages(
+        mac: String,
+        absorptionVolts: Double?,
+        floatVolts: Double?,
+    ): VoltageSettingsResult = opMutex.withLock {
+        withContext(Dispatchers.IO) {
+            runVoltageSession(mac, "setChargingVoltages abs=$absorptionVolts float=$floatVolts") { session ->
+                if (absorptionVolts != null) session.writeChargingVoltage(ChargerProtocol.REG_ABSORPTION_VOLTAGE, absorptionVolts)
+                if (floatVolts != null) session.writeChargingVoltage(ChargerProtocol.REG_FLOAT_VOLTAGE, floatVolts)
+                session.rearmVoltageReadback()
+                session.requestVoltageReadback()
+            }
+        }
+    }
+
     /** A set-mode operation only succeeded when the readback matches the requested state. */
     private fun ChargerOpResult.verifyWriteSucceeded(on: Boolean): ChargerOpResult {
         if (!success || ChargerProtocol.modeMatchesRequest(mode, on)) return this
@@ -130,6 +166,30 @@ class ChargerController(private val context: Context) {
         }
     }
 
+    // ---- voltage settings (same one-session-per-op pattern, different registers) ----
+
+    private fun runVoltageSession(mac: String, opName: String, op: (Session) -> Unit): VoltageSettingsResult {
+        val session = Session(mac)
+        try {
+            if (!session.start()) return session.failVoltage("could not start BLE session ($opName)")
+            if (!session.awaitConnected()) return session.failVoltage("connect timed out ($opName)")
+            if (!session.awaitServices()) return session.failVoltage("no services discovered — is the MPPT in range and not bonded to another phone? (pairing PIN is usually 000000)")
+            if (!session.hasChargerService()) return session.failVoltage("device does not expose the Victron charger service ${ChargerProtocol.SERVICE_UUID}")
+            session.enableNotifications()
+            session.runInitSequence()
+            op(session)
+            val settings = session.awaitVoltageReadback()
+            return session.finishVoltage(settings)
+        } catch (e: SecurityException) {
+            return session.failVoltage("BLE permission denied: ${e.message}")
+        } catch (e: Exception) {
+            Log.w(TAG, "Voltage session failed", e)
+            return session.failVoltage("unexpected error: ${e.message ?: e.javaClass.simpleName}")
+        } finally {
+            session.close()
+        }
+    }
+
     /** One connect/operate/disconnect session. */
     private inner class Session(private val mac: String) {
 
@@ -141,6 +201,11 @@ class ChargerController(private val context: Context) {
         private val modeMonitor = Object()
         private var modeValue = -1
         private var readbackClosed = false
+
+        // Voltage settings use the same notification stream but a separate monitor so reads
+        // do not steal the mode latch and vice versa.
+        private val voltageMonitor = Object()
+        private var voltageReadbackClosed = false
 
         private val registers = LinkedHashMap<Int, ByteArray>()
         private val registersLock = Any()
@@ -232,6 +297,10 @@ class ChargerController(private val context: Context) {
                             readbackClosed = true
                             modeMonitor.notifyAll()
                         }
+                        synchronized(voltageMonitor) {
+                            voltageReadbackClosed = true
+                            voltageMonitor.notifyAll()
+                        }
                     }
                 }
             }
@@ -274,6 +343,18 @@ class ChargerController(private val context: Context) {
                     modeMonitor.notifyAll()
                 }
                 log("Device mode readback: ${ChargerProtocol.chargerModeText(mode)} (mode=$mode)")
+            }
+            // Any voltage register arrival completes a voltage readback wait (even partial sets
+            // are surfaced — the caller decides what was written vs what came back).
+            val hasVoltage = parsed.keys.any {
+                it == ChargerProtocol.REG_BATTERY_VOLTAGE_SETTING ||
+                    it == ChargerProtocol.REG_ABSORPTION_VOLTAGE ||
+                    it == ChargerProtocol.REG_FLOAT_VOLTAGE ||
+                    it == ChargerProtocol.REG_EQUALISATION_VOLTAGE ||
+                    it == ChargerProtocol.REG_CHARGER_VOLTAGE
+            }
+            if (hasVoltage) {
+                synchronized(voltageMonitor) { voltageMonitor.notifyAll() }
             }
         }
 
@@ -336,8 +417,32 @@ class ChargerController(private val context: Context) {
             writeFrames(listOf(ChargerProtocol.SINGLE_UUID to frame))
         }
 
+        fun writeBatteryVoltageSetting(volts: Int) {
+            val frame = ChargerProtocol.makeBatteryVoltageSettingWriteFrame(volts)
+            log("Writing battery voltage setting ${volts}V -> ${frame.toHex()}")
+            writeFrames(listOf(ChargerProtocol.SINGLE_UUID to frame))
+        }
+
+        fun writeChargingVoltage(registerId: Int, voltageVolts: Double) {
+            val frame = ChargerProtocol.makeVoltageWriteFrame(registerId, voltageVolts)
+            log("Writing reg 0x${registerId.toString(16)} ${voltageVolts}V -> ${frame.toHex()}")
+            writeFrames(listOf(ChargerProtocol.SINGLE_UUID to frame))
+        }
+
         fun rearmModeReadback() {
             synchronized(modeMonitor) { modeValue = -1 }
+        }
+
+        fun rearmVoltageReadback() {
+            synchronized(voltageMonitor) { voltageReadbackClosed = false }
+            // Clear latched voltage regs so the await does not return stale data from the handshake.
+            synchronized(registersLock) {
+                registers.remove(ChargerProtocol.REG_BATTERY_VOLTAGE_SETTING)
+                registers.remove(ChargerProtocol.REG_ABSORPTION_VOLTAGE)
+                registers.remove(ChargerProtocol.REG_FLOAT_VOLTAGE)
+                registers.remove(ChargerProtocol.REG_EQUALISATION_VOLTAGE)
+                registers.remove(ChargerProtocol.REG_CHARGER_VOLTAGE)
+            }
         }
 
         fun requestModeReadback() {
@@ -348,6 +453,70 @@ class ChargerController(private val context: Context) {
                     ChargerProtocol.CONTROL_UUID to ChargerProtocol.pollFrame(),
                 ),
             )
+        }
+
+        fun requestVoltageReadback() {
+            log("Requesting voltage-settings readback")
+            writeFrames(
+                listOf(
+                    ChargerProtocol.SINGLE_UUID to ChargerProtocol.makeReadFrame(ChargerProtocol.REG_BATTERY_VOLTAGE_SETTING),
+                    ChargerProtocol.SINGLE_UUID to ChargerProtocol.makeReadFrame(ChargerProtocol.REG_ABSORPTION_VOLTAGE),
+                    ChargerProtocol.SINGLE_UUID to ChargerProtocol.makeReadFrame(ChargerProtocol.REG_FLOAT_VOLTAGE),
+                    ChargerProtocol.SINGLE_UUID to ChargerProtocol.makeReadFrame(ChargerProtocol.REG_EQUALISATION_VOLTAGE),
+                    ChargerProtocol.SINGLE_UUID to ChargerProtocol.makeReadFrame(ChargerProtocol.REG_CHARGER_VOLTAGE),
+                    ChargerProtocol.CONTROL_UUID to ChargerProtocol.pollFrame(),
+                ),
+            )
+        }
+
+        fun awaitVoltageReadback(): VoltageSettings {
+            val deadline = System.currentTimeMillis() + READBACK_TIMEOUT_MS
+            synchronized(voltageMonitor) {
+                // Wait until at least one requested register arrives or the device disconnects.
+                while (!voltageReadbackClosed) {
+                    val haveAny = synchronized(registersLock) {
+                        registers.keys.any {
+                            it == ChargerProtocol.REG_BATTERY_VOLTAGE_SETTING ||
+                                it == ChargerProtocol.REG_ABSORPTION_VOLTAGE ||
+                                it == ChargerProtocol.REG_FLOAT_VOLTAGE
+                        }
+                    }
+                    if (haveAny) break
+                    val remaining = deadline - System.currentTimeMillis()
+                    if (remaining <= 0) break
+                    try {
+                        voltageMonitor.wait(minOf(remaining, 500L))
+                    } catch (e: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        break
+                    }
+                    if (System.currentTimeMillis() >= deadline) break
+                }
+            }
+            return snapshotVoltageSettings()
+        }
+
+        private fun snapshotVoltageSettings(): VoltageSettings = synchronized(registersLock) {
+            val copy = LinkedHashMap(registers)
+            VoltageSettings(
+                batteryVoltageSetting = copy[ChargerProtocol.REG_BATTERY_VOLTAGE_SETTING]?.let { ChargerProtocol.decodeBatteryVoltageSetting(it) },
+                absorptionVolts = copy[ChargerProtocol.REG_ABSORPTION_VOLTAGE]?.let { ChargerProtocol.decodeVoltage(it) },
+                floatVolts = copy[ChargerProtocol.REG_FLOAT_VOLTAGE]?.let { ChargerProtocol.decodeVoltage(it) },
+                equalisationVolts = copy[ChargerProtocol.REG_EQUALISATION_VOLTAGE]?.let { ChargerProtocol.decodeVoltage(it) },
+                chargerVolts = copy[ChargerProtocol.REG_CHARGER_VOLTAGE]?.let { ChargerProtocol.decodeVoltage(it) },
+            )
+        }
+
+        fun failVoltage(message: String): VoltageSettingsResult {
+            error(message)
+            return VoltageSettingsResult(success = false, settings = snapshotVoltageSettings(), message = message)
+        }
+
+        fun finishVoltage(settings: VoltageSettings): VoltageSettingsResult {
+            val any = settings.batteryVoltageSetting != null || settings.absorptionVolts != null || settings.floatVolts != null
+            val message = if (any) "Voltage settings: ${'$'}settings" else "No voltage settings readback received"
+            log(message)
+            return VoltageSettingsResult(success = any, settings = settings, message = message)
         }
 
         fun awaitModeReadback(): Int? {
@@ -472,3 +641,18 @@ data class ChargerOpResult(
 ) {
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
 }
+
+/** Live voltage settings snapshot (read + write-with-readback share the same shape). */
+data class VoltageSettings(
+    val batteryVoltageSetting: Int? = null, // 0xEDEF, V as integer (12/24/48 …)
+    val absorptionVolts: Double? = null, // 0xEDF7, V
+    val floatVolts: Double? = null, // 0xEDF6, V
+    val equalisationVolts: Double? = null, // 0xEDF4, V
+    val chargerVolts: Double? = null, // 0xEDD5, live read-only, V
+)
+
+data class VoltageSettingsResult(
+    val success: Boolean,
+    val settings: VoltageSettings,
+    val message: String,
+)

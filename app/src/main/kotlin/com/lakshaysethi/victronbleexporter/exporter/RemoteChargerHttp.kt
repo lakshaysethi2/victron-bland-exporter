@@ -16,6 +16,9 @@ import java.security.MessageDigest
  *                           does nothing without it)
  *   GET  /charger/status -> JSON status snapshot (reuses AppState.chargerMode)
  *   POST /charger        -> JSON body {"action":"on"|"off"} flips the charger
+ *   GET  /voltage        -> JSON voltage settings (auth required)
+ *   POST /voltage        -> JSON {battery_voltage_setting, absorption_voltage, float_voltage}
+ *                           writes the matching GATT registers (auth required; confirm in UI)
  *
  * Auth: the secret set in the app's Remote Control settings must be sent as an
  * `X-Remote-Secret: <secret>` header (or `Authorization: Bearer <secret>`).
@@ -56,6 +59,16 @@ class RemoteChargerHttp(
         if (uri == "/charger" && method == "GET") {
             return HttpResult(200, MIME_HTML, CONTROL_PAGE)
         }
+        if (uri == "/voltage" && method == "GET" && headers.containsKey("accept") && headers["accept"]?.contains("text/html") == true) {
+            // Browser navigating to /voltage without API Accept still gets JSON unless they asked for html
+        }
+        // Serve the voltage HTML shell at GET /voltage when the request looks like a browser navigation
+        // (no X-Remote-Secret yet — same pattern as /charger shell). The JSON API at /voltage still
+        // requires auth; the shell is inert without it. Detect by Accept header containing text/html.
+        val wantsHtml = (headers["accept"] ?: "").contains("text/html", ignoreCase = true)
+        if (uri == "/voltage" && method == "GET" && wantsHtml && RemoteChargerAuth.extractSecret(headers) == null) {
+            return HttpResult(200, MIME_HTML, VOLTAGE_PAGE)
+        }
         val secret = RemoteChargerAuth.extractSecret(headers)
         if (!RemoteChargerAuth.constantTimeEquals(settings.authSecret, secret)) {
             return HttpResult(
@@ -69,6 +82,8 @@ class RemoteChargerHttp(
             uri == "/charger/status" && method == "GET" ->
                 HttpResult(200, MIME_JSON, statusProvider().toJson() + "\n")
             uri == "/charger" && method == "POST" -> handleCommand(body)
+            uri == "/voltage" && method == "GET" -> handleVoltageGet()
+            uri == "/voltage" && method == "POST" -> handleVoltagePost(body)
             else -> notFound()
         }
     }
@@ -98,6 +113,65 @@ class RemoteChargerHttp(
             body = "{\"accepted\":true,\"action\":\"${if (enable) "on" else "off"}\",\"mac\":\"${RemoteChargerHttpJson.escape(mac)}\"}\n",
         )
     }
+
+    private fun handleVoltageGet(): HttpResult {
+        val vs = AppState.voltageSettings
+        val body = buildString {
+            append("{")
+            append("\"battery_voltage_setting\":").append(vs?.batteryVoltageSetting?.toString() ?: "null")
+            append(",\"absorption_voltage\":").append(vs?.absorptionVolts?.toString() ?: "null")
+            append(",\"float_voltage\":").append(vs?.floatVolts?.toString() ?: "null")
+            append(",\"equalisation_voltage\":").append(vs?.equalisationVolts?.toString() ?: "null")
+            append(",\"charger_voltage\":").append(vs?.chargerVolts?.toString() ?: "null")
+            append(",\"mac\":").append(if (AppState.chargerMac.isNullOrBlank()) "null" else "\"${RemoteChargerHttpJson.escape(AppState.chargerMac!!)}\"")
+            append(",\"updatedAt\":").append(AppState.voltageSettingsUpdatedAt)
+            append(",\"lastError\":").append(if (AppState.voltageSettingsLastError == null) "null" else "\"${RemoteChargerHttpJson.escape(AppState.voltageSettingsLastError!!)}\"")
+            append(",\"busy\":").append(AppState.chargerBusy)
+            append("}")
+        }
+        return HttpResult(200, MIME_JSON, body + "\n")
+    }
+
+    private fun handleVoltagePost(body: String): HttpResult {
+        val mac = macProvider()
+        if (mac.isNullOrBlank()) {
+            return HttpResult(503, MIME_JSON, "{\"error\":\"no charger configured — set a charger device MAC in the app first\"}\n")
+        }
+        val parsed = parseVoltageBody(body)
+        if (parsed == null) {
+            return HttpResult(
+                400, MIME_JSON,
+                "{\"error\":\"body must be JSON with at least one of battery_voltage_setting (12/24/48), absorption_voltage, float_voltage\"}\n",
+            )
+        }
+        val (battSetting, absVolts, floatVolts) = parsed
+        // Split into one or two service intents (one BLE session per op on the existing controller).
+        if (battSetting != null) voltageCommandSender?.sendBatteryVoltageSetting(mac, battSetting)
+        if (absVolts != null || floatVolts != null) voltageCommandSender?.sendChargingVoltages(mac, absVolts, floatVolts)
+        if (voltageCommandSender == null) {
+            return HttpResult(503, MIME_JSON, "{\"error\":\"voltage control unavailable on this build\"}\n")
+        }
+        return HttpResult(202, MIME_JSON, "{\"accepted\":true,\"mac\":\"${RemoteChargerHttpJson.escape(mac)}\"}\n")
+    }
+
+    private fun parseVoltageBody(body: String): Triple<Int?, Double?, Double?>? {
+        val trimmed = body.trim()
+        if (trimmed.isEmpty()) return null
+        val battMatch = Regex("\"battery_voltage_setting\"\\s*:\\s*(\\d+)").find(trimmed)
+        val absMatch = Regex("\"absorption_voltage\"\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)").find(trimmed)
+        val floatMatch = Regex("\"float_voltage\"\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)").find(trimmed)
+        val batt = battMatch?.groupValues?.get(1)?.toIntOrNull()
+        val abs = absMatch?.groupValues?.get(1)?.toDoubleOrNull()
+        val fl = floatMatch?.groupValues?.get(1)?.toDoubleOrNull()
+        if (batt == null && abs == null && fl == null) return null
+        if (batt != null && batt !in 0..48) return null
+        if (abs != null && (abs < 0 || abs > 80)) return null
+        if (fl != null && (fl < 0 || fl > 80)) return null
+        return Triple(batt, abs, fl)
+    }
+
+    private var voltageCommandSender: VoltageCommandSender? = null
+    fun attachVoltageSender(sender: VoltageCommandSender) { voltageCommandSender = sender }
 
     private fun notFound() = HttpResult(404, MIME_PLAINTEXT, "Not Found\n")
 
@@ -147,6 +221,13 @@ internal object RemoteChargerAuth {
 /** Sends a charger flip command. Production: CHARGER_SET intent to the service. */
 fun interface ChargerCommandSender {
     fun sendChargerCommand(enable: Boolean, mac: String)
+}
+
+/** Voltage settings commands (battery system voltage + charge voltages). */
+interface VoltageCommandSender {
+    fun sendBatteryVoltageSetting(mac: String, volts: Int)
+    fun sendChargingVoltages(mac: String, absorptionVolts: Double?, floatVolts: Double?)
+    fun requestVoltageRead(mac: String)
 }
 
 /** Immutable status snapshot for the web UI. Reuses the app's charger state. */
@@ -211,6 +292,62 @@ data class HttpResult(
 )
 
 /** Static control page served at GET /charger (shell only — see class doc). */
+private val VOLTAGE_PAGE: String = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MPPT Voltage Settings</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: #0b1220; color: #e6edf7; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .card { width: 100%; max-width: 420px; background: #111c30; border: 1px solid #24344d; border-radius: 16px; padding: 20px; }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  .sub { color: #8fa3bf; font-size: 13px; margin-bottom: 12px; }
+  .row { display: flex; gap: 8px; margin-bottom: 10px; }
+  input { flex: 1; padding: 14px; border-radius: 12px; border: 1px solid #24344d; background: #0d1626; color: #e6edf7; font-size: 16px; }
+  button { padding: 14px; border-radius: 12px; border: none; font-weight: 700; cursor: pointer; }
+  button.primary { background: #22c55e; color: #0b1220; flex: 1; }
+  button.secondary { background: #24344d; color: #e6edf7; }
+  .err { color: #f87171; font-size: 13px; min-height: 18px; margin: 6px 0; }
+  .kv { font-size: 13px; color: #8fa3bf; line-height: 1.6; }
+  .warn { font-size: 12px; color: #fbbf24; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Voltage Settings</h1>
+  <div class="sub">Battery system voltage + absorption / float — writes to the MPPT over BLE</div>
+  <div class="kv" id="kv">Loading…</div>
+  <div class="err" id="err"></div>
+  <input type="password" id="secret" placeholder="Remote secret" autocomplete="off" style="width:100%;margin-bottom:8px;">
+  <div class="row"><button class="secondary" id="btnUnlock" style="flex:1">Unlock</button><button class="secondary" id="btnRefresh">Refresh</button></div>
+  <div class="row"><input id="batt" placeholder="System V (e.g. 24)"> <button class="primary" id="btnBatt">Set Battery V</button></div>
+  <div class="row"><input id="abs" placeholder="Absorption V"> <input id="flt" placeholder="Float V"> <button class="primary" id="btnCharge">Set</button></div>
+  <div class="warn">Each Set asks for confirmation in the app. Over-the-air changes affect charging — only set values you intend.</div>
+</div>
+<script>
+(function(){
+  var KEY="mppt_remote_secret"; var secret=null; try{secret=sessionStorage.getItem(KEY);}catch(e){}
+  var kv=document.getElementById("kv"), err=document.getElementById("err"), secretInput=document.getElementById("secret");
+  function setErr(t){err.textContent=t||"";}
+  function api(path, opts){opts=opts||{}; opts.headers=Object.assign({"X-Remote-Secret":secret}, opts.headers||{}); return fetch(path, opts).then(function(r){ if(r.status===401){ secret=null; try{sessionStorage.removeItem(KEY);}catch(e){} setErr("Wrong secret — enter it again."); } return r; }); }
+  function load(){ if(!secret){ kv.textContent="Enter the remote secret to unlock."; return; } setErr(""); api("/voltage").then(function(r){return r.json().then(function(d){return {r:r,d:d};});}).then(function(x){ if(x.r.status===401) return; if(x.r.ok){ var d=x.d; kv.textContent="Battery: "+(d.battery_voltage_setting!=null?d.battery_voltage_setting+" V":"—")+"  •  Abs: "+(d.absorption_voltage!=null?d.absorption_voltage+" V":"—")+"  •  Float: "+(d.float_voltage!=null?d.float_voltage+" V":"—")+(d.charger_voltage!=null?"  •  Live "+d.charger_voltage+" V":""); } else setErr(x.d.error||("Status "+x.r.status)); }).catch(function(){ setErr("Can't reach the app."); }); }
+  function post(body){ if(!secret) return; setErr(""); api("/voltage",{method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)}).then(function(r){return r.json().then(function(d){return {r:r,d:d};});}).then(function(x){ if(x.r.status===401) return; if(!x.r.ok) setErr(x.d.error||("Status "+x.r.status)); else setTimeout(load, 1500); }).catch(function(){ setErr("Request failed."); }); }
+  document.getElementById("btnUnlock").addEventListener("click", function(){ var v=secretInput.value.trim(); if(!v) return; secret=v; try{sessionStorage.setItem(KEY,v);}catch(e){} secretInput.value=""; load(); });
+  secretInput.addEventListener("keydown", function(ev){ if(ev.key==="Enter") document.getElementById("btnUnlock").click(); });
+  document.getElementById("btnRefresh").addEventListener("click", load);
+  document.getElementById("btnBatt").addEventListener("click", function(){ var n=parseInt(document.getElementById("batt").value,10); if(isNaN(n)) return setErr("Enter 0–48 V"); if(!confirm("Set battery system voltage to "+n+" V? This changes charging.")) return; post({battery_voltage_setting:n}); });
+  document.getElementById("btnCharge").addEventListener("click", function(){ var a=document.getElementById("abs").value.trim(), f=document.getElementById("flt").value.trim(); var body={}; if(a) body.absorption_voltage=parseFloat(a); if(f) body.float_voltage=parseFloat(f); if(!body.absorption_voltage && !body.float_voltage) return setErr("Enter absorption and/or float"); if(!confirm("Set "+JSON.stringify(body)+"?")) return; post(body); });
+  load(); setInterval(load, 4000);
+})();
+</script>
+</body>
+</html>
+""".trimIndent()
+
 private val CONTROL_PAGE: String = """
 <!DOCTYPE html>
 <html lang="en">
