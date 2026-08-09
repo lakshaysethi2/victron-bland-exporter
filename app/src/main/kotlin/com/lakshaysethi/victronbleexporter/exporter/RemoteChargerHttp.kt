@@ -46,7 +46,9 @@ class RemoteChargerHttp(
             return notFound()
         }
         val settings = settingsProvider()
-        if (!settings.enabled || settings.authSecret.isBlank()) {
+        // The 8-char minimum lives server-side too: a short secret is treated like no secret
+        // (surface hidden), so a weak secret can never be honored even if the UI was bypassed.
+        if (!settings.enabled || settings.authSecret.length < MIN_SECRET_LENGTH) {
             return notFound()
         }
         // The control page is a static shell (login form + JS); a browser cannot
@@ -91,7 +93,13 @@ class RemoteChargerHttp(
             )
         }
         val enable = action == "on"
-        commandSender.sendChargerCommand(enable, mac)
+        if (!commandSender.sendChargerCommand(enable, mac)) {
+            return HttpResult(
+                statusCode = 503,
+                mimeType = MIME_JSON,
+                body = "{\"error\":\"command could not be sent — service unavailable\"}\n",
+            )
+        }
         return HttpResult(
             statusCode = 202,
             mimeType = MIME_JSON,
@@ -105,6 +113,7 @@ class RemoteChargerHttp(
         const val MIME_HTML = "text/html; charset=utf-8"
         const val MIME_JSON = "application/json; charset=utf-8"
         const val MIME_PLAINTEXT = "text/plain; charset=utf-8"
+        const val MIN_SECRET_LENGTH = 8
 
         val ACTION_REGEX = Regex("""(?s)"action"\s*:\s*"(on|off)"""", RegexOption.IGNORE_CASE)
 
@@ -144,9 +153,9 @@ internal object RemoteChargerAuth {
     }
 }
 
-/** Sends a charger flip command. Production: CHARGER_SET intent to the service. */
+/** Sends a charger flip command. Returns false if the command could not be dispatched. */
 fun interface ChargerCommandSender {
-    fun sendChargerCommand(enable: Boolean, mac: String)
+    fun sendChargerCommand(enable: Boolean, mac: String): Boolean
 }
 
 /** Immutable status snapshot for the web UI. Reuses the app's charger state. */
@@ -164,7 +173,7 @@ data class ChargerStatusSnapshot(
     fun toJson(): String = buildString {
         append("{\"mode\":").append(if (mode == null) "null" else "\"${RemoteChargerHttpJson.escape(modeText)}\"")
         append(",\"modeCode\":").append(mode ?: "null")
-        append(",\"mac\":").append(if (mac.isNullOrBlank()) "null" else "\"${RemoteChargerHttpJson.escape(mac!!)}\"")
+        append(",\"mac\":").append(if (mac.isNullOrBlank()) "null" else "\"${RemoteChargerHttpJson.escape(mac)}\"")
         append(",\"busy\":").append(busy)
         append(",\"lastAction\":\"${RemoteChargerHttpJson.escape(lastAction)}\"")
         append(",\"lastError\":").append(if (lastError == null) "null" else "\"${RemoteChargerHttpJson.escape(lastError)}\"")
@@ -188,15 +197,18 @@ data class ChargerStatusSnapshot(
 
 /** JSON string escaping shared by the handler and the status snapshot. */
 internal object RemoteChargerHttpJson {
+    /** Escape a string per RFC 8259: quote, backslash, and all control chars U+0000..U+001F. */
     fun escape(s: String): String = buildString {
         for (c in s) {
             when (c) {
                 '\\' -> append("\\\\")
                 '"' -> append("\\\"")
-                '\n' -> append("\\n")
-                '\r' -> append("\\r")
+                '\b' -> append("\\b")
                 '\t' -> append("\\t")
-                else -> append(c)
+                '\n' -> append("\\n")
+                '\u000C' -> append("\\f")
+                '\r' -> append("\\r")
+                else -> if (c.code < 0x20) append("\\u").append(c.code.toString(16).padStart(4, '0')) else append(c)
             }
         }
     }
@@ -285,7 +297,7 @@ private val CONTROL_PAGE: String = """
       if (r.status === 401) {
         secret = null;
         try { sessionStorage.removeItem(KEY); } catch (e) {}
-        setErr("Wrong secret &mdash; enter it again.");
+        setErr("Wrong secret — enter it again.");
         setBusy(true);
       }
       return r;

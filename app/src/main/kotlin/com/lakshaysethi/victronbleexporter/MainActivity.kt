@@ -24,10 +24,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -36,7 +38,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.compose.foundation.text.KeyboardOptions
+import com.lakshaysethi.victronbleexporter.charger.ChargerSchedule
+import com.lakshaysethi.victronbleexporter.data.ChargerScheduleStore
 import com.lakshaysethi.victronbleexporter.data.DeviceRepository
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevice
@@ -595,7 +598,7 @@ fun VictronBleExporterScreen(
                 // Load persisted schedule settings once
                 if (!scheduleLoaded) {
                     try {
-                        val store = com.lakshaysethi.victronbleexporter.data.ChargerScheduleStore(context)
+                        val store = ChargerScheduleStore(context)
                         scheduleEnabled = store.scheduleEnabled
                         enableTime = store.enableTime
                         disableTime = store.disableTime
@@ -667,7 +670,7 @@ fun VictronBleExporterScreen(
             }
         }
         Spacer(Modifier.height(6.dp))
-        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             val scanningText = if (discoveredDevices.isNotEmpty() || isScanning) "Scanning • ${discoveredDevices.size} nearby" else "Idle - tap Start Scan"
             Text(
                 scanningText,
@@ -756,7 +759,7 @@ fun VictronBleExporterScreen(
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                 }
-                                Column(horizontalAlignment = androidx.compose.ui.Alignment.End) {
+                                Column(horizontalAlignment = Alignment.End) {
                                     Badge(
                                         containerColor = when {
                                             dev.hasKey && dev.parsed != null -> MaterialTheme.colorScheme.primary
@@ -927,7 +930,7 @@ fun VictronBleExporterScreen(
                         Row(
                             modifier = Modifier.padding(8.dp).fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(mac, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
@@ -1022,7 +1025,7 @@ fun VictronBleExporterScreen(
             )
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         "Charger: $chargerModeText",
                         style = MaterialTheme.typography.titleMedium,
@@ -1090,7 +1093,7 @@ fun VictronBleExporterScreen(
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Daily schedule", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
@@ -1123,8 +1126,8 @@ fun VictronBleExporterScreen(
                     onClick = { onChargerScheduleSave(chargerMac, scheduleEnabled, enableTime, disableTime) },
                     modifier = Modifier.fillMaxWidth(),
                     enabled = chargerMac.isNotBlank() &&
-                        com.lakshaysethi.victronbleexporter.charger.ChargerSchedule.isValidTime(enableTime) &&
-                        com.lakshaysethi.victronbleexporter.charger.ChargerSchedule.isValidTime(disableTime)
+                        ChargerSchedule.isValidTime(enableTime) &&
+                        ChargerSchedule.isValidTime(disableTime)
                 ) {
                     Text("Save Schedule")
                 }
@@ -1159,7 +1162,7 @@ fun VictronBleExporterScreen(
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Enable remote control", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)

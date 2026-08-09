@@ -18,9 +18,14 @@ class RemoteChargerHttpTest {
 
     private class FakeSink : ChargerCommandSender {
         val calls = mutableListOf<Pair<Boolean, String>>()
-        override fun sendChargerCommand(enable: Boolean, mac: String) {
+        override fun sendChargerCommand(enable: Boolean, mac: String): Boolean {
             calls.add(enable to mac)
+            return true
         }
+    }
+
+    private class FailingSink : ChargerCommandSender {
+        override fun sendChargerCommand(enable: Boolean, mac: String): Boolean = false
     }
 
     private class Harness(
@@ -74,6 +79,18 @@ class RemoteChargerHttpTest {
         val c = h.control()
         assertEquals(404, c.handle("/charger/status", GET, headers("anything"), "").statusCode)
         assertEquals(404, c.handle("/charger", POST, headers("anything"), """{"action":"off"}""").statusCode)
+    }
+
+    @Test
+    fun `short secret hides every charger route`() {
+        // The 8-char minimum is enforced server-side: a short stored secret is
+        // treated like no secret at all, even if the UI predicate was bypassed.
+        val h = Harness(secret = "short")
+        val c = h.control()
+        assertEquals(404, c.handle("/charger", GET, headers("short"), "").statusCode)
+        assertEquals(404, c.handle("/charger/status", GET, headers("short"), "").statusCode)
+        assertEquals(404, c.handle("/charger", POST, headers("short"), """{"action":"on"}""").statusCode)
+        assertTrue(h.sink.calls.isEmpty())
     }
 
     @Test
@@ -176,6 +193,21 @@ class RemoteChargerHttpTest {
         assertTrue(h.sink.calls.isEmpty())
     }
 
+    @Test
+    fun `post when sender fails returns 503`() {
+        // A dropped/delivery-failed command must not look like optimistic success.
+        val h = Harness()
+        val c = RemoteChargerHttp(
+            settingsProvider = { RemoteChargerStore.RemoteChargerSettings(enabled = true, authSecret = SECRET) },
+            statusProvider = { h.snapshot },
+            macProvider = { h.mac },
+            commandSender = FailingSink(),
+        )
+        val r = c.handle("/charger", POST, headers(SECRET), """{"action":"on"}""")
+        assertEquals(503, r.statusCode)
+        assertTrue(r.body.contains("could not be sent"))
+    }
+
     // ---- control page ----
 
     @Test
@@ -190,6 +222,10 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("ENABLE CHARGER"))
         assertTrue(r.body.contains("DISABLE CHARGER"))
         assertFalse(r.body.contains(SECRET))
+        // The JS error string is set via textContent, which does not decode HTML
+        // entities — it must use the real em dash, not &mdash; (kept in HTML markup only).
+        assertTrue(r.body.contains("Wrong secret — enter it again."))
+        assertFalse(r.body.contains("Wrong secret &mdash;"))
     }
 
     // ---- auth primitives ----
@@ -214,5 +250,16 @@ class RemoteChargerHttpTest {
         assertNull(RemoteChargerAuth.extractSecret(mapOf("authorization" to "Basic abc")))
         assertNull(RemoteChargerAuth.extractSecret(mapOf("authorization" to "Bearer")))
         assertNull(RemoteChargerAuth.extractSecret(mapOf("x-remote-secret" to "  ")))
+    }
+
+    @Test
+    fun `json escape handles control characters per rfc 8259`() {
+        val jsonEscape = RemoteChargerHttpJson::escape
+        assertEquals("plain text", jsonEscape("plain text"))
+        assertEquals("a\\\"b", jsonEscape("a\"b"))
+        assertEquals("a\\\\b", jsonEscape("a\\b"))
+        // \b, \f and other control chars must be escaped, not emitted raw.
+        assertEquals("a\\b\\f\\n\\u0000", jsonEscape("a\u0008\u000C\n\u0000"))
+        assertEquals("\\u001f", jsonEscape("\u001F"))
     }
 }

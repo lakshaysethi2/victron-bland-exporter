@@ -9,6 +9,8 @@ import java.io.IOException
 
 private const val TAG = "PrometheusExporter"
 private const val DEFAULT_PORT = 5338
+/** Max POST body accepted by the remote charger-control routes (4 KB). */
+private const val MAX_REMOTE_BODY_BYTES = 4 * 1024
 
 /**
  * Tiny embedded Prometheus exporter using NanoHTTPD.
@@ -38,6 +40,14 @@ class PrometheusExporter(
         if (control == null) {
             return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not Found\n")
         }
+        // Reject oversized/missing Content-Length BEFORE parseBody(): parseBody() buffers the
+        // whole body in a String, and this route is internet-reachable via the Cloudflare tunnel.
+        if (session.method == NanoHTTPD.Method.POST) {
+            val contentLength = session.headers["content-length"]?.toLongOrNull()
+            if (contentLength == null || contentLength < 0 || contentLength > MAX_REMOTE_BODY_BYTES) {
+                return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "Bad Request\n")
+            }
+        }
         // Read the raw POST body once: NanoHTTPD puts non-form payloads into
         // files["postData"] when parseBody() is called for a POST request.
         val body = if (session.method == NanoHTTPD.Method.POST) {
@@ -58,6 +68,9 @@ class PrometheusExporter(
             headers = session.headers,
             body = body,
         )
+        if (result.statusCode == 401) {
+            Log.w(TAG, "Remote charger auth failed from ${session.remoteIpAddress}")
+        }
         val response = newFixedLengthResponse(
             Response.Status.lookup(result.statusCode) ?: Response.Status.INTERNAL_ERROR,
             result.mimeType,

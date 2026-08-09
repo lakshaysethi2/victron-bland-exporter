@@ -38,14 +38,15 @@ class RemoteChargerHttpServerTest {
 
     private class FakeSink : ChargerCommandSender {
         val calls = mutableListOf<Pair<Boolean, String>>()
-        override fun sendChargerCommand(enable: Boolean, mac: String) {
+        override fun sendChargerCommand(enable: Boolean, mac: String): Boolean {
             calls.add(enable to mac)
+            return true
         }
     }
 
     @Before
     fun setUp() {
-        store.save(true, "s3cret")
+        store.save(true, "s3cret12")
         val control = RemoteChargerHttp(
             settingsProvider = { store.load() },
             statusProvider = { ChargerStatusSnapshot.fromAppState() },
@@ -83,6 +84,19 @@ class RemoteChargerHttpServerTest {
         return code to text
     }
 
+    /** Raw HTTP over a loopback socket, for headers HttpURLConnection won't let us omit. */
+    private fun rawStatusLine(rawRequest: String): Int {
+        val socket = java.net.Socket()
+        socket.connect(java.net.InetSocketAddress("127.0.0.1", port), 5000)
+        socket.soTimeout = 5000
+        val out = socket.getOutputStream()
+        out.write(rawRequest.toByteArray())
+        out.flush()
+        val statusLine = socket.getInputStream().bufferedReader().readLine()
+        socket.close()
+        return statusLine.substringAfter(" ").substringBefore(" ").toInt()
+    }
+
     @Test
     fun `page requires no secret but status does`() {
         val (pageCode, page) = request("GET", "/charger", secret = null)
@@ -96,14 +110,14 @@ class RemoteChargerHttpServerTest {
 
     @Test
     fun `status with secret reports current charger mode`() {
-        val (code, body) = request("GET", "/charger/status", secret = "s3cret")
+        val (code, body) = request("GET", "/charger/status", secret = "s3cret12")
         assertEquals(200, code)
         assertTrue(body.contains("\"mode\""))
     }
 
     @Test
     fun `post on with secret reaches the sender`() {
-        val (code, body) = request("POST", "/charger", secret = "s3cret", body = """{"action":"on"}""")
+        val (code, body) = request("POST", "/charger", secret = "s3cret12", body = """{"action":"on"}""")
         assertEquals(202, code)
         assertTrue(body.contains("\"accepted\":true"))
         assertEquals(listOf(true to "AA:BB:CC:DD:EE:FF"), sink.calls)
@@ -111,7 +125,7 @@ class RemoteChargerHttpServerTest {
 
     @Test
     fun `post off with secret reaches the sender`() {
-        val (code, _) = request("POST", "/charger", secret = "s3cret", body = """{"action":"off"}""")
+        val (code, _) = request("POST", "/charger", secret = "s3cret12", body = """{"action":"off"}""")
         assertEquals(202, code)
         assertEquals(listOf(false to "AA:BB:CC:DD:EE:FF"), sink.calls)
     }
@@ -125,7 +139,30 @@ class RemoteChargerHttpServerTest {
 
     @Test
     fun `post with bad body rejected and sender untouched`() {
-        val (code, _) = request("POST", "/charger", secret = "s3cret", body = """{"action":"sideways"}""")
+        val (code, _) = request("POST", "/charger", secret = "s3cret12", body = """{"action":"sideways"}""")
+        assertEquals(400, code)
+        assertTrue(sink.calls.isEmpty())
+    }
+
+    @Test
+    fun `oversized post body rejected before parse`() {
+        // F1: a >4 KB POST must be refused without buffering the body; the route is
+        // internet-reachable via the tunnel, so this is the OOM guard.
+        val (code, _) = request("POST", "/charger", secret = "s3cret12", body = "x".repeat(5000))
+        assertEquals(400, code)
+        assertTrue(sink.calls.isEmpty())
+    }
+
+    @Test
+    fun `post without content-length rejected before parse`() {
+        // F1: a POST with no Content-Length is unverifiable, so it is refused up front.
+        val code = rawStatusLine(
+            "POST /charger HTTP/1.1\r\n" +
+                "Host: 127.0.0.1\r\n" +
+                "X-Remote-Secret: s3cret12\r\n" +
+                "Connection: close\r\n" +
+                "\r\n"
+        )
         assertEquals(400, code)
         assertTrue(sink.calls.isEmpty())
     }

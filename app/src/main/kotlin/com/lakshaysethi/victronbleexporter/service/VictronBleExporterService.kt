@@ -75,8 +75,10 @@ class VictronBleExporterService : Service() {
                     }
                     startForegroundService(intent)
                     Log.i(TAG, "Remote charger command: ${if (enable) "ENABLE" else "DISABLE"} for $mac")
+                    true
                 } catch (e: Exception) {
                     Log.e(TAG, "Remote charger command could not be sent", e)
+                    false
                 }
             },
         )
