@@ -23,6 +23,16 @@ Victron MPPT (BLE) → Android phone (this app) → cloudflared tunnel → Prome
 
 ![Solar — Victron MPPT Grafana dashboard](docs/screenshots/grafana-dashboard.png)
 
+Live dashboard on a phone browser:
+
+![Solar — Victron MPPT Grafana dashboard (phone)](docs/screenshots/grafana-dashboard-phone.png)
+
+**Hardware** — the exporter runs on a low-cost spare Android phone placed near the MPPT charger:
+
+| Device near MPPT | Device near MPPT | Device near MPPT |
+|---|---|---|
+| ![Device near MPPT 1](docs/screenshots/device-phone-mppt-1.png) | ![Device near MPPT 2](docs/screenshots/device-phone-mppt-2.png) | ![Device near MPPT 3](docs/screenshots/device-phone-mppt-3.png) |
+
 **App** — main screen and debug-log sharing (screenshots arriving soon):
 
 | Main screen | Debug log |
