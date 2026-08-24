@@ -141,6 +141,19 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"enableTime\":\"08:30\""))
         assertTrue(r.body.contains("\"disableTime\":\"18:00\""))
         assertTrue(r.body.contains("\"live\":[]"))
+        assertTrue(r.body.contains("\"debug\":[]"))
+    }
+
+    @Test
+    fun `status includes escaped charger debug lines`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(
+            debug = listOf("12:00:00.000 Schedule tick -> charger ON"),
+        )
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"debug\":[\"12:00:00.000 Schedule tick -> charger ON\"]"))
+        assertEquals(20, ChargerStatusSnapshot.REMOTE_DEBUG_LINES)
     }
 
     @Test

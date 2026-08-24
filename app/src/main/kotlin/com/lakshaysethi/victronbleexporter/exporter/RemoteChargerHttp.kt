@@ -17,7 +17,7 @@ import java.security.MessageDigest
  *   GET  /charger        -> mobile control page (shell; every API call inside
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
- *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + live Instant Readout)
+ *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + live Instant Readout + last charger debug lines)
  *   POST /charger        -> JSON body {"action":"on"|"off"} flips the charger
  *   POST /charger/schedule -> JSON {enabled, enable, disable} saves the daily window
  *   GET  /voltage        -> JSON voltage settings (auth required)
@@ -327,6 +327,7 @@ data class ChargerStatusSnapshot(
     val enableTime: String = ChargerSchedule.DEFAULT_ENABLE,
     val disableTime: String = ChargerSchedule.DEFAULT_DISABLE,
     val live: List<LiveReadout> = emptyList(),
+    val debug: List<String> = emptyList(),
 ) {
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
 
@@ -347,10 +348,17 @@ data class ChargerStatusSnapshot(
             if (i > 0) append(",")
             append(row.toJson())
         }
+        append("],\"debug\":[")
+        debug.forEachIndexed { i, line ->
+            if (i > 0) append(",")
+            append("\"${RemoteChargerHttpJson.escape(line)}\"")
+        }
         append("]}")
     }
 
     companion object {
+        const val REMOTE_DEBUG_LINES = 20
+
         fun fromAppState(): ChargerStatusSnapshot = ChargerStatusSnapshot(
             mode = AppState.chargerMode,
             mac = AppState.chargerMac,
@@ -467,6 +475,7 @@ private val CONTROL_PAGE: String = """
   .status .label { font-size: 12px; color: #8fa3bf; }
   .status .value { font-size: 20px; font-weight: 700; }
   .status .meta { font-size: 12px; color: #8fa3bf; margin-top: 3px; line-height: 1.4; }
+  #dbg { margin: 0; max-height: 160px; overflow: auto; white-space: pre-wrap; word-break: break-word; font: 11px/1.4 ui-monospace, monospace; color: #8fa3bf; }
   .btn { display: block; width: 100%; border: none; border-radius: 12px; padding: 16px; font-size: 17px; font-weight: 700; color: #0b1220; margin-bottom: 10px; cursor: pointer; }
   .btn:disabled { opacity: .45; }
   .btn.on { background: #22c55e; }
@@ -495,6 +504,12 @@ private val CONTROL_PAGE: String = """
     <div class="txt">
       <div class="label">Live Instant Readout</div>
       <div class="meta" id="live">No fresh advertisement</div>
+    </div>
+  </div>
+  <div class="status">
+    <div class="txt">
+      <div class="label">Charger log</div>
+      <pre id="dbg">No charger log yet</pre>
     </div>
   </div>
   <div class="err" id="err"></div>
@@ -566,6 +581,9 @@ private val CONTROL_PAGE: String = """
         return "<div><b>" + (d.model || d.mac) + "</b> " + (bits.join(" \u00b7 ") || d.mac) + "</div>";
       }).join("");
     }
+    var dbg = document.getElementById("dbg");
+    var lines = data.debug || [];
+    dbg.textContent = lines.length ? lines.join("\n") : "No charger log yet";
     setBusy(!!data.busy);
   }
   function loadStatus() {

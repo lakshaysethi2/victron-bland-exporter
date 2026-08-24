@@ -78,6 +78,7 @@ class VictronBleExporterService : Service() {
                     enableTime = ChargerSchedule.formatMinutes(s.enableMinutes),
                     disableTime = ChargerSchedule.formatMinutes(s.disableMinutes),
                     live = LiveReadout.fromFreshMetrics(),
+                    debug = ChargerDebugLog.snapshot().takeLast(ChargerStatusSnapshot.REMOTE_DEBUG_LINES),
                 )
             },
             macProvider = { AppState.chargerMac ?: chargerScheduleStore.load().chargerMac.ifBlank { null } },
