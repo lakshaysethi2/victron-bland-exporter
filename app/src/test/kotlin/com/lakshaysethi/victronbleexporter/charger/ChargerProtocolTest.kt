@@ -129,5 +129,13 @@ class ChargerProtocolTest {
         assertFalse(ChargerProtocol.modeMatchesRequest(2, false))
     }
 
+    @Test
+    fun `acknowledged GATT write only succeeds when queued and status 0`() {
+        assertTrue(ChargerProtocol.gattWriteAccepted(true, 0))
+        assertFalse(ChargerProtocol.gattWriteAccepted(false, 0))
+        assertFalse(ChargerProtocol.gattWriteAccepted(true, 133))
+        assertFalse(ChargerProtocol.gattWriteAccepted(true, 1))
+    }
+
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 }

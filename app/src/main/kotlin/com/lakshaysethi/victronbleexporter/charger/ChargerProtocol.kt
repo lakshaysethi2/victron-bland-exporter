@@ -184,6 +184,9 @@ object ChargerProtocol {
 
     fun isChargerOn(mode: Int?): Boolean = mode == MODE_CHARGER_ON
 
+    /** Stack queued the write and the device acknowledged GATT_SUCCESS (0). Status 133 is a failure now that writes are acknowledged. */
+    fun gattWriteAccepted(queued: Boolean, status: Int): Boolean = queued && status == 0
+
     /** True when [mode] satisfies a request to set the charger to [on] (1 = on, 0/4 = off). */
     fun modeMatchesRequest(mode: Int?, on: Boolean): Boolean = when (mode) {
         MODE_CHARGER_ON -> on

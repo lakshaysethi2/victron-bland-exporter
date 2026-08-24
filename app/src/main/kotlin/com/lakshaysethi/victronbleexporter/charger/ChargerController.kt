@@ -10,12 +10,14 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
@@ -210,6 +212,13 @@ class ChargerController(private val context: Context) {
         private val registers = LinkedHashMap<Int, ByteArray>()
         private val registersLock = Any()
 
+        /** Set when a characteristic write was not accepted; waiters fail fast instead of sitting out the timeout. */
+        private var writeFailed = false
+
+        /** One in-flight write at a time. An unacknowledged no-response write wedges the connection and every later write is refused. */
+        @Volatile private var writeLatch = CountDownLatch(1)
+        @Volatile private var lastWriteStatus: Int = BluetoothGatt.GATT_SUCCESS
+
         private val steps = mutableListOf<String>()
         private var firstError: String? = null
 
@@ -286,6 +295,7 @@ class ChargerController(private val context: Context) {
                     BluetoothProfile.STATE_CONNECTED -> {
                         log("Connected (status=$status) — discovering services")
                         connected.set(1)
+                        connectedLatch.countDown()
                         gatt.discoverServices()
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
@@ -323,7 +333,9 @@ class ChargerController(private val context: Context) {
             }
 
             override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-                log("Write callback (char=${shortUuid(characteristic.uuid.toString())}, status=$status — 0 = OK, 133 = write-without-response quirk)")
+                log("Write callback (char=${shortUuid(characteristic.uuid.toString())}, status=$status)")
+                lastWriteStatus = status
+                writeLatch.countDown()
             }
         }
 
@@ -393,15 +405,30 @@ class ChargerController(private val context: Context) {
                 } catch (e: Exception) {
                     null
                 } ?: continue
-                if ((char.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) == 0) continue
+                val props = char.properties
+                val canNotify = (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0 ||
+                    (props and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
+                if (!canNotify) {
+                    log("Skip notify: ${shortUuid(uuid)} has no NOTIFY/INDICATE (props=$props)")
+                    continue
+                }
                 try {
                     gatt.setCharacteristicNotification(char, true)
-                    val cccd = char.getDescriptor(CCCD_UUID) ?: continue
+                    val cccd = char.getDescriptor(CCCD_UUID)
+                    if (cccd == null) {
+                        log("No CCCD for ${shortUuid(uuid)} — notifications may not arrive")
+                        continue
+                    }
                     writeDescriptor(gatt, cccd, byteArrayOf(0x01, 0x00))
                     log("Notifications enabled on $uuid")
                 } catch (e: SecurityException) {
                     error("cannot enable notifications: ${e.message}")
                 }
+            }
+            try {
+                gatt.requestMtu(185)
+            } catch (_: Exception) {
+                // Best-effort; Victron frames are short so the default MTU still works.
             }
             sleepQuietly(200)
         }
@@ -470,10 +497,9 @@ class ChargerController(private val context: Context) {
         }
 
         fun awaitVoltageReadback(): VoltageSettings {
-            val deadline = System.currentTimeMillis() + READBACK_TIMEOUT_MS
+            val deadline = SystemClock.elapsedRealtime() + READBACK_TIMEOUT_MS
             synchronized(voltageMonitor) {
-                // Wait until at least one requested register arrives or the device disconnects.
-                while (!voltageReadbackClosed) {
+                while (!voltageReadbackClosed && !writeFailed) {
                     val haveAny = synchronized(registersLock) {
                         registers.keys.any {
                             it == ChargerProtocol.REG_BATTERY_VOLTAGE_SETTING ||
@@ -482,7 +508,7 @@ class ChargerController(private val context: Context) {
                         }
                     }
                     if (haveAny) break
-                    val remaining = deadline - System.currentTimeMillis()
+                    val remaining = deadline - SystemClock.elapsedRealtime()
                     if (remaining <= 0) break
                     try {
                         voltageMonitor.wait(minOf(remaining, 500L))
@@ -490,7 +516,6 @@ class ChargerController(private val context: Context) {
                         Thread.currentThread().interrupt()
                         break
                     }
-                    if (System.currentTimeMillis() >= deadline) break
                 }
             }
             return snapshotVoltageSettings()
@@ -520,11 +545,11 @@ class ChargerController(private val context: Context) {
         }
 
         fun awaitModeReadback(): Int? {
-            val deadline = System.currentTimeMillis() + READBACK_TIMEOUT_MS
+            val deadline = SystemClock.elapsedRealtime() + READBACK_TIMEOUT_MS
             val mode: Int
             synchronized(modeMonitor) {
-                while (modeValue < 0 && !readbackClosed) {
-                    val remaining = deadline - System.currentTimeMillis()
+                while (modeValue < 0 && !readbackClosed && !writeFailed) {
+                    val remaining = deadline - SystemClock.elapsedRealtime()
                     if (remaining <= 0) break
                     try {
                         modeMonitor.wait(remaining)
@@ -543,6 +568,7 @@ class ChargerController(private val context: Context) {
         }
 
         private fun writeFrames(frames: List<Pair<String, ByteArray>>) {
+            if (writeFailed) return
             val gatt = gattRef.get() ?: return
             for ((uuid, payload) in frames) {
                 val char = try {
@@ -552,17 +578,36 @@ class ChargerController(private val context: Context) {
                     null
                 } ?: continue
                 try {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        gatt.writeCharacteristic(char, payload, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+                    writeLatch = CountDownLatch(1)
+                    lastWriteStatus = BluetoothGatt.GATT_SUCCESS
+                    val queued = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        gatt.writeCharacteristic(char, payload, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
                     } else {
                         @Suppress("DEPRECATION")
-                        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                        char.value = payload
                         @Suppress("DEPRECATION")
                         gatt.writeCharacteristic(char)
                     }
+                    if (!queued) {
+                        error("write not accepted by the stack (${shortUuid(uuid)}, props=${char.properties})")
+                        writeFailed = true
+                        return
+                    }
                     log("Write ${shortUuid(uuid)}: ${payload.toHex()}")
+                    if (!await(writeLatch, WRITE_CALLBACK_TIMEOUT_MS)) {
+                        error("device did not acknowledge write (${shortUuid(uuid)}) within ${WRITE_CALLBACK_TIMEOUT_MS}ms")
+                        writeFailed = true
+                        return
+                    }
+                    if (!ChargerProtocol.gattWriteAccepted(true, lastWriteStatus)) {
+                        error("device rejected write (${shortUuid(uuid)}): GATT status $lastWriteStatus")
+                        writeFailed = true
+                        return
+                    }
                 } catch (e: SecurityException) {
                     error("write failed (permission): ${e.message}")
+                    writeFailed = true
                     return
                 }
                 sleepQuietly(WRITE_GAP_MS)
@@ -628,6 +673,7 @@ class ChargerController(private val context: Context) {
         const val SERVICES_TIMEOUT_MS = 12_000L
         const val READBACK_TIMEOUT_MS = 6_000L
         const val WRITE_GAP_MS = 60L
+        const val WRITE_CALLBACK_TIMEOUT_MS = 1_500L
 
         val CCCD_UUID: java.util.UUID = java.util.UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }
