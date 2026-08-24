@@ -154,6 +154,7 @@ class VictronBleExporterService : Service() {
         }
     }
 
+    @SuppressLint("WakelockTimeout")
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "Service onCreate")
@@ -173,8 +174,12 @@ class VictronBleExporterService : Service() {
 
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VictronBleExporter::WakeLock")
-            wakeLock?.acquire(10 * 60 * 1000L /*10 minutes*/)
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VictronBleExporter::WakeLock").apply {
+                setReferenceCounted(false)
+            }
+            // Held for the life of the service so the tunnel + schedule loop survive Doze.
+            @Suppress("DEPRECATION")
+            wakeLock?.acquire()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to acquire wakeLock", e)
         }
@@ -269,7 +274,7 @@ class VictronBleExporterService : Service() {
         } else {
             AppState.chargerLastAction = "Schedule apply failed: ${result.message}"
             AppState.chargerLastError = result.message
-            scheduleRetryAt = now + 10 * 60_000L
+            scheduleRetryAt = now + ExporterKeepAlive.SCHEDULE_RETRY_MS
         }
     }
 
@@ -420,11 +425,12 @@ class VictronBleExporterService : Service() {
         chargerScheduleStore.save(enabled, enableTime, disableTime, mac)
         AppState.chargerMac = mac
         AppState.chargerOverrideUntil = 0L
-        lastScheduledMode = null // force a fresh apply on the next tick
+        lastScheduledMode = null // force a fresh apply now, not after the 30s loop delay
         ChargerDebugLog.append(
             "Schedule saved: $mac ${if (enabled) "enabled" else "disabled"} " +
-                "($enableTime → $disableTime). Applies while the app is open."
+                "($enableTime → $disableTime). Applies while the exporter notification is showing."
         )
+        serviceScope.launch { enforceChargerSchedule() }
     }
 
     private fun nextTransitionEpoch(nextMinutesOfDay: Int): Long {
@@ -499,11 +505,21 @@ class VictronBleExporterService : Service() {
             }
         }
         if (intent?.action == null) {
-            // Boot / sticky restart with no command: restore the named tunnel from the persisted token.
+            // Boot / sticky restart / Start Scan with no command: restore the named tunnel if it is down.
             restoreSavedTunnel()
         }
         updateNotification("Running")
         return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.i(TAG, "Task removed — keeping exporter running")
+        try {
+            startForegroundService(Intent(this, VictronBleExporterService::class.java))
+        } catch (e: Exception) {
+            Log.w(TAG, "restart after task-removed failed", e)
+        }
     }
 
     private fun persistTunnelToken(token: String) {
@@ -517,8 +533,9 @@ class VictronBleExporterService : Service() {
         }
     }
 
-    /** Starts the named tunnel from the persisted token; returns false when no token is saved. */
+    /** Starts the named tunnel from the persisted token; no-ops when already running or none saved. */
     private fun restoreSavedTunnel(): Boolean {
+        val alreadyRunning = ::cloudflaredManager.isInitialized && cloudflaredManager.isRunning()
         val token = try {
             if (!::deviceRepository.isInitialized) {
                 deviceRepository = DeviceRepository(this)
@@ -528,8 +545,8 @@ class VictronBleExporterService : Service() {
             Log.w(TAG, "Failed to read persisted tunnel token", e)
             null
         }
-        if (token.isNullOrBlank()) return false
-        cloudflaredManager.startNamedTunnel(token) { status -> updateNotification(status) }
+        if (!ExporterKeepAlive.shouldRestoreNamedTunnel(alreadyRunning, token)) return alreadyRunning
+        cloudflaredManager.startNamedTunnel(token!!) { status -> updateNotification(status) }
         return true
     }
 
@@ -723,4 +740,12 @@ class VictronBleExporterService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+}
+
+/** Keep-alive / restore policy, kept Android-free so it can be unit-tested on the JVM. */
+internal object ExporterKeepAlive {
+    const val SCHEDULE_RETRY_MS = 60_000L
+
+    fun shouldRestoreNamedTunnel(alreadyRunning: Boolean, savedToken: String?): Boolean =
+        !alreadyRunning && !savedToken.isNullOrBlank()
 }

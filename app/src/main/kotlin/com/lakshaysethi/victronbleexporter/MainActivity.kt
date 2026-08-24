@@ -1241,7 +1241,7 @@ fun VictronBleExporterScreen(
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Note: the schedule applies while the app is open (foreground service running). " +
+                    "Note: the schedule applies while the exporter notification is showing (stays up after you leave the app). " +
                         "Manual Enable/Disable pauses the schedule until the next window boundary.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant

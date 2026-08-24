@@ -107,7 +107,7 @@ Auth: every status/command call must send the secret as an `X-Remote-Secret` (or
 
 Pairing: the first connection prompts for a Bluetooth PIN. Use the PIN printed on the product sticker, or `000000` (the common Victron default).
 
-> **Limitation**: the schedule is enforced only while the app is running (foreground service active). 24/7 scheduling would need a follow-up foreground-service/power-management change — it is called out in the UI too.
+> The daily charger schedule runs while the exporter notification is showing. Leave the app open or swipe it away — the service stays up (disable battery optimizations for overnight). Manual Enable/Disable still pauses the schedule until the next window boundary.
 
 ---
 
