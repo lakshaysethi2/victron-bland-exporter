@@ -18,7 +18,7 @@ import java.security.MessageDigest
  *   GET  /charger        -> mobile control page (shell; every API call inside
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
- *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status); kicks a CHARGER_READ when mode is still unknown
+ *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status + app version + last GATT voltages); kicks a CHARGER_READ when mode is still unknown
  *   POST /charger        -> JSON body {"action":"on"|"off"|"read", "mac"?: "AA:BB:..."} flips or reads the charger
  *   POST /charger/schedule -> JSON {enabled, enable, disable, mac?} saves the daily window
  *   POST /charger/key    -> JSON {mac, key} saves an Instant Readout key (never echoed)
@@ -483,6 +483,13 @@ data class ChargerStatusSnapshot(
     val tunnelStatus: String = "",
     val tunnelUrl: String? = null,
     val tunnelHasToken: Boolean = false,
+    val appVersion: String = "",
+    val versionCode: Int = 0,
+    val batteryVoltageSetting: Int? = null,
+    val absorptionVoltage: Double? = null,
+    val floatVoltage: Double? = null,
+    val chargerVoltage: Double? = null,
+    val panelVoltage: Double? = null,
 ) {
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
 
@@ -507,6 +514,13 @@ data class ChargerStatusSnapshot(
         append(",\"tunnelUrl\":").append(
             if (tunnelUrl.isNullOrBlank()) "null" else "\"${RemoteChargerHttpJson.escape(tunnelUrl)}\"",
         )
+        append(",\"appVersion\":\"${RemoteChargerHttpJson.escape(appVersion)}\"")
+        append(",\"versionCode\":").append(versionCode)
+        append(",\"batteryVoltageSetting\":").append(batteryVoltageSetting ?: "null")
+        append(",\"absorptionVoltage\":").append(absorptionVoltage ?: "null")
+        append(",\"floatVoltage\":").append(floatVoltage ?: "null")
+        append(",\"chargerVoltage\":").append(chargerVoltage ?: "null")
+        append(",\"panelVoltage\":").append(panelVoltage ?: "null")
         append(",\"live\":[")
         live.forEachIndexed { i, row ->
             if (i > 0) append(",")
@@ -530,6 +544,7 @@ data class ChargerStatusSnapshot(
 
         fun fromAppState(): ChargerStatusSnapshot {
             val clock = ChargerSchedule.phoneClock()
+            val vs = AppState.voltageSettings
             return ChargerStatusSnapshot(
                 mode = AppState.chargerMode,
                 mac = AppState.chargerMac,
@@ -542,6 +557,11 @@ data class ChargerStatusSnapshot(
                 phoneZone = clock.second,
                 tunnelStatus = AppState.tunnelStatus,
                 tunnelUrl = AppState.tunnelUrl,
+                batteryVoltageSetting = vs?.batteryVoltageSetting,
+                absorptionVoltage = vs?.absorptionVolts,
+                floatVoltage = vs?.floatVolts,
+                chargerVoltage = vs?.chargerVolts,
+                panelVoltage = vs?.panelVolts,
             )
         }
     }
@@ -769,6 +789,14 @@ private val CONTROL_PAGE: String = """
     if (data.tunnelStatus) parts.push("tunnel " + data.tunnelStatus);
     if (data.tunnelUrl) parts.push(data.tunnelUrl);
     if (data.tunnelHasToken) parts.push("token saved");
+    if (data.appVersion) parts.push("app v" + data.appVersion);
+    var vbits = [];
+    if (data.batteryVoltageSetting != null) vbits.push("batt " + data.batteryVoltageSetting + " V");
+    if (data.absorptionVoltage != null) vbits.push("abs " + data.absorptionVoltage + " V");
+    if (data.floatVoltage != null) vbits.push("float " + data.floatVoltage + " V");
+    if (data.chargerVoltage != null) vbits.push("chg " + data.chargerVoltage + " V");
+    if (data.panelVoltage != null) vbits.push("pv " + data.panelVoltage + " V");
+    if (vbits.length) parts.push(vbits.join(" "));
     if (selectedMac || data.mac) parts.push("target " + (selectedMac || data.mac));
     meta.textContent = parts.join(" \u00b7 ");
     if (!schedFilled) {

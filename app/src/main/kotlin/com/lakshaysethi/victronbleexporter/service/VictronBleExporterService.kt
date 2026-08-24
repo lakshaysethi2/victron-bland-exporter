@@ -94,6 +94,8 @@ class VictronBleExporterService : Service() {
                     sighted = SightedDevice.fromStore(),
                     debug = ChargerDebugLog.snapshot().takeLast(ChargerStatusSnapshot.REMOTE_DEBUG_LINES),
                     tunnelHasToken = savedTunnelToken() != null,
+                    appVersion = BuildConfig.VERSION_NAME,
+                    versionCode = BuildConfig.VERSION_CODE,
                 )
             },
             macProvider = { AppState.chargerMac ?: chargerScheduleStore.load().chargerMac.ifBlank { null } },

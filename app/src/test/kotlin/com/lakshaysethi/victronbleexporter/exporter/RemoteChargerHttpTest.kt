@@ -2,6 +2,7 @@ package com.lakshaysethi.victronbleexporter.exporter
 
 import com.lakshaysethi.victronbleexporter.AppState
 import com.lakshaysethi.victronbleexporter.charger.ChargerProtocol
+import com.lakshaysethi.victronbleexporter.charger.VoltageSettings
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
 import com.lakshaysethi.victronbleexporter.parser.ParsedDevice
 import org.junit.Assert.assertEquals
@@ -183,6 +184,36 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"tunnelStatus\":\"\""))
         assertTrue(r.body.contains("\"tunnelUrl\":null"))
         assertTrue(r.body.contains("\"tunnelHasToken\":false"))
+        assertTrue(r.body.contains("\"appVersion\":\"\""))
+        assertTrue(r.body.contains("\"versionCode\":0"))
+        assertTrue(r.body.contains("\"batteryVoltageSetting\":null"))
+        assertTrue(r.body.contains("\"absorptionVoltage\":null"))
+        assertTrue(r.body.contains("\"floatVoltage\":null"))
+        assertTrue(r.body.contains("\"chargerVoltage\":null"))
+        assertTrue(r.body.contains("\"panelVoltage\":null"))
+    }
+
+    @Test
+    fun `status includes app version and last GATT voltages`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(
+            appVersion = "0.2.10",
+            versionCode = 12,
+            batteryVoltageSetting = 24,
+            absorptionVoltage = 28.4,
+            floatVoltage = 27.0,
+            chargerVoltage = 26.8,
+            panelVoltage = 42.1,
+        )
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"appVersion\":\"0.2.10\""))
+        assertTrue(r.body.contains("\"versionCode\":12"))
+        assertTrue(r.body.contains("\"batteryVoltageSetting\":24"))
+        assertTrue(r.body.contains("\"absorptionVoltage\":28.4"))
+        assertTrue(r.body.contains("\"floatVoltage\":27.0"))
+        assertTrue(r.body.contains("\"chargerVoltage\":26.8"))
+        assertTrue(r.body.contains("\"panelVoltage\":42.1"))
     }
 
     @Test
@@ -196,9 +227,35 @@ class RemoteChargerHttpTest {
             assertEquals("Running", snap.tunnelStatus)
             assertEquals("https://example.trycloudflare.com", snap.tunnelUrl)
             assertFalse(snap.tunnelHasToken)
+            assertNull(snap.batteryVoltageSetting)
+            assertNull(snap.panelVoltage)
+            assertEquals("", snap.appVersion)
+            assertEquals(0, snap.versionCode)
         } finally {
             AppState.tunnelStatus = prevStatus
             AppState.tunnelUrl = prevUrl
+        }
+    }
+
+    @Test
+    fun `fromAppState copies last GATT voltages`() {
+        val prev = AppState.voltageSettings
+        try {
+            AppState.voltageSettings = VoltageSettings(
+                batteryVoltageSetting = 12,
+                absorptionVolts = 14.4,
+                floatVolts = 13.8,
+                chargerVolts = 13.5,
+                panelVolts = 18.2,
+            )
+            val snap = ChargerStatusSnapshot.fromAppState()
+            assertEquals(12, snap.batteryVoltageSetting)
+            assertEquals(14.4, snap.absorptionVoltage)
+            assertEquals(13.8, snap.floatVoltage)
+            assertEquals(13.5, snap.chargerVoltage)
+            assertEquals(18.2, snap.panelVoltage)
+        } finally {
+            AppState.voltageSettings = prev
         }
     }
 
@@ -538,6 +595,8 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("Save + start named"))
         assertTrue(r.body.contains("Start saved tunnel"))
         assertTrue(r.body.contains("token saved"))
+        assertTrue(r.body.contains("appVersion"))
+        assertTrue(r.body.contains("panelVoltage"))
         assertTrue(r.body.contains("sighted"))
         assertTrue(r.body.contains("wrong key"))
         assertFalse(r.body.contains(SECRET))
