@@ -43,6 +43,11 @@ class RemoteChargerHttpTest {
         override fun requestVoltageRead(mac: String) { reads.add(mac) }
     }
 
+    private class FakeKeySink : KeyCommandSender {
+        val calls = mutableListOf<Pair<String, String>>()
+        override fun saveKey(mac: String, key: String) { calls.add(mac to key) }
+    }
+
     private class Harness(
         var enabled: Boolean = true,
         var secret: String = "correct horse battery staple",
@@ -60,14 +65,16 @@ class RemoteChargerHttpTest {
         val sink = FakeSink()
         val scheduleSink = FakeScheduleSink()
         val voltageSink = FakeVoltageSink()
+        val keySink = FakeKeySink()
 
-        fun control() = RemoteChargerHttp(
+        fun control(withKeySender: Boolean = true) = RemoteChargerHttp(
             settingsProvider = { RemoteChargerStore.RemoteChargerSettings(enabled = enabled, authSecret = secret) },
             statusProvider = { snapshot },
             macProvider = { mac },
             commandSender = sink,
             scheduleSender = scheduleSink,
             voltageCommandSender = voltageSink,
+            keySender = if (withKeySender) keySink else null,
         )
     }
 
@@ -91,10 +98,12 @@ class RemoteChargerHttpTest {
         assertEquals(404, c.handle("/charger/schedule", POST, headers(SECRET), """{"enabled":true,"enable":"08:30","disable":"18:00"}""").statusCode)
         assertEquals(404, c.handle("/voltage", GET, headers(SECRET), "").statusCode)
         assertEquals(404, c.handle("/voltage", POST, headers(SECRET), """{"battery_voltage_setting":24}""").statusCode)
+        assertEquals(404, c.handle("/charger/key", POST, headers(SECRET), """{"mac":"AA:BB:CC:DD:EE:FF","key":"0123456789abcdef0123456789abcdef"}""").statusCode)
         assertEquals(404, c.handle("/charger/status", GET, emptyMap(), "").statusCode)
         assertTrue(h.sink.calls.isEmpty())
         assertTrue(h.scheduleSink.calls.isEmpty())
         assertTrue(h.voltageSink.battery.isEmpty())
+        assertTrue(h.keySink.calls.isEmpty())
     }
 
     @Test
@@ -409,6 +418,10 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("nextTransition"))
         assertTrue(r.body.contains("tunnelStatus"))
         assertTrue(r.body.contains("tunnelUrl"))
+        assertTrue(r.body.contains("/charger/key"))
+        assertTrue(r.body.contains("Save key"))
+        assertTrue(r.body.contains("sighted"))
+        assertTrue(r.body.contains("wrong key"))
         assertFalse(r.body.contains(SECRET))
     }
 
@@ -526,6 +539,115 @@ class RemoteChargerHttpTest {
         val r = h.control().handle("/voltage", POST, headers(SECRET), """{"battery_voltage_setting":24}""")
         assertEquals(503, r.statusCode)
         assertTrue(h.voltageSink.battery.isEmpty())
+    }
+
+    // ---- Instant Readout key ----
+
+    private val HEX32 = "0123456789abcdef0123456789abcdef"
+
+    @Test
+    fun `status includes sighted devices without leaking a key`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(
+            sighted = listOf(
+                SightedDevice(
+                    mac = "AA:BB:CC:DD:EE:FF",
+                    model = "SmartSolar MPPT 150/35",
+                    hasKey = false,
+                    wrongKey = false,
+                    lastSeen = 99L,
+                    rssi = -70,
+                ),
+            ),
+        )
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"sighted\":["))
+        assertTrue(r.body.contains("\"hasKey\":false"))
+        assertTrue(r.body.contains("\"wrongKey\":false"))
+        assertTrue(r.body.contains("\"rssi\":-70"))
+        assertFalse(r.body.contains(HEX32))
+        assertFalse(r.body.contains("\"key\""))
+    }
+
+    @Test
+    fun `post key accepted and forwarded without echoing the key`() {
+        val h = Harness()
+        val r = h.control().handle(
+            "/charger/key", POST, headers(SECRET),
+            """{"mac":"aa:bb:cc:dd:ee:ff","key":"$HEX32"}""",
+        )
+        assertEquals(202, r.statusCode)
+        assertEquals(listOf("AA:BB:CC:DD:EE:FF" to HEX32), h.keySink.calls)
+        assertTrue(r.body.contains("\"accepted\":true"))
+        assertTrue(r.body.contains("AA:BB:CC:DD:EE:FF"))
+        assertFalse(r.body.contains(HEX32))
+    }
+
+    @Test
+    fun `post key accepts 12-hex mac without colons`() {
+        val h = Harness()
+        val r = h.control().handle(
+            "/charger/key", POST, headers(SECRET),
+            """{"mac":"aabbccddeeff","key":"$HEX32"}""",
+        )
+        assertEquals(202, r.statusCode)
+        assertEquals("AA:BB:CC:DD:EE:FF", h.keySink.calls.single().first)
+    }
+
+    @Test
+    fun `post key with short hex is rejected`() {
+        val h = Harness()
+        val r = h.control().handle(
+            "/charger/key", POST, headers(SECRET),
+            """{"mac":"AA:BB:CC:DD:EE:FF","key":"deadbeef"}""",
+        )
+        assertEquals(400, r.statusCode)
+        assertTrue(h.keySink.calls.isEmpty())
+        assertFalse(r.body.contains("deadbeef"))
+    }
+
+    @Test
+    fun `post key without sender returns 503`() {
+        val h = Harness()
+        val r = h.control(withKeySender = false).handle(
+            "/charger/key", POST, headers(SECRET),
+            """{"mac":"AA:BB:CC:DD:EE:FF","key":"$HEX32"}""",
+        )
+        assertEquals(503, r.statusCode)
+        assertTrue(h.keySink.calls.isEmpty())
+    }
+
+    @Test
+    fun `post key requires the secret`() {
+        val h = Harness()
+        assertEquals(401, h.control().handle("/charger/key", POST, emptyMap(), """{"mac":"AA:BB:CC:DD:EE:FF","key":"$HEX32"}""").statusCode)
+        assertTrue(h.keySink.calls.isEmpty())
+    }
+
+    @Test
+    fun `sighted from store omits stale devices and never carries a key`() {
+        DiscoveredDevicesStore.clear()
+        try {
+            DiscoveredDevicesStore.updateSeen(
+                mac = "AA:BB:CC:DD:EE:FF",
+                modelId = 0xA058,
+                recordType = 1,
+                rssi = -65,
+                hasKey = false,
+                parsed = null,
+            )
+            val fresh = SightedDevice.fromStore()
+            assertEquals(1, fresh.size)
+            assertEquals("AA:BB:CC:DD:EE:FF", fresh[0].mac)
+            assertFalse(fresh[0].hasKey)
+            assertFalse(fresh[0].toJson().contains("\"key\""))
+
+            val stale = SightedDevice.fromStore(now = System.currentTimeMillis() + MetricsStore.FRESH_MS + 1)
+            assertTrue(stale.isEmpty())
+        } finally {
+            DiscoveredDevicesStore.clear()
+        }
     }
 
     // ---- auth primitives ----

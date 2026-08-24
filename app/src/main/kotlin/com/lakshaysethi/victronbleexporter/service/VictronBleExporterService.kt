@@ -29,8 +29,10 @@ import com.lakshaysethi.victronbleexporter.diag.Diagnostics
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
 import com.lakshaysethi.victronbleexporter.exporter.ChargerCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.ChargerStatusSnapshot
+import com.lakshaysethi.victronbleexporter.exporter.KeyCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.LiveReadout
 import com.lakshaysethi.victronbleexporter.exporter.ScheduleCommandSender
+import com.lakshaysethi.victronbleexporter.exporter.SightedDevice
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
 import com.lakshaysethi.victronbleexporter.exporter.VoltageCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
@@ -87,6 +89,7 @@ class VictronBleExporterService : Service() {
                         ChargerSchedule.nextTransition(minutes, s.enableMinutes, s.disableMinutes),
                     ),
                     live = LiveReadout.fromFreshMetrics(),
+                    sighted = SightedDevice.fromStore(),
                     debug = ChargerDebugLog.snapshot().takeLast(ChargerStatusSnapshot.REMOTE_DEBUG_LINES),
                 )
             },
@@ -151,6 +154,18 @@ class VictronBleExporterService : Service() {
                     } catch (e: Exception) {
                         Log.e(TAG, "Remote voltage read failed", e)
                     }
+                }
+            },
+            keySender = KeyCommandSender { mac, key ->
+                try {
+                    startForegroundService(Intent(this, VictronBleExporterService::class.java).apply {
+                        action = "ADD_KEY"
+                        putExtra("mac", mac)
+                        putExtra("key", key)
+                    })
+                    Log.i(TAG, "Remote Instant Readout key save for $mac")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Remote key save could not be sent", e)
                 }
             },
         )
