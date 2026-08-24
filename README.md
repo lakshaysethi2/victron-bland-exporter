@@ -159,16 +159,15 @@ app/src/main/jniLibs/arm64-v8a/libcloudflared.so                        (bundled
 
 ## Project status
 
-Core functionality is complete and battle-tested on real hardware: BLE parsing, Prometheus export, tunnel with working child DNS, debug-log sharing, charger control, and the Grafana dashboard. Community help welcome on:
+Core functionality is complete and battle-tested on real hardware: BLE parsing, Prometheus export, tunnel with working child DNS, named-token restore, charger schedule, remote `/charger` management, and the Grafana dashboard. Community help welcome on:
 
 - More device types (Inverter, DC/DC converters, etc.)
-- Nicer onboarding UI and encrypted key storage
 - F-Droid packaging / signed release APKs (debug APK already ships on [GitHub Releases](https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest))
 - Test reports from other Victron hardware
 
 ## Contributing
 
-PRs welcome — see [`guide.md`](guide.md) for the build and the cgo/NDK cloudflared recipe if you touch the tunnel binary. Please run the JVM unit tests (`./gradlew testDebugUnitTest`) — CI runs the same job, uploads a debug APK artifact, and on `main` publishes it to [GitHub Releases](https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest). `TunnelBinaryInspectorTest` guards the bundled binary's linkage. Do not commit tokens or keys; see [`SECURITY.md`](SECURITY.md).
+PRs welcome — see [`guide.md`](guide.md) for the build and the cgo/NDK cloudflared recipe if you touch the tunnel binary. Please run the JVM unit tests (`./gradlew testDebugUnitTest`) — CI runs the same job plus a public-tree hygiene check, uploads a debug APK artifact, and on `main` publishes it to [GitHub Releases](https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest). `TunnelBinaryInspectorTest` guards the bundled binary's linkage. Open issues with the bug template; never paste a tunnel token, Instant Readout key, or remote secret — see [`SECURITY.md`](SECURITY.md).
 
 ## License
 
