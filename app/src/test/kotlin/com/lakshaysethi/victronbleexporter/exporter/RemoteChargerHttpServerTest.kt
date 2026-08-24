@@ -102,6 +102,14 @@ class RemoteChargerHttpServerTest {
     }
 
     @Test
+    fun `named host root serves the control page without a secret`() {
+        val (pageCode, page) = request("GET", "/", secret = null)
+        assertEquals(200, pageCode)
+        assertTrue(page.contains("ENABLE CHARGER"))
+        assertTrue(page.contains("viewport"))
+    }
+
+    @Test
     fun `page requires no secret but status does`() {
         val (pageCode, page) = request("GET", "/charger", secret = null)
         assertEquals(200, pageCode)

@@ -114,6 +114,7 @@ class RemoteChargerHttpTest {
         val c = h.control()
         assertEquals(404, c.handle("/charger", GET, headers(SECRET), "").statusCode)
         assertEquals(404, c.handle("/charger", GET, emptyMap(), "").statusCode)
+        assertEquals(404, c.handle("/", GET, emptyMap(), "").statusCode)
         assertEquals(404, c.handle("/charger/status", GET, headers(SECRET), "").statusCode)
         assertEquals(404, c.handle("/charger", POST, headers(SECRET), """{"action":"on"}""").statusCode)
         assertEquals(404, c.handle("/charger/schedule", POST, headers(SECRET), """{"enabled":true,"enable":"08:30","disable":"18:00"}""").statusCode)
@@ -145,6 +146,17 @@ class RemoteChargerHttpTest {
         assertEquals(404, c.handle("/metrics", GET, headers(SECRET), "").statusCode)
         assertEquals(404, c.handle("/charger/extra", GET, headers(SECRET), "").statusCode)
         assertEquals(404, c.handle("/charger/status", POST, headers(SECRET), "").statusCode)
+        assertEquals(404, c.handle("/", POST, headers(SECRET), """{"action":"on"}""").statusCode)
+    }
+
+    @Test
+    fun `named host root serves the same control page as charger`() {
+        val c = Harness().control()
+        val r = c.handle("/", GET, emptyMap(), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.mimeType.contains("text/html"))
+        assertTrue(r.body.contains("ENABLE CHARGER"))
+        assertTrue(r.body.contains("viewport"))
     }
 
     // ---- auth ----

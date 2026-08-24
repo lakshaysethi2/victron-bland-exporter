@@ -12,10 +12,10 @@ import java.security.MessageDigest
 /**
  * HTTP surface for REMOTE charger control, served by [PrometheusExporter]
  * under `/charger*` and reachable from any browser through the Cloudflare
- * named tunnel (`https://mppt.lak.nz/charger`).
+ * named tunnel (`https://mppt.lak.nz/` or `/charger`).
  *
  * Routes:
- *   GET  /charger        -> mobile control page (shell; every API call inside
+ *   GET  / or /charger   -> mobile control page (shell; every API call inside
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
  *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status + app version + last GATT voltages); kicks a CHARGER_READ when mode is still unknown
@@ -60,7 +60,7 @@ class RemoteChargerHttp(
      * (empty for GET). Pure logic — returns an [HttpResult] the server renders.
      */
     fun handle(uri: String, method: String, headers: Map<String, String>, body: String): HttpResult {
-        if (!uri.startsWith("/charger") && uri != "/voltage") {
+        if (uri != "/" && !uri.startsWith("/charger") && uri != "/voltage") {
             return notFound()
         }
         val settings = settingsProvider()
@@ -71,7 +71,8 @@ class RemoteChargerHttp(
         // attach custom headers to a top-level navigation, so the page itself is
         // served without the secret. Everything functional on the page — status
         // and commands — still requires the secret below.
-        if (uri == "/charger" && method == "GET") {
+        // GET / is the named-host landing (mppt.lak.nz) — same shell as /charger.
+        if ((uri == "/" || uri == "/charger") && method == "GET") {
             return HttpResult(200, MIME_HTML, CONTROL_PAGE)
         }
         // Browser navigation cannot send X-Remote-Secret; serve the inert voltage shell the same way as /charger.

@@ -17,13 +17,13 @@ private const val DEFAULT_PORT = 5338
  */
 class PrometheusExporter(
     private val port: Int = DEFAULT_PORT,
-    /** Optional remote charger-control surface (GET /charger, /charger/status, POST /charger, /charger/tunnel, GET/POST /voltage). */
+    /** Optional remote charger-control surface (GET / or /charger, /charger/status, POST /charger, /charger/tunnel, GET/POST /voltage). */
     private val remoteChargerControl: RemoteChargerHttp? = null,
 ) : NanoHTTPD(port) {
 
     override fun serve(session: IHTTPSession): Response {
         val uri = session.uri
-        if (uri.startsWith("/charger") || uri == "/voltage") {
+        if (uri == "/" || uri.startsWith("/charger") || uri == "/voltage") {
             return serveRemoteCharger(session)
         }
         return when (uri) {
