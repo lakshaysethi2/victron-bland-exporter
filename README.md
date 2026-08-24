@@ -58,11 +58,11 @@ The full, beginner-friendly walkthrough is in **[`guide.md`](guide.md)** — bui
 
 - 🔄 **BLE → Prometheus in real time** — full [keshavdv/victron-ble](https://github.com/keshavdv/victron-ble) Instant Readout parser (AES-128-CTR) for MPPT solar chargers and SmartShunt battery monitors
 - 🌐 **Cloudflare Tunnel with working child DNS** — embedded `cloudflared`, rebuilt with cgo/NDK so DNS resolves through Android's netd instead of dying on the loopback `[::1]:53` trap
-- 📈 **Prometheus `/metrics` endpoint** (OpenMetrics, port 5338) — voltage, current, solar power, yield today, state of charge, charge state, RSSI, device count
+- 📈 **Prometheus `/metrics` endpoint** (OpenMetrics, port 5338) — voltage, current, solar power, yield today, **panel voltage**, state of charge, charge state, RSSI, device count
 - ⚡ **Charger control over BLE** — enable/disable the MPPT charger (register `0x0200` device mode via the VictronConnect GATT service) with visible state, readback verification, and a configurable daily on/off schedule (default 08:30 → 18:00)
 - 🔋 **Battery / voltage control over BLE** — read and set battery system voltage (register `0xEDEF`, e.g. 12/24/48 V), absorption / float / equalisation voltages (`0xEDF7`/`0xEDF6`/`0xEDF4`) and live charger voltage (`0xEDD5`) over the same GATT service, with confirmation dialogs and metrics
 - 🌐 **Remote charger + voltage control** — flip the charger or set voltages from any browser at `https://mppt.lak.nz/charger` and `https://mppt.lak.nz/voltage` (named tunnel) or `http://<phone-ip>:5338/...` (LAN), protected by a shared secret you set in the app
-- 🖥️ **Importable Grafana dashboard** — [`deploy/grafana-dashboard.json`](deploy/grafana-dashboard.json): solar power, battery voltage/current, yield, devices online
+- 🖥️ **Importable Grafana dashboard** — [`deploy/grafana-dashboard.json`](deploy/grafana-dashboard.json): solar power, battery voltage/current, **panel voltage**, yield, devices online
 - 🐞 **Share Debug Logs** — one tap bundles the last 200 cloudflared lines, exit code, network-bind/DNS preflight, and a DNS self-test report, with clipboard fallback — *the* tool for diagnosing tunnel issues
 - 🔍 **DNS Self-Test button** — verifies on-device that the bundled binary is the dynamic cgo build (fails hard if a static binary sneaks back in)
 - 📱 **Easy discovery UX** — auto-scans nearby Victron devices, tap to auto-fill the MAC, paste the key
@@ -85,7 +85,7 @@ In the app's **Charger Control** section:
 3. **Read Current State** refreshes the displayed state without writing.
 4. Optionally enable the **daily schedule** (on time / off time, defaults 08:30 / 18:00). The service re-checks and applies it every 30 seconds while running; a manual Enable/Disable pauses the schedule until the next window boundary (shown in the UI).
 
-The current state is exposed as the `victron_charger_enabled` metric (`1` = charger on, `0` = off, `-1` = unknown). Voltage settings are exposed as `victron_battery_voltage_setting_volts`, `victron_absorption_voltage_volts`, `victron_float_voltage_volts`, `victron_equalisation_voltage_volts`, `victron_charger_voltage_volts`.
+The current state is exposed as the `victron_charger_enabled` metric (`1` = charger on, `0` = off, `-1` = unknown). Voltage settings are exposed as `victron_battery_voltage_setting_volts`, `victron_absorption_voltage_volts`, `victron_float_voltage_volts`, `victron_equalisation_voltage_volts`, `victron_charger_voltage_volts`. While the exporter is running it also reads solar **panel voltage** (register `0xEDBB`, ~every 60 s) and serves it as `victron_panel_voltage_volts` — Instant Readout does not carry it; a night-time `0xFFFF` or a value older than 5 minutes is omitted rather than left stale.
 
 ### Voltage settings (battery system voltage + charge voltages)
 

@@ -56,6 +56,7 @@ class VictronBleExporterService : Service() {
     private val chargerScheduleStore: ChargerScheduleStore by lazy { ChargerScheduleStore(this) }
     private var lastScheduledMode: Boolean? = null
     private var scheduleRetryAt = 0L
+    private var lastVoltagePollAt = 0L
 
     /**
      * Remote charger-control HTTP surface. Commands are forwarded to this
@@ -249,6 +250,7 @@ class VictronBleExporterService : Service() {
             while (isActive) {
                 try {
                     enforceChargerSchedule()
+                    maybeRefreshVoltageSettings()
                 } catch (e: Exception) {
                     Log.w(TAG, "Charger schedule tick failed", e)
                 }
@@ -360,6 +362,29 @@ class VictronBleExporterService : Service() {
     }
 
     // ---- voltage settings (battery system voltage + absorption/float) ----
+
+    /** Background GATT read of voltage settings + panel voltage; skips when a user op is in flight. */
+    private suspend fun maybeRefreshVoltageSettings() {
+        if (AppState.chargerBusy) return
+        val mac = chargerScheduleStore.load().chargerMac.ifBlank { return }
+        val now = System.currentTimeMillis()
+        if (!ExporterKeepAlive.voltagePollDue(
+                now,
+                lastVoltagePollAt,
+                AppState.voltageSettingsUpdatedAt,
+                AppState.voltageSettingsLastError,
+            )
+        ) return
+        val result = chargerController.tryReadVoltageSettings(mac) ?: return
+        lastVoltagePollAt = System.currentTimeMillis()
+        if (result.success) {
+            AppState.voltageSettings = result.settings
+            AppState.voltageSettingsUpdatedAt = lastVoltagePollAt
+            AppState.voltageSettingsLastError = null
+        } else {
+            AppState.voltageSettingsLastError = result.message
+        }
+    }
 
     private suspend fun performVoltageRead(mac: String) {
         chargerScheduleStore.chargerMac = mac
@@ -766,7 +791,18 @@ class VictronBleExporterService : Service() {
 /** Keep-alive / restore policy, kept Android-free so it can be unit-tested on the JVM. */
 internal object ExporterKeepAlive {
     const val SCHEDULE_RETRY_MS = 60_000L
+    const val VOLTAGE_POLL_MS = 60_000L
+    const val VOLTAGE_POLL_BACKOFF_MS = 300_000L
+    const val VOLTAGE_FRESH_MS = 300_000L
 
     fun shouldRestoreNamedTunnel(alreadyRunning: Boolean, savedToken: String?): Boolean =
         !alreadyRunning && !savedToken.isNullOrBlank()
+
+    fun voltagePollDue(now: Long, lastPollAt: Long, lastSuccessAt: Long, lastError: String?): Boolean {
+        val interval = if (lastError != null) VOLTAGE_POLL_BACKOFF_MS else VOLTAGE_POLL_MS
+        return now - maxOf(lastPollAt, lastSuccessAt) >= interval
+    }
+
+    fun voltageFresh(now: Long, updatedAt: Long): Boolean =
+        updatedAt > 0L && now - updatedAt < VOLTAGE_FRESH_MS
 }

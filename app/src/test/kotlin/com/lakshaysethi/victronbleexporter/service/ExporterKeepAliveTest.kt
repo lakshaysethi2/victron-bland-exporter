@@ -20,4 +20,22 @@ class ExporterKeepAliveTest {
     fun `schedule retry is one minute not ten`() {
         assertEquals(60_000L, ExporterKeepAlive.SCHEDULE_RETRY_MS)
     }
+
+    @Test
+    fun `voltage poll is due after 60s and backs off 5min after an error`() {
+        assertTrue(ExporterKeepAlive.voltagePollDue(60_000, 0, 0, null))
+        assertFalse(ExporterKeepAlive.voltagePollDue(59_999, 0, 0, null))
+        assertTrue(ExporterKeepAlive.voltagePollDue(120_000, 60_000, 60_000, null))
+        assertFalse(ExporterKeepAlive.voltagePollDue(119_999, 60_000, 60_000, null))
+        assertFalse(ExporterKeepAlive.voltagePollDue(60_000 + 299_999, 60_000, 0, "connect timeout"))
+        assertTrue(ExporterKeepAlive.voltagePollDue(60_000 + 300_000, 60_000, 0, "connect timeout"))
+    }
+
+    @Test
+    fun `panel voltage is omitted after 5 minutes without a fresh read`() {
+        assertFalse(ExporterKeepAlive.voltageFresh(10_000, 0))
+        assertTrue(ExporterKeepAlive.voltageFresh(10_000, 1))
+        assertTrue(ExporterKeepAlive.voltageFresh(300_000, 1))
+        assertFalse(ExporterKeepAlive.voltageFresh(300_001, 1))
+    }
 }

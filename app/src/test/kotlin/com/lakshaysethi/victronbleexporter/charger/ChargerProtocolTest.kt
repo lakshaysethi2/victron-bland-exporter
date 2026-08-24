@@ -118,6 +118,18 @@ class ChargerProtocolTest {
     }
 
     @Test
+    fun `panel voltage register 0xEDBB is 0_01 V and 0xFFFF is NA`() {
+        assertEquals(0xEDBB, ChargerProtocol.REG_PANEL_VOLTAGE)
+        assertEquals("05038119edbb", ChargerProtocol.makeReadFrame(ChargerProtocol.REG_PANEL_VOLTAGE).toHex())
+        // 222.00 V -> 22200 = 0x56B8 LE b856
+        val values = ChargerProtocol.parseRegisterValues("080319edbb42b856".hexToByteArray())
+        assertEquals(222.00, ChargerProtocol.panelVoltageOf(values[0xEDBB])!!, 0.001)
+        assertNull(ChargerProtocol.panelVoltageOf("ffff".hexToByteArray()))
+        assertNull(ChargerProtocol.panelVoltageOf(null))
+        assertNull(ChargerProtocol.panelVoltageOf(byteArrayOf(0x00)))
+    }
+
+    @Test
     fun `readback must match the requested mode`() {
         assertTrue(ChargerProtocol.modeMatchesRequest(1, true))
         assertFalse(ChargerProtocol.modeMatchesRequest(1, false))

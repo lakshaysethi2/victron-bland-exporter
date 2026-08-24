@@ -85,12 +85,23 @@ class ChargerController(private val context: Context) {
 
     /** Read battery / voltage settings from the device (same GATT service, writable regs). */
     suspend fun readVoltageSettings(mac: String): VoltageSettingsResult = opMutex.withLock {
-        withContext(Dispatchers.IO) {
-            runVoltageSession(mac, "readVoltageSettings") { session ->
-                session.requestVoltageReadback()
-            }
+        withContext(Dispatchers.IO) { doReadVoltageSettings(mac) }
+    }
+
+    /** Background poll: skip entirely if a user tap or schedule already owns the GATT session. */
+    suspend fun tryReadVoltageSettings(mac: String): VoltageSettingsResult? {
+        if (!opMutex.tryLock()) return null
+        return try {
+            withContext(Dispatchers.IO) { doReadVoltageSettings(mac) }
+        } finally {
+            opMutex.unlock()
         }
     }
+
+    private fun doReadVoltageSettings(mac: String): VoltageSettingsResult =
+        runVoltageSession(mac, "readVoltageSettings") { session ->
+            session.requestVoltageReadback()
+        }
 
     /** Write battery system-voltage setting (register 0xEDEF, e.g. 12/24/48 V) with readback. */
     suspend fun setBatteryVoltageSetting(mac: String, volts: Int): VoltageSettingsResult = opMutex.withLock {
@@ -363,7 +374,8 @@ class ChargerController(private val context: Context) {
                     it == ChargerProtocol.REG_ABSORPTION_VOLTAGE ||
                     it == ChargerProtocol.REG_FLOAT_VOLTAGE ||
                     it == ChargerProtocol.REG_EQUALISATION_VOLTAGE ||
-                    it == ChargerProtocol.REG_CHARGER_VOLTAGE
+                    it == ChargerProtocol.REG_CHARGER_VOLTAGE ||
+                    it == ChargerProtocol.REG_PANEL_VOLTAGE
             }
             if (hasVoltage) {
                 synchronized(voltageMonitor) { voltageMonitor.notifyAll() }
@@ -469,6 +481,7 @@ class ChargerController(private val context: Context) {
                 registers.remove(ChargerProtocol.REG_FLOAT_VOLTAGE)
                 registers.remove(ChargerProtocol.REG_EQUALISATION_VOLTAGE)
                 registers.remove(ChargerProtocol.REG_CHARGER_VOLTAGE)
+                registers.remove(ChargerProtocol.REG_PANEL_VOLTAGE)
             }
         }
 
@@ -491,6 +504,7 @@ class ChargerController(private val context: Context) {
                     ChargerProtocol.SINGLE_UUID to ChargerProtocol.makeReadFrame(ChargerProtocol.REG_FLOAT_VOLTAGE),
                     ChargerProtocol.SINGLE_UUID to ChargerProtocol.makeReadFrame(ChargerProtocol.REG_EQUALISATION_VOLTAGE),
                     ChargerProtocol.SINGLE_UUID to ChargerProtocol.makeReadFrame(ChargerProtocol.REG_CHARGER_VOLTAGE),
+                    ChargerProtocol.SINGLE_UUID to ChargerProtocol.makeReadFrame(ChargerProtocol.REG_PANEL_VOLTAGE),
                     ChargerProtocol.CONTROL_UUID to ChargerProtocol.pollFrame(),
                 ),
             )
@@ -518,6 +532,10 @@ class ChargerController(private val context: Context) {
                     }
                 }
             }
+            // Panel voltage is requested last; give its notify a beat after the first settings frame.
+            if (synchronized(registersLock) { !registers.containsKey(ChargerProtocol.REG_PANEL_VOLTAGE) }) {
+                sleepQuietly(400)
+            }
             return snapshotVoltageSettings()
         }
 
@@ -529,6 +547,7 @@ class ChargerController(private val context: Context) {
                 floatVolts = copy[ChargerProtocol.REG_FLOAT_VOLTAGE]?.let { ChargerProtocol.decodeVoltage(it) },
                 equalisationVolts = copy[ChargerProtocol.REG_EQUALISATION_VOLTAGE]?.let { ChargerProtocol.decodeVoltage(it) },
                 chargerVolts = copy[ChargerProtocol.REG_CHARGER_VOLTAGE]?.let { ChargerProtocol.decodeVoltage(it) },
+                panelVolts = ChargerProtocol.panelVoltageOf(copy[ChargerProtocol.REG_PANEL_VOLTAGE]),
             )
         }
 
@@ -539,7 +558,7 @@ class ChargerController(private val context: Context) {
 
         fun finishVoltage(settings: VoltageSettings): VoltageSettingsResult {
             val any = settings.batteryVoltageSetting != null || settings.absorptionVolts != null || settings.floatVolts != null
-            val message = if (any) "Voltage settings: ${'$'}settings" else "No voltage settings readback received"
+            val message = if (any) "Voltage settings: $settings" else "No voltage settings readback received"
             log(message)
             return VoltageSettingsResult(success = any, settings = settings, message = message)
         }
@@ -695,6 +714,7 @@ data class VoltageSettings(
     val floatVolts: Double? = null, // 0xEDF6, V
     val equalisationVolts: Double? = null, // 0xEDF4, V
     val chargerVolts: Double? = null, // 0xEDD5, live read-only, V
+    val panelVolts: Double? = null, // 0xEDBB, PV input; null = not reported or night-time NA
 )
 
 data class VoltageSettingsResult(

@@ -1275,6 +1275,7 @@ fun VictronBleExporterScreen(
                     Text("Absorption: ${vs.absorptionVolts?.let { "$it V" } ?: "—"}  •  Float: ${vs.floatVolts?.let { "$it V" } ?: "—"}", style = MaterialTheme.typography.bodySmall)
                     vs.equalisationVolts?.let { Text("Equalisation: $it V", style = MaterialTheme.typography.bodySmall) }
                     vs.chargerVolts?.let { Text("Live charger voltage: $it V", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+                    vs.panelVolts?.let { Text("Panel voltage: $it V", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
                 }
                 AppState.voltageSettingsLastError?.let {
                     Spacer(Modifier.height(4.dp))

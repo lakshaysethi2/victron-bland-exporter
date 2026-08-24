@@ -4,6 +4,7 @@ import android.util.Log
 import com.lakshaysethi.victronbleexporter.AppState
 import com.lakshaysethi.victronbleexporter.charger.ChargerProtocol
 import com.lakshaysethi.victronbleexporter.parser.ParsedDevice
+import com.lakshaysethi.victronbleexporter.service.ExporterKeepAlive
 import fi.iki.elonen.NanoHTTPD
 import java.io.IOException
 
@@ -96,6 +97,12 @@ class PrometheusExporter(
         appendMetric(sb, "victron_float_voltage_volts", vsLabel, vs?.floatVolts)
         appendMetric(sb, "victron_equalisation_voltage_volts", vsLabel, vs?.equalisationVolts)
         appendMetric(sb, "victron_charger_voltage_volts", vsLabel, vs?.chargerVolts)
+        val panelVolts = if (ExporterKeepAlive.voltageFresh(System.currentTimeMillis(), AppState.voltageSettingsUpdatedAt)) {
+            vs?.panelVolts
+        } else {
+            null
+        }
+        appendMetric(sb, "victron_panel_voltage_volts", vsLabel, panelVolts)
         if (vs != null) sb.append("\n")
 
         for ((mac, device) in all) {

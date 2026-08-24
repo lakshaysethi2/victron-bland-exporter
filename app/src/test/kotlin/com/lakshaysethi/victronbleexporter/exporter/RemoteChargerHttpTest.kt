@@ -290,6 +290,7 @@ class RemoteChargerHttpTest {
             assertEquals(200, r.statusCode)
             assertTrue(r.body.contains("\"battery_voltage_setting\":null"))
             assertTrue(r.body.contains("\"absorption_voltage\":null"))
+            assertTrue(r.body.contains("\"panel_voltage\":null"))
             assertEquals(listOf("AA:BB:CC:DD:EE:FF"), h.voltageSink.reads)
         } finally {
             com.lakshaysethi.victronbleexporter.AppState.voltageSettings = previous
