@@ -147,6 +147,9 @@ class VictronBleExporterService : Service() {
     // Device encryption keys: MAC -> key (hex) - in-memory cache, persisted via DeviceRepository
     private val deviceKeys = mutableMapOf<String, String>()
 
+    // BLE scan health: last advertisement or successful startScan. 0 = never started.
+    @Volatile private var lastScanResultAt = 0L
+
     fun addDeviceKey(mac: String, key: String) {
         val normalizedMac = DeviceRepository.normalizeMacInput(mac)
         val cleanKey = DeviceRepository.normalizeKeyInput(key)
@@ -247,6 +250,7 @@ class VictronBleExporterService : Service() {
         }
 
         startChargerScheduleLoop()
+        startScanWatchdog()
     }
 
     // ---- Charger control (enable/disable over BLE + daily schedule) ----
@@ -614,6 +618,33 @@ class VictronBleExporterService : Service() {
         return true
     }
 
+    /** Restarts the BLE scan if Android dropped it without onScanFailed. */
+    private fun startScanWatchdog() {
+        serviceScope.launch {
+            while (isActive) {
+                try {
+                    if (ExporterKeepAlive.shouldRestartScan(lastScanResultAt, System.currentTimeMillis())) {
+                        Log.w(TAG, "No scan results for ${ExporterKeepAlive.SCAN_RESTART_AFTER_MS}ms — restarting BLE scan")
+                        AppLog.w("No scan results for ${ExporterKeepAlive.SCAN_RESTART_AFTER_MS}ms — restarting BLE scan")
+                        restartScan()
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Scan watchdog tick failed", e)
+                }
+                delay(60_000)
+            }
+        }
+    }
+
+    private fun restartScan() {
+        try {
+            stopBleScan()
+        } catch (e: Exception) {
+            Log.w(TAG, "stopBleScan failed", e)
+        }
+        startBleScan()
+    }
+
     private fun startBleScan() {
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val adapter = bluetoothManager.adapter
@@ -638,6 +669,7 @@ class VictronBleExporterService : Service() {
         scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 try {
+                    lastScanResultAt = System.currentTimeMillis()
                     val device = result.device
                     val scanRecord = result.scanRecord ?: return
                     val mfgData = scanRecord.getManufacturerSpecificData(0x02E1) ?: return
@@ -694,14 +726,20 @@ class VictronBleExporterService : Service() {
             }
 
             override fun onScanFailed(errorCode: Int) {
-                Log.e(TAG, "BLE Scan failed: $errorCode")
+                Log.e(TAG, "BLE Scan failed: $errorCode — restarting scan")
                 AppLog.e("BLE scan failed: errorCode=$errorCode")
                 Diagnostics.autoSend(this@VictronBleExporterService)
+                lastScanResultAt = 0L
+                serviceScope.launch {
+                    delay(5_000)
+                    restartScan()
+                }
             }
         }
 
         try {
             bluetoothLeScanner?.startScan(listOf(scanFilter), scanSettings, scanCallback)
+            lastScanResultAt = System.currentTimeMillis()
             Log.i(TAG, "BLE scan started for Victron devices")
         } catch (e: SecurityException) {
             Log.e(TAG, "Missing BLE permission", e)
@@ -820,6 +858,7 @@ internal object ExporterKeepAlive {
     const val VOLTAGE_POLL_MS = 60_000L
     const val VOLTAGE_POLL_BACKOFF_MS = 300_000L
     const val VOLTAGE_FRESH_MS = 300_000L
+    const val SCAN_RESTART_AFTER_MS = 180_000L
 
     fun shouldRestoreNamedTunnel(alreadyRunning: Boolean, savedToken: String?): Boolean =
         !alreadyRunning && !savedToken.isNullOrBlank()
@@ -831,4 +870,7 @@ internal object ExporterKeepAlive {
 
     fun voltageFresh(now: Long, updatedAt: Long): Boolean =
         updatedAt > 0L && now - updatedAt < VOLTAGE_FRESH_MS
+
+    fun shouldRestartScan(lastScanResultAt: Long, now: Long): Boolean =
+        lastScanResultAt != 0L && now - lastScanResultAt >= SCAN_RESTART_AFTER_MS
 }

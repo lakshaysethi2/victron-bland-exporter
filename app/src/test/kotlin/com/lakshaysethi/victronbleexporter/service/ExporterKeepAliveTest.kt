@@ -38,4 +38,12 @@ class ExporterKeepAliveTest {
         assertTrue(ExporterKeepAlive.voltageFresh(300_000, 1))
         assertFalse(ExporterKeepAlive.voltageFresh(300_001, 1))
     }
+
+    @Test
+    fun `scan restarts after 180s of silence but not before first start`() {
+        assertEquals(180_000L, ExporterKeepAlive.SCAN_RESTART_AFTER_MS)
+        assertFalse(ExporterKeepAlive.shouldRestartScan(0, 1_000_000))
+        assertFalse(ExporterKeepAlive.shouldRestartScan(1, 180_000))
+        assertTrue(ExporterKeepAlive.shouldRestartScan(1, 1 + 180_000))
+    }
 }
