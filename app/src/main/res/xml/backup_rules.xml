@@ -2,4 +2,9 @@
 <full-backup-content>
     <exclude domain="file" path="keys/" />
     <exclude domain="sharedpref" path="victron_devices.xml" />
+    <exclude domain="sharedpref" path="victron_devices_fallback.xml" />
+    <exclude domain="sharedpref" path="victron_remote_settings.xml" />
+    <exclude domain="sharedpref" path="victron_charger_settings.xml" />
+    <exclude domain="sharedpref" path="victron_app_log.xml" />
+    <exclude domain="sharedpref" path="victron_diagnostics.xml" />
 </full-backup-content>
