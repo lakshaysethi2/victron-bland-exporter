@@ -4,6 +4,8 @@ import com.lakshaysethi.victronbleexporter.AppState
 import com.lakshaysethi.victronbleexporter.charger.ChargerProtocol
 import com.lakshaysethi.victronbleexporter.charger.ChargerSchedule
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
+import com.lakshaysethi.victronbleexporter.parser.ParsedDevice
+import com.lakshaysethi.victronbleexporter.parser.VictronParser
 import java.security.MessageDigest
 
 /**
@@ -15,7 +17,7 @@ import java.security.MessageDigest
  *   GET  /charger        -> mobile control page (shell; every API call inside
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
- *   GET  /charger/status -> JSON status snapshot (charger + daily schedule)
+ *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + live Instant Readout)
  *   POST /charger        -> JSON body {"action":"on"|"off"} flips the charger
  *   POST /charger/schedule -> JSON {enabled, enable, disable} saves the daily window
  *   GET  /voltage        -> JSON voltage settings (auth required)
@@ -275,6 +277,43 @@ interface VoltageCommandSender {
     fun requestVoltageRead(mac: String)
 }
 
+/** Fresh Instant Readout row for the remote page. */
+data class LiveReadout(
+    val mac: String,
+    val model: String,
+    val solarPowerW: Number?,
+    val batteryVoltage: Number?,
+    val batteryCurrent: Number?,
+    val socPercent: Number?,
+    val lastSeen: Long,
+) {
+    fun toJson(): String = buildString {
+        append("{\"mac\":\"${RemoteChargerHttpJson.escape(mac)}\"")
+        append(",\"model\":\"${RemoteChargerHttpJson.escape(model)}\"")
+        append(",\"solarPowerW\":").append(solarPowerW ?: "null")
+        append(",\"batteryVoltage\":").append(batteryVoltage ?: "null")
+        append(",\"batteryCurrent\":").append(batteryCurrent ?: "null")
+        append(",\"socPercent\":").append(socPercent ?: "null")
+        append(",\"lastSeen\":").append(lastSeen)
+        append("}")
+    }
+
+    companion object {
+        fun fromDevice(device: ParsedDevice): LiveReadout = LiveReadout(
+            mac = device.mac,
+            model = VictronParser.getModelName(device.modelId),
+            solarPowerW = device.data["solar_power_w"] as? Number,
+            batteryVoltage = device.data["battery_voltage"] as? Number,
+            batteryCurrent = device.data["battery_current"] as? Number,
+            socPercent = device.data["soc_percent"] as? Number,
+            lastSeen = device.lastSeen,
+        )
+
+        fun fromFreshMetrics(now: Long = System.currentTimeMillis()): List<LiveReadout> =
+            MetricsStore.getFresh(now).values.sortedBy { it.mac }.map { fromDevice(it) }
+    }
+}
+
 /** Immutable status snapshot for the web UI. Reuses the app's charger state. */
 data class ChargerStatusSnapshot(
     val mode: Int?,
@@ -287,6 +326,7 @@ data class ChargerStatusSnapshot(
     val scheduleEnabled: Boolean = false,
     val enableTime: String = ChargerSchedule.DEFAULT_ENABLE,
     val disableTime: String = ChargerSchedule.DEFAULT_DISABLE,
+    val live: List<LiveReadout> = emptyList(),
 ) {
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
 
@@ -302,7 +342,12 @@ data class ChargerStatusSnapshot(
         append(",\"scheduleEnabled\":").append(scheduleEnabled)
         append(",\"enableTime\":\"${RemoteChargerHttpJson.escape(enableTime)}\"")
         append(",\"disableTime\":\"${RemoteChargerHttpJson.escape(disableTime)}\"")
-        append("}")
+        append(",\"live\":[")
+        live.forEachIndexed { i, row ->
+            if (i > 0) append(",")
+            append(row.toJson())
+        }
+        append("]}")
     }
 
     companion object {
@@ -446,6 +491,12 @@ private val CONTROL_PAGE: String = """
       <div class="meta" id="meta"></div>
     </div>
   </div>
+  <div class="status" id="liveBox" style="display:block">
+    <div class="txt">
+      <div class="label">Live Instant Readout</div>
+      <div class="meta" id="live">No fresh advertisement</div>
+    </div>
+  </div>
   <div class="err" id="err"></div>
   <input type="password" id="secret" placeholder="Remote secret" autocomplete="off" autocapitalize="off" spellcheck="false">
   <button class="btn small" id="btnUnlock">Unlock</button>
@@ -502,6 +553,19 @@ private val CONTROL_PAGE: String = """
     if (typeof data.scheduleEnabled === "boolean") schedOn.checked = data.scheduleEnabled;
     if (data.enableTime) enTime.value = data.enableTime;
     if (data.disableTime) disTime.value = data.disableTime;
+    var live = document.getElementById("live");
+    var devices = data.live || [];
+    if (!devices.length) { live.textContent = "No fresh advertisement"; }
+    else {
+      live.innerHTML = devices.map(function (d) {
+        var bits = [];
+        if (d.solarPowerW != null) bits.push(d.solarPowerW + " W");
+        if (d.batteryVoltage != null) bits.push(d.batteryVoltage + " V");
+        if (d.batteryCurrent != null) bits.push(d.batteryCurrent + " A");
+        if (d.socPercent != null) bits.push(d.socPercent + "%");
+        return "<div><b>" + (d.model || d.mac) + "</b> " + (bits.join(" \u00b7 ") || d.mac) + "</div>";
+      }).join("");
+    }
     setBusy(!!data.busy);
   }
   function loadStatus() {

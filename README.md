@@ -103,7 +103,7 @@ All writes go over the same BLE GATT service as charger on/off, with a confirmat
 In the app's **Remote Charger Control** section, enable remote control and set a secret (min 8 chars). The app then serves:
 
 - `GET  /charger` — mobile control page (login shell; everything on it requires the secret)
-- `GET  /charger/status` — JSON state (`mode`, `busy`, `lastAction`, schedule times, …)
+- `GET  /charger/status` — JSON state (`mode`, schedule times, live Instant Readout watts/volts, …)
 - `POST /charger` — `{"action":"on"|"off"}` flips the charger
 - `POST /charger/schedule` — `{"enabled":true,"enable":"08:30","disable":"18:00"}` saves the daily window
 - `GET  /voltage` — JSON voltage settings; `POST /voltage` writes battery/absorption/float

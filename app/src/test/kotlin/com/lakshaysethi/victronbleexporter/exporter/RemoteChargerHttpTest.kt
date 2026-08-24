@@ -2,6 +2,7 @@ package com.lakshaysethi.victronbleexporter.exporter
 
 import com.lakshaysethi.victronbleexporter.charger.ChargerProtocol
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
+import com.lakshaysethi.victronbleexporter.parser.ParsedDevice
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -139,6 +140,70 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"scheduleEnabled\":false"))
         assertTrue(r.body.contains("\"enableTime\":\"08:30\""))
         assertTrue(r.body.contains("\"disableTime\":\"18:00\""))
+        assertTrue(r.body.contains("\"live\":[]"))
+    }
+
+    @Test
+    fun `status includes live instant readout`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(
+            live = listOf(
+                LiveReadout(
+                    mac = "AA:BB:CC:DD:EE:FF",
+                    model = "SmartSolar MPPT 150/35",
+                    solarPowerW = 123,
+                    batteryVoltage = 13.6,
+                    batteryCurrent = 4.2,
+                    socPercent = null,
+                    lastSeen = 99L,
+                ),
+            ),
+        )
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"solarPowerW\":123"))
+        assertTrue(r.body.contains("\"batteryVoltage\":13.6"))
+        assertTrue(r.body.contains("\"batteryCurrent\":4.2"))
+        assertTrue(r.body.contains("\"model\":\"SmartSolar MPPT 150/35\""))
+        assertFalse(r.body.contains("\"live\":[]"))
+    }
+
+    @Test
+    fun `live readout omits stale devices and maps parser fields`() {
+        MetricsStore.clear()
+        MetricsStore.update(
+            ParsedDevice(
+                mac = "AA:BB:CC:DD:EE:FF",
+                modelId = 0xA058,
+                recordType = 1,
+                data = mapOf(
+                    "solar_power_w" to 80,
+                    "battery_voltage" to 12.8,
+                    "battery_current" to 1.5,
+                    "soc_percent" to null,
+                ),
+                rssi = -60,
+                lastSeen = 50_000L,
+            ),
+        )
+        MetricsStore.update(
+            ParsedDevice(
+                mac = "11:22:33:44:55:66",
+                modelId = 0xA042,
+                recordType = 1,
+                data = mapOf("solar_power_w" to 1),
+                rssi = -70,
+                lastSeen = 1L,
+            ),
+        )
+        val live = LiveReadout.fromFreshMetrics(now = 100_000L)
+        assertEquals(1, live.size)
+        assertEquals("AA:BB:CC:DD:EE:FF", live[0].mac)
+        assertEquals("SmartSolar MPPT 150/35", live[0].model)
+        assertEquals(80, live[0].solarPowerW)
+        assertEquals(12.8, live[0].batteryVoltage)
+        assertEquals(1.5, live[0].batteryCurrent)
+        MetricsStore.clear()
     }
 
     @Test

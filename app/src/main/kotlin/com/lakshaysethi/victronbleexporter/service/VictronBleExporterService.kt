@@ -27,6 +27,7 @@ import com.lakshaysethi.victronbleexporter.diag.Diagnostics
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
 import com.lakshaysethi.victronbleexporter.exporter.ChargerCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.ChargerStatusSnapshot
+import com.lakshaysethi.victronbleexporter.exporter.LiveReadout
 import com.lakshaysethi.victronbleexporter.exporter.ScheduleCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
 import com.lakshaysethi.victronbleexporter.exporter.VoltageCommandSender
@@ -76,6 +77,7 @@ class VictronBleExporterService : Service() {
                     scheduleEnabled = s.scheduleEnabled,
                     enableTime = ChargerSchedule.formatMinutes(s.enableMinutes),
                     disableTime = ChargerSchedule.formatMinutes(s.disableMinutes),
+                    live = LiveReadout.fromFreshMetrics(),
                 )
             },
             macProvider = { AppState.chargerMac ?: chargerScheduleStore.load().chargerMac.ifBlank { null } },
