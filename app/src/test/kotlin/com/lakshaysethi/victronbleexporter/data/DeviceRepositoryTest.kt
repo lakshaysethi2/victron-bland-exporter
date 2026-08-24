@@ -72,4 +72,46 @@ class DeviceRepositoryTest {
         assertFalse(repo.getAllDevices().containsKey("__TUNNEL_TOKEN__"))
         assertEquals(1, repo.getAllDevices().size)
     }
+
+    @Test
+    fun `instant readout key is written to device-protected prefs`() {
+        repo.saveDevice("AA:BB:CC:DD:EE:FF", "0123456789abcdef0123456789abcdef")
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val stored = context.createDeviceProtectedStorageContext()
+            .getSharedPreferences(DeviceRepository.KEY_PREFS, Context.MODE_PRIVATE)
+            .getString("AA:BB:CC:DD:EE:FF", null)
+        assertEquals("0123456789abcdef0123456789abcdef", stored)
+    }
+
+    @Test
+    fun `device-protected keys survive empty credential store`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.createDeviceProtectedStorageContext()
+            .getSharedPreferences(DeviceRepository.KEY_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString("AA:BB:CC:DD:EE:FF", "0123456789abcdef0123456789abcdef")
+            .commit()
+
+        val loaded = DeviceRepository(context)
+        assertEquals("0123456789abcdef0123456789abcdef", loaded.getKey("AA:BB:CC:DD:EE:FF"))
+        assertEquals(1, loaded.getAllDevices().size)
+    }
+
+    @Test
+    fun `legacy credential keys migrate onto the device-protected store`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        repo.saveDevice("AA:BB:CC:DD:EE:FF", "0123456789abcdef0123456789abcdef")
+        context.createDeviceProtectedStorageContext()
+            .getSharedPreferences(DeviceRepository.KEY_PREFS, Context.MODE_PRIVATE)
+            .edit().clear().commit()
+
+        val migrated = DeviceRepository(context)
+        assertEquals("0123456789abcdef0123456789abcdef", migrated.getKey("AA:BB:CC:DD:EE:FF"))
+        assertEquals(
+            "0123456789abcdef0123456789abcdef",
+            context.createDeviceProtectedStorageContext()
+                .getSharedPreferences(DeviceRepository.KEY_PREFS, Context.MODE_PRIVATE)
+                .getString("AA:BB:CC:DD:EE:FF", null),
+        )
+    }
 }

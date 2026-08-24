@@ -10,8 +10,9 @@ import androidx.security.crypto.MasterKey
  * Simple encrypted storage for device MAC -> encryption keys.
  * Falls back to plain SharedPreferences if encrypted store fails (some OEMs / emulators).
  *
- * The named-tunnel token is also written to device-protected prefs so boot restore
- * can read it at LOCKED_BOOT_COMPLETED, before credential storage is unlocked.
+ * The named-tunnel token and Instant Readout keys are also written to
+ * device-protected prefs so boot restore can read them at LOCKED_BOOT_COMPLETED,
+ * before credential storage is unlocked.
  */
 class DeviceRepository(context: Context) {
 
@@ -20,6 +21,9 @@ class DeviceRepository(context: Context) {
     private val tokenPrefs: SharedPreferences =
         context.createDeviceProtectedStorageContext()
             .getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE)
+    private val keyPrefs: SharedPreferences =
+        context.createDeviceProtectedStorageContext()
+            .getSharedPreferences(KEY_PREFS, Context.MODE_PRIVATE)
 
     init {
         prefs = try {
@@ -48,41 +52,50 @@ class DeviceRepository(context: Context) {
     }
 
     fun saveDevice(mac: String, key: String) {
-        try {
-            // Normalize: uppercase MAC, lowercase key? keep key as lowercase hex but accept either
-            val cleanKey = key.trim().lowercase().replace(Regex("[^0-9a-f]"), "")
-            if (cleanKey.length != 32) {
-                Log.w(tag, "Attempt to save invalid key length ${cleanKey.length} for $mac")
-                // Still save if user insists? Save only if hex and 32
-            }
-            prefs.edit().putString(mac.uppercase(), cleanKey).apply()
-            Log.i(tag, "Saved key for $mac")
-        } catch (e: Exception) {
-            Log.e(tag, "Failed to save $mac", e)
+        val cleanKey = key.trim().lowercase().replace(Regex("[^0-9a-f]"), "")
+        if (cleanKey.length != 32) {
+            Log.w(tag, "Attempt to save invalid key length ${cleanKey.length} for $mac")
         }
+        writeKey(prefs, mac, cleanKey)
+        writeKey(keyPrefs, mac, cleanKey)
+        Log.i(tag, "Saved key for $mac")
     }
 
     fun getAllDevices(): Map<String, String> {
-        return try {
-            prefs.all.entries
-                .filter { entry ->
-                    // Keys are MACs like AA:BB:CC:DD:EE:FF
-                    entry.key.matches(Regex("(?i)^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")) ||
-                            entry.key.matches(Regex("(?i)^[0-9A-F:]{17}$"))
-                }
-                .filter { it.value is String }
-                .associate { it.key.uppercase() to it.value as String }
+        val boot = macEntries(keyPrefs)
+        val cred = try {
+            macEntries(prefs)
         } catch (e: Exception) {
-            Log.e(tag, "getAllDevices failed", e)
+            Log.e(tag, "getAllDevices credential read failed", e)
             emptyMap()
         }
+        if (cred.isNotEmpty()) {
+            val editor = keyPrefs.edit()
+            var wrote = false
+            for ((mac, key) in cred) {
+                if (keyPrefs.getString(mac, null) != key) {
+                    editor.putString(mac, key)
+                    wrote = true
+                }
+            }
+            if (wrote) editor.apply()
+        }
+        return boot + cred
     }
 
-    fun getKey(mac: String): String? = try {
-        prefs.getString(mac.uppercase(), null)
-    } catch (e: Exception) {
-        Log.w(tag, "getKey failed for $mac", e)
-        null
+    fun getKey(mac: String): String? {
+        val upper = mac.uppercase()
+        val cred = try {
+            prefs.getString(upper, null)
+        } catch (e: Exception) {
+            Log.w(tag, "getKey credential read failed for $mac", e)
+            null
+        }
+        if (cred != null) {
+            if (keyPrefs.getString(upper, null) != cred) writeKey(keyPrefs, upper, cred)
+            return cred
+        }
+        return keyPrefs.getString(upper, null)
     }
 
     fun saveTunnelToken(token: String) {
@@ -120,10 +133,16 @@ class DeviceRepository(context: Context) {
         store.getString(KEY_TUNNEL_TOKEN, null)?.takeIf { it.isNotBlank() }
 
     fun removeDevice(mac: String) {
+        val upper = mac.uppercase()
         try {
-            prefs.edit().remove(mac.uppercase()).apply()
+            prefs.edit().remove(upper).apply()
         } catch (e: Exception) {
             Log.e(tag, "remove failed for $mac", e)
+        }
+        try {
+            keyPrefs.edit().remove(upper).apply()
+        } catch (e: Exception) {
+            Log.e(tag, "boot key remove failed for $mac", e)
         }
     }
 
@@ -138,13 +157,36 @@ class DeviceRepository(context: Context) {
         } catch (e: Exception) {
             Log.e(tag, "tokenPrefs clear failed", e)
         }
+        try {
+            keyPrefs.edit().clear().apply()
+        } catch (e: Exception) {
+            Log.e(tag, "keyPrefs clear failed", e)
+        }
     }
+
+    private fun writeKey(store: SharedPreferences, mac: String, cleanKey: String) {
+        try {
+            store.edit().putString(mac.uppercase(), cleanKey).apply()
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to save $mac", e)
+        }
+    }
+
+    private fun macEntries(store: SharedPreferences): Map<String, String> =
+        store.all.entries
+            .filter { entry ->
+                entry.key.matches(Regex("(?i)^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")) ||
+                    entry.key.matches(Regex("(?i)^[0-9A-F:]{17}$"))
+            }
+            .filter { it.value is String }
+            .associate { it.key.uppercase() to it.value as String }
 
     fun hasKey(mac: String): Boolean = !getKey(mac).isNullOrBlank()
 
     companion object {
         // Reserved key for the cloudflared named-tunnel token (not a MAC, so getAllDevices skips it).
         internal const val TOKEN_PREFS = "victron_tunnel_token"
+        internal const val KEY_PREFS = "victron_devices_boot"
         internal const val KEY_TUNNEL_TOKEN = "__tunnel_token__"
 
         fun normalizeKeyInput(input: String): String {
