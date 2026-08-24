@@ -2,6 +2,7 @@ package com.lakshaysethi.victronbleexporter.exporter
 
 import com.lakshaysethi.victronbleexporter.AppState
 import com.lakshaysethi.victronbleexporter.charger.ChargerProtocol
+import com.lakshaysethi.victronbleexporter.charger.ChargerSchedule
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
 import java.security.MessageDigest
 
@@ -14,8 +15,9 @@ import java.security.MessageDigest
  *   GET  /charger        -> mobile control page (shell; every API call inside
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
- *   GET  /charger/status -> JSON status snapshot (reuses AppState.chargerMode)
+ *   GET  /charger/status -> JSON status snapshot (charger + daily schedule)
  *   POST /charger        -> JSON body {"action":"on"|"off"} flips the charger
+ *   POST /charger/schedule -> JSON {enabled, enable, disable} saves the daily window
  *   GET  /voltage        -> JSON voltage settings (auth required)
  *   POST /voltage        -> JSON {battery_voltage_setting, absorption_voltage, float_voltage}
  *                           writes the matching GATT registers (auth required; confirm in UI)
@@ -37,6 +39,7 @@ class RemoteChargerHttp(
     private val statusProvider: () -> ChargerStatusSnapshot,
     private val macProvider: () -> String?,
     private val commandSender: ChargerCommandSender,
+    private val scheduleSender: ScheduleCommandSender? = null,
 ) {
 
     /**
@@ -82,6 +85,7 @@ class RemoteChargerHttp(
             uri == "/charger/status" && method == "GET" ->
                 HttpResult(200, MIME_JSON, statusProvider().toJson() + "\n")
             uri == "/charger" && method == "POST" -> handleCommand(body)
+            uri == "/charger/schedule" && method == "POST" -> handleSchedule(body)
             uri == "/voltage" && method == "GET" -> handleVoltageGet()
             uri == "/voltage" && method == "POST" -> handleVoltagePost(body)
             else -> notFound()
@@ -112,6 +116,44 @@ class RemoteChargerHttp(
             mimeType = MIME_JSON,
             body = "{\"accepted\":true,\"action\":\"${if (enable) "on" else "off"}\",\"mac\":\"${RemoteChargerHttpJson.escape(mac)}\"}\n",
         )
+    }
+
+    private fun handleSchedule(body: String): HttpResult {
+        val parsed = parseSchedule(body)
+        if (parsed == null) {
+            return HttpResult(
+                statusCode = 400,
+                mimeType = MIME_JSON,
+                body = "{\"error\":\"body must be JSON: {\\\"enabled\\\":true,\\\"enable\\\":\\\"HH:mm\\\",\\\"disable\\\":\\\"HH:mm\\\"}\"}\n",
+            )
+        }
+        val sender = scheduleSender
+            ?: return HttpResult(503, MIME_JSON, "{\"error\":\"schedule control unavailable on this build\"}\n")
+        val mac = macProvider()
+        if (mac.isNullOrBlank()) {
+            return HttpResult(
+                statusCode = 503,
+                mimeType = MIME_JSON,
+                body = "{\"error\":\"no charger configured — set a charger device MAC in the app first\"}\n",
+            )
+        }
+        sender.saveSchedule(parsed.enabled, parsed.enable, parsed.disable, mac)
+        return HttpResult(
+            statusCode = 202,
+            mimeType = MIME_JSON,
+            body = "{\"accepted\":true,\"enabled\":${parsed.enabled},\"enable\":\"${RemoteChargerHttpJson.escape(parsed.enable)}\",\"disable\":\"${RemoteChargerHttpJson.escape(parsed.disable)}\"}\n",
+        )
+    }
+
+    private data class ScheduleBody(val enabled: Boolean, val enable: String, val disable: String)
+
+    private fun parseSchedule(body: String): ScheduleBody? {
+        val trimmed = body.trim()
+        val enabled = ENABLED_REGEX.find(trimmed)?.groupValues?.get(1)?.lowercase() ?: return null
+        val enable = ENABLE_TIME_REGEX.find(trimmed)?.groupValues?.get(1)?.trim() ?: return null
+        val disable = DISABLE_TIME_REGEX.find(trimmed)?.groupValues?.get(1)?.trim() ?: return null
+        if (!ChargerSchedule.isValidTime(enable) || !ChargerSchedule.isValidTime(disable)) return null
+        return ScheduleBody(enabled == "true", enable, disable)
     }
 
     private fun handleVoltageGet(): HttpResult {
@@ -181,6 +223,9 @@ class RemoteChargerHttp(
         const val MIME_PLAINTEXT = "text/plain; charset=utf-8"
 
         val ACTION_REGEX = Regex("""(?s)"action"\s*:\s*"(on|off)"""", RegexOption.IGNORE_CASE)
+        val ENABLED_REGEX = Regex("\"enabled\"\\s*:\\s*(true|false)", RegexOption.IGNORE_CASE)
+        val ENABLE_TIME_REGEX = Regex("\"enable\"\\s*:\\s*\"([^\"]+)\"")
+        val DISABLE_TIME_REGEX = Regex("\"disable\"\\s*:\\s*\"([^\"]+)\"")
 
         /** Tiny JSON field extractor — the API accepts exactly `{"action":"on"|"off"}`. */
         fun parseAction(body: String): String? =
@@ -223,6 +268,11 @@ fun interface ChargerCommandSender {
     fun sendChargerCommand(enable: Boolean, mac: String)
 }
 
+/** Saves the daily enable/disable window. Production: CHARGER_SCHEDULE_SAVE intent. */
+fun interface ScheduleCommandSender {
+    fun saveSchedule(enabled: Boolean, enableTime: String, disableTime: String, mac: String)
+}
+
 /** Voltage settings commands (battery system voltage + charge voltages). */
 interface VoltageCommandSender {
     fun sendBatteryVoltageSetting(mac: String, volts: Int)
@@ -239,6 +289,9 @@ data class ChargerStatusSnapshot(
     val lastError: String?,
     val overrideUntil: Long,
     val stateUpdatedAt: Long,
+    val scheduleEnabled: Boolean = false,
+    val enableTime: String = ChargerSchedule.DEFAULT_ENABLE,
+    val disableTime: String = ChargerSchedule.DEFAULT_DISABLE,
 ) {
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
 
@@ -251,6 +304,9 @@ data class ChargerStatusSnapshot(
         append(",\"lastError\":").append(if (lastError == null) "null" else "\"${RemoteChargerHttpJson.escape(lastError)}\"")
         append(",\"overrideUntil\":").append(overrideUntil)
         append(",\"stateUpdatedAt\":").append(stateUpdatedAt)
+        append(",\"scheduleEnabled\":").append(scheduleEnabled)
+        append(",\"enableTime\":\"${RemoteChargerHttpJson.escape(enableTime)}\"")
+        append(",\"disableTime\":\"${RemoteChargerHttpJson.escape(disableTime)}\"")
         append("}")
     }
 
@@ -376,7 +432,8 @@ private val CONTROL_PAGE: String = """
   .btn.on { background: #22c55e; }
   .btn.off { background: #ef4444; }
   .btn.small { background: #24344d; color: #e6edf7; font-weight: 600; padding: 12px; font-size: 15px; }
-  input[type=password] { width: 100%; padding: 14px; border-radius: 12px; border: 1px solid #24344d; background: #0d1626; color: #e6edf7; font-size: 16px; margin-bottom: 10px; }
+  input[type=password], input[type=text] { width: 100%; padding: 14px; border-radius: 12px; border: 1px solid #24344d; background: #0d1626; color: #e6edf7; font-size: 16px; margin-bottom: 10px; }
+  .row { display: flex; gap: 8px; }
   .err { color: #f87171; font-size: 13px; margin: 8px 0; min-height: 18px; }
   .hint { color: #8fa3bf; font-size: 12px; line-height: 1.5; }
   @keyframes pulse { 50% { opacity: .4; } }
@@ -399,6 +456,10 @@ private val CONTROL_PAGE: String = """
   <button class="btn small" id="btnUnlock">Unlock</button>
   <button class="btn on" id="btnOn" disabled>ENABLE CHARGER</button>
   <button class="btn off" id="btnOff" disabled>DISABLE CHARGER</button>
+  <div class="sub" style="margin:14px 0 8px">Daily schedule (phone time)</div>
+  <label class="hint"><input type="checkbox" id="schedOn"> Enforce window</label>
+  <div class="row"><input type="text" id="enTime" placeholder="ON 08:30" inputmode="numeric"><input type="text" id="disTime" placeholder="OFF 18:00" inputmode="numeric"></div>
+  <button class="btn small" id="btnSched" disabled>Save schedule</button>
   <button class="btn small" id="btnRefresh">Refresh</button>
   <div class="hint">The secret is stored only in this browser session and sent only in a request header &mdash; never in the URL.</div>
 </div>
@@ -412,9 +473,13 @@ private val CONTROL_PAGE: String = """
       btnOn = document.getElementById("btnOn"), btnOff = document.getElementById("btnOff"),
       btnRefresh = document.getElementById("btnRefresh"),
       btnUnlock = document.getElementById("btnUnlock"),
+      btnSched = document.getElementById("btnSched"),
+      schedOn = document.getElementById("schedOn"),
+      enTime = document.getElementById("enTime"),
+      disTime = document.getElementById("disTime"),
       secretInput = document.getElementById("secret");
   function setErr(t) { err.textContent = t || ""; }
-  function setBusy(b) { btnOn.disabled = b; btnOff.disabled = b; if (b) { dot.className = "dot busy"; } }
+  function setBusy(b) { btnOn.disabled = b; btnOff.disabled = b; btnSched.disabled = b; if (b) { dot.className = "dot busy"; } }
   function api(path, opts) {
     opts = opts || {};
     opts.headers = Object.assign({ "X-Remote-Secret": secret }, opts.headers || {});
@@ -436,7 +501,11 @@ private val CONTROL_PAGE: String = """
     if (data.busy) parts.push("working\u2026");
     if (data.lastAction) parts.push(data.lastAction);
     if (data.lastError) parts.push(data.lastError);
+    if (data.scheduleEnabled) parts.push("schedule " + (data.enableTime || "?") + "-" + (data.disableTime || "?"));
     meta.textContent = parts.join(" \u00b7 ");
+    if (typeof data.scheduleEnabled === "boolean") schedOn.checked = data.scheduleEnabled;
+    if (data.enableTime) enTime.value = data.enableTime;
+    if (data.disableTime) disTime.value = data.disableTime;
     setBusy(!!data.busy);
   }
   function loadStatus() {
@@ -472,8 +541,22 @@ private val CONTROL_PAGE: String = """
   }
   btnUnlock.addEventListener("click", unlock);
   secretInput.addEventListener("keydown", function (ev) { if (ev.key === "Enter") unlock(); });
+  function saveSched() {
+    if (!secret) return;
+    setBusy(true); setErr("");
+    api("/charger/schedule", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: schedOn.checked, enable: enTime.value.trim(), disable: disTime.value.trim() }) })
+      .then(function (r) { return r.json().then(function (d) { return { r: r, d: d }; }); })
+      .then(function (x) {
+        if (x.r.status === 401) { setBusy(false); return; }
+        if (x.r.ok) { if (x.d.error) setErr(x.d.error); loadStatus(); }
+        else { setBusy(false); setErr(x.d.error || ("Status " + x.r.status)); }
+      })
+      .catch(function () { setBusy(false); setErr("Request failed."); });
+  }
   btnOn.addEventListener("click", function () { send("on"); });
   btnOff.addEventListener("click", function () { send("off"); });
+  btnSched.addEventListener("click", saveSched);
   btnRefresh.addEventListener("click", loadStatus);
   loadStatus();
   setInterval(loadStatus, 3000);

@@ -24,6 +24,7 @@ import com.lakshaysethi.victronbleexporter.data.DeviceRepository
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
 import com.lakshaysethi.victronbleexporter.exporter.ChargerCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.ChargerStatusSnapshot
+import com.lakshaysethi.victronbleexporter.exporter.ScheduleCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
 import com.lakshaysethi.victronbleexporter.exporter.VoltageCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
@@ -65,7 +66,14 @@ class VictronBleExporterService : Service() {
     private val remoteChargerControl: RemoteChargerHttp by lazy {
         RemoteChargerHttp(
             settingsProvider = { RemoteChargerStore(this).load() },
-            statusProvider = { ChargerStatusSnapshot.fromAppState() },
+            statusProvider = {
+                val s = chargerScheduleStore.load()
+                ChargerStatusSnapshot.fromAppState().copy(
+                    scheduleEnabled = s.scheduleEnabled,
+                    enableTime = ChargerSchedule.formatMinutes(s.enableMinutes),
+                    disableTime = ChargerSchedule.formatMinutes(s.disableMinutes),
+                )
+            },
             macProvider = { AppState.chargerMac ?: chargerScheduleStore.load().chargerMac.ifBlank { null } },
             commandSender = ChargerCommandSender { enable, mac ->
                 try {
@@ -78,6 +86,20 @@ class VictronBleExporterService : Service() {
                     Log.i(TAG, "Remote charger command: ${if (enable) "ENABLE" else "DISABLE"} for $mac")
                 } catch (e: Exception) {
                     Log.e(TAG, "Remote charger command could not be sent", e)
+                }
+            },
+            scheduleSender = ScheduleCommandSender { enabled, enableTime, disableTime, mac ->
+                try {
+                    startForegroundService(Intent(this, VictronBleExporterService::class.java).apply {
+                        action = "CHARGER_SCHEDULE_SAVE"
+                        putExtra("mac", mac)
+                        putExtra("schedule_enabled", enabled)
+                        putExtra("enable_time", enableTime)
+                        putExtra("disable_time", disableTime)
+                    })
+                    Log.i(TAG, "Remote schedule save: $mac ${if (enabled) "on" else "off"} $enableTime-$disableTime")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Remote schedule save could not be sent", e)
                 }
             },
         ).also { http ->

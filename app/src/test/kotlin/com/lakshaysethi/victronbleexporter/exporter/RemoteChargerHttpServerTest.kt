@@ -33,6 +33,7 @@ class RemoteChargerHttpServerTest {
     private val appContext get() = ApplicationProvider.getApplicationContext<android.content.Context>()
     private val store = RemoteChargerStore(appContext)
     private val sink = FakeSink()
+    private val scheduleSink = FakeScheduleSink()
     private var server: PrometheusExporter? = null
     private var port = -1
 
@@ -40,6 +41,13 @@ class RemoteChargerHttpServerTest {
         val calls = mutableListOf<Pair<Boolean, String>>()
         override fun sendChargerCommand(enable: Boolean, mac: String) {
             calls.add(enable to mac)
+        }
+    }
+
+    private class FakeScheduleSink : ScheduleCommandSender {
+        val calls = mutableListOf<List<Any>>()
+        override fun saveSchedule(enabled: Boolean, enableTime: String, disableTime: String, mac: String) {
+            calls.add(listOf(enabled, enableTime, disableTime, mac))
         }
     }
 
@@ -51,6 +59,7 @@ class RemoteChargerHttpServerTest {
             statusProvider = { ChargerStatusSnapshot.fromAppState() },
             macProvider = { "AA:BB:CC:DD:EE:FF" },
             commandSender = sink,
+            scheduleSender = scheduleSink,
         )
         val exporter = PrometheusExporter(0, control)
         exporter.start(10_000, false)
@@ -134,6 +143,18 @@ class RemoteChargerHttpServerTest {
     fun `wrong secret rejected`() {
         val (code, _) = request("GET", "/charger/status", secret = "not the secret")
         assertEquals(401, code)
+    }
+
+    @Test
+    fun `post schedule with secret reaches the sender`() {
+        val (code, body) = request(
+            "POST", "/charger/schedule", secret = "s3cret",
+            body = """{"enabled":true,"enable":"09:15","disable":"16:45"}""",
+        )
+        assertEquals(202, code)
+        assertTrue(body.contains("\"accepted\":true"))
+        assertEquals(listOf(listOf(true, "09:15", "16:45", "AA:BB:CC:DD:EE:FF")), scheduleSink.calls)
+        assertTrue(sink.calls.isEmpty())
     }
 
     @Test

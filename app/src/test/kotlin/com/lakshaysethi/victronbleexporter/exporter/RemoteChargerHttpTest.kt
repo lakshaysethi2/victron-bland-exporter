@@ -23,6 +23,13 @@ class RemoteChargerHttpTest {
         }
     }
 
+    private class FakeScheduleSink : ScheduleCommandSender {
+        val calls = mutableListOf<List<Any>>()
+        override fun saveSchedule(enabled: Boolean, enableTime: String, disableTime: String, mac: String) {
+            calls.add(listOf(enabled, enableTime, disableTime, mac))
+        }
+    }
+
     private class Harness(
         var enabled: Boolean = true,
         var secret: String = "correct horse battery staple",
@@ -38,12 +45,14 @@ class RemoteChargerHttpTest {
         ),
     ) {
         val sink = FakeSink()
+        val scheduleSink = FakeScheduleSink()
 
         fun control() = RemoteChargerHttp(
             settingsProvider = { RemoteChargerStore.RemoteChargerSettings(enabled = enabled, authSecret = secret) },
             statusProvider = { snapshot },
             macProvider = { mac },
             commandSender = sink,
+            scheduleSender = scheduleSink,
         )
     }
 
@@ -64,8 +73,10 @@ class RemoteChargerHttpTest {
         assertEquals(404, c.handle("/charger", GET, emptyMap(), "").statusCode)
         assertEquals(404, c.handle("/charger/status", GET, headers(SECRET), "").statusCode)
         assertEquals(404, c.handle("/charger", POST, headers(SECRET), """{"action":"on"}""").statusCode)
+        assertEquals(404, c.handle("/charger/schedule", POST, headers(SECRET), """{"enabled":true,"enable":"08:30","disable":"18:00"}""").statusCode)
         assertEquals(404, c.handle("/charger/status", GET, emptyMap(), "").statusCode)
         assertTrue(h.sink.calls.isEmpty())
+        assertTrue(h.scheduleSink.calls.isEmpty())
     }
 
     @Test
@@ -109,6 +120,9 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"mac\":\"AA:BB:CC:DD:EE:FF\""))
         assertTrue(r.body.contains("\"busy\":false"))
         assertTrue(r.body.contains("\"lastAction\":\"Charger ENABLED (ON)\""))
+        assertTrue(r.body.contains("\"scheduleEnabled\":false"))
+        assertTrue(r.body.contains("\"enableTime\":\"08:30\""))
+        assertTrue(r.body.contains("\"disableTime\":\"18:00\""))
     }
 
     @Test
@@ -189,7 +203,44 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("viewport"))
         assertTrue(r.body.contains("ENABLE CHARGER"))
         assertTrue(r.body.contains("DISABLE CHARGER"))
+        assertTrue(r.body.contains("Save schedule"))
+        assertTrue(r.body.contains("/charger/schedule"))
         assertFalse(r.body.contains(SECRET))
+    }
+
+    @Test
+    fun `post schedule accepted and forwarded to the sender`() {
+        val h = Harness()
+        val r = h.control().handle(
+            "/charger/schedule", POST, headers(SECRET),
+            """{"enabled":true,"enable":"09:00","disable":"17:30"}""",
+        )
+        assertEquals(202, r.statusCode)
+        assertEquals(listOf(listOf(true, "09:00", "17:30", "AA:BB:CC:DD:EE:FF")), h.scheduleSink.calls)
+        assertTrue(h.sink.calls.isEmpty())
+        assertTrue(r.body.contains("\"accepted\":true"))
+        assertTrue(r.body.contains("\"enable\":\"09:00\""))
+    }
+
+    @Test
+    fun `post schedule with bad times rejected`() {
+        val h = Harness()
+        val c = h.control()
+        assertEquals(400, c.handle("/charger/schedule", POST, headers(SECRET), """{"enabled":true,"enable":"25:00","disable":"18:00"}""").statusCode)
+        assertEquals(400, c.handle("/charger/schedule", POST, headers(SECRET), """{"enabled":true}""").statusCode)
+        assertEquals(400, c.handle("/charger/schedule", POST, headers(SECRET), "").statusCode)
+        assertTrue(h.scheduleSink.calls.isEmpty())
+    }
+
+    @Test
+    fun `post schedule without configured charger mac returns 503`() {
+        val h = Harness(mac = null)
+        val r = h.control().handle(
+            "/charger/schedule", POST, headers(SECRET),
+            """{"enabled":false,"enable":"08:30","disable":"18:00"}""",
+        )
+        assertEquals(503, r.statusCode)
+        assertTrue(h.scheduleSink.calls.isEmpty())
     }
 
     // ---- auth primitives ----
