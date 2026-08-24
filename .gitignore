@@ -30,6 +30,9 @@ app/debug/
 *.token
 cloudflared-token.txt
 
+# Local orchestrator / agent run state
+.gnhf/
+
 # Misc
 .DS_Store
 *.swp

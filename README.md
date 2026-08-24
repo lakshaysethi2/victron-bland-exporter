@@ -2,6 +2,7 @@
 
 **Turn an old Android phone into a wireless bridge from your Victron MPPT to Prometheus + Grafana — no port-forwarding required.**
 
+[![CI](https://github.com/lakshaysethi2/victron-bland-exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/lakshaysethi2/victron-bland-exporter/actions/workflows/ci.yml)
 [![Platform](https://img.shields.io/badge/platform-Android%208%2B-3DDC84?logo=android&logoColor=white)](guide.md#install-the-app)
 [![License](https://img.shields.io/github/license/lakshaysethi2/victron-bland-exporter)](LICENSE)
 [![Language](https://img.shields.io/badge/language-Kotlin-7F52FF?logo=kotlin&logoColor=white)](app/src/main/kotlin/com/lakshaysethi/victronbleexporter)
@@ -33,7 +34,7 @@ Live dashboard on a phone browser:
 |---|---|---|
 | ![Device near MPPT 1](docs/screenshots/device-phone-mppt-1.png) | ![Device near MPPT 2](docs/screenshots/device-phone-mppt-2.png) | ![Device near MPPT 3](docs/screenshots/device-phone-mppt-3.png) |
 
-**App** — main screen and debug-log sharing (screenshots arriving soon):
+**App** — main screen and debug-log sharing:
 
 | Main screen | Debug log |
 |---|---|
@@ -45,7 +46,7 @@ Live dashboard on a phone browser:
 
 The full, beginner-friendly walkthrough is in **[`guide.md`](guide.md)** — build the APK, sideload, set up the tunnel, configure Prometheus, and import the Grafana dashboard, end-to-end.
 
-1. **Build & install** — `./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk`, sideload on any arm64 Android 8+ phone ([instructions](guide.md#build-the-apk))
+1. **Build & install** — `./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk`, or grab the debug APK from the latest [CI run](https://github.com/lakshaysethi2/victron-bland-exporter/actions/workflows/ci.yml), then sideload on any arm64 Android 8+ phone ([instructions](guide.md#build-the-apk))
 2. **Add your key** — grab the 32-char Instant Readout key from VictronConnect ([how](guide.md#get-your-victron-encryption-key))
 3. **Start the tunnel** — quick tunnel for testing (`https://your-subdomain.trycloudflare.com`), named tunnel for a stable hostname ([setup](guide.md#set-up-the-tunnel))
 4. **Scrape it** — 5-second HTTPS scrape job in Prometheus ([config](guide.md#configure-prometheus))
@@ -141,10 +142,11 @@ Key files:
 ```
 app/src/main/kotlin/com/lakshaysethi/victronbleexporter/
 ├── parser/            VictronParser.kt, BitReader.kt, DeviceEnums.kt   (BLE decryption)
-├── exporter/          PrometheusExporter.kt, MetricsStore.kt           (/metrics server)
+├── charger/           ChargerController.kt, ChargerProtocol.kt         (on/off + voltages)
+├── exporter/          PrometheusExporter.kt, RemoteChargerHttp.kt      (/metrics + remote)
 ├── tunnel/            CloudflaredManager.kt, TunnelNetworkPrep.kt,
 │                      TunnelBinaryInspector.kt                         (tunnel + DNS)
-├── data/              DeviceRepository.kt                              (key storage)
+├── data/              DeviceRepository.kt, RemoteChargerStore.kt       (keys + remote secret)
 └── service/           VictronBleExporterService.kt                     (foreground service)
 app/src/main/jniLibs/arm64-v8a/libcloudflared.so                        (bundled binary)
 ```
@@ -162,7 +164,7 @@ Core functionality is complete and battle-tested on real hardware: BLE parsing, 
 
 ## Contributing
 
-PRs welcome — see [`guide.md`](guide.md) for the build and the cgo/NDK cloudflared recipe if you touch the tunnel binary. Please run the JVM unit tests (`./gradlew test`) — the `TunnelBinaryInspectorTest` guards the bundled binary's linkage.
+PRs welcome — see [`guide.md`](guide.md) for the build and the cgo/NDK cloudflared recipe if you touch the tunnel binary. Please run the JVM unit tests (`./gradlew testDebugUnitTest`) — CI runs the same job and uploads a debug APK artifact. `TunnelBinaryInspectorTest` guards the bundled binary's linkage. Do not commit tokens or keys; see [`SECURITY.md`](SECURITY.md).
 
 ## License
 
