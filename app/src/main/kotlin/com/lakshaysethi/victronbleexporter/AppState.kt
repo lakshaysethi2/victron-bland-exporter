@@ -48,6 +48,9 @@ object AppState {
     /** Epoch millis until which a manual override pauses the schedule; 0 = none. */
     @Volatile var chargerOverrideUntil: Long = 0L
 
+    /** Epoch millis of the last Victron BLE advertisement. Survives the 90s fresh window so remote status can say how long the bridge has been quiet. */
+    @Volatile var lastBleAdAt: Long = 0L
+
     /** Last read/written voltage settings (null = not read yet). Written by VictronBleExporterService. */
     @Volatile var voltageSettings: VoltageSettings? = null
 

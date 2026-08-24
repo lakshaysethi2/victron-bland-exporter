@@ -39,6 +39,7 @@ import com.lakshaysethi.victronbleexporter.exporter.VoltageCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
 import com.lakshaysethi.victronbleexporter.exporter.PrometheusExporter
 import com.lakshaysethi.victronbleexporter.exporter.RemoteChargerHttp
+import com.lakshaysethi.victronbleexporter.exporter.ScanCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.TunnelCommandSender
 import com.lakshaysethi.victronbleexporter.parser.VictronParser
 import com.lakshaysethi.victronbleexporter.tunnel.CloudflaredManager
@@ -209,6 +210,16 @@ class VictronBleExporterService : Service() {
                     } catch (e: Exception) {
                         Log.e(TAG, "Remote named-tunnel stop could not be sent", e)
                     }
+                }
+            },
+            scanSender = ScanCommandSender {
+                try {
+                    startForegroundService(Intent(this, VictronBleExporterService::class.java).apply {
+                        action = "RESTART_SCAN"
+                    })
+                    Log.i(TAG, "Remote BLE scan restart")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Remote BLE scan restart could not be sent", e)
                 }
             },
         )
@@ -636,6 +647,7 @@ class VictronBleExporterService : Service() {
                 }
                 "STOP_TUNNEL" -> cloudflaredManager.stop()
                 "START_SAVED_TUNNEL" -> startSavedTunnelNow()
+                "RESTART_SCAN" -> restartScan()
                 "ADD_KEY" -> {
                     val mac = it.getStringExtra("mac") ?: return@let
                     val key = it.getStringExtra("key") ?: return@let
@@ -807,6 +819,7 @@ class VictronBleExporterService : Service() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 try {
                     lastScanResultAt = System.currentTimeMillis()
+                    AppState.lastBleAdAt = lastScanResultAt
                     val device = result.device
                     val scanRecord = result.scanRecord ?: return
                     val mfgData = scanRecord.getManufacturerSpecificData(0x02E1) ?: return

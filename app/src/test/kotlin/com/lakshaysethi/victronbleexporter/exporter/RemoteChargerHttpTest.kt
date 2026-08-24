@@ -61,6 +61,11 @@ class RemoteChargerHttpTest {
         override fun stop() { stops++ }
     }
 
+    private class FakeScanSink : ScanCommandSender {
+        var restarts = 0
+        override fun restartScan() { restarts++ }
+    }
+
     private class Harness(
         var enabled: Boolean = true,
         var secret: String = "correct horse battery staple",
@@ -81,11 +86,13 @@ class RemoteChargerHttpTest {
         val keySink = FakeKeySink()
         val readSink = FakeReadSink()
         val tunnelSink = FakeTunnelSink()
+        val scanSink = FakeScanSink()
 
         fun control(
             withKeySender: Boolean = true,
             withReadSender: Boolean = true,
             withTunnelSender: Boolean = true,
+            withScanSender: Boolean = true,
         ) = RemoteChargerHttp(
             settingsProvider = { RemoteChargerStore.RemoteChargerSettings(enabled = enabled, authSecret = secret) },
             statusProvider = { snapshot },
@@ -96,6 +103,7 @@ class RemoteChargerHttpTest {
             keySender = if (withKeySender) keySink else null,
             readSender = if (withReadSender) readSink else null,
             tunnelSender = if (withTunnelSender) tunnelSink else null,
+            scanSender = if (withScanSender) scanSink else null,
         )
     }
 
@@ -123,6 +131,7 @@ class RemoteChargerHttpTest {
         assertEquals(404, c.handle("/charger/key", POST, headers(SECRET), """{"mac":"AA:BB:CC:DD:EE:FF","key":"0123456789abcdef0123456789abcdef"}""").statusCode)
         assertEquals(404, c.handle("/charger", POST, headers(SECRET), """{"action":"read"}""").statusCode)
         assertEquals(404, c.handle("/charger/tunnel", POST, headers(SECRET), """{"action":"stop"}""").statusCode)
+        assertEquals(404, c.handle("/charger/scan", POST, headers(SECRET), "").statusCode)
         assertEquals(404, c.handle("/charger/status", GET, emptyMap(), "").statusCode)
         assertTrue(h.sink.calls.isEmpty())
         assertTrue(h.scheduleSink.calls.isEmpty())
@@ -130,6 +139,7 @@ class RemoteChargerHttpTest {
         assertTrue(h.keySink.calls.isEmpty())
         assertTrue(h.readSink.calls.isEmpty())
         assertTrue(h.tunnelSink.starts.isEmpty())
+        assertEquals(0, h.scanSink.restarts)
     }
 
     @Test
@@ -203,6 +213,7 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"floatVoltage\":null"))
         assertTrue(r.body.contains("\"chargerVoltage\":null"))
         assertTrue(r.body.contains("\"panelVoltage\":null"))
+        assertTrue(r.body.contains("\"lastBleAdAt\":0"))
     }
 
     @Test
@@ -232,9 +243,11 @@ class RemoteChargerHttpTest {
     fun `fromAppState copies live tunnel fields`() {
         val prevStatus = AppState.tunnelStatus
         val prevUrl = AppState.tunnelUrl
+        val prevBle = AppState.lastBleAdAt
         try {
             AppState.tunnelStatus = "Running"
             AppState.tunnelUrl = "https://example.trycloudflare.com"
+            AppState.lastBleAdAt = 1_700_000_000_000L
             val snap = ChargerStatusSnapshot.fromAppState()
             assertEquals("Running", snap.tunnelStatus)
             assertEquals("https://example.trycloudflare.com", snap.tunnelUrl)
@@ -243,9 +256,11 @@ class RemoteChargerHttpTest {
             assertNull(snap.panelVoltage)
             assertEquals("", snap.appVersion)
             assertEquals(0, snap.versionCode)
+            assertEquals(1_700_000_000_000L, snap.lastBleAdAt)
         } finally {
             AppState.tunnelStatus = prevStatus
             AppState.tunnelUrl = prevUrl
+            AppState.lastBleAdAt = prevBle
         }
     }
 
@@ -609,6 +624,9 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("token saved"))
         assertTrue(r.body.contains("appVersion"))
         assertTrue(r.body.contains("panelVoltage"))
+        assertTrue(r.body.contains("lastBleAdAt"))
+        assertTrue(r.body.contains("Restart BLE scan"))
+        assertTrue(r.body.contains("/charger/scan"))
         assertTrue(r.body.contains("sighted"))
         assertTrue(r.body.contains("wrong key"))
         assertFalse(r.body.contains(SECRET))
@@ -915,6 +933,40 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"tunnelHasToken\":true"))
         assertFalse(r.body.contains(NAMED_TOKEN))
         assertFalse(r.body.contains("\"token\""))
+    }
+
+    @Test
+    fun `status includes lastBleAdAt after the 90s fresh window`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(lastBleAdAt = 1_700_000_000_000L, live = emptyList())
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"lastBleAdAt\":1700000000000"))
+        assertTrue(r.body.contains("\"live\":[]"))
+    }
+
+    @Test
+    fun `post scan restarts BLE scanning`() {
+        val h = Harness()
+        val r = h.control().handle("/charger/scan", POST, headers(SECRET), "")
+        assertEquals(202, r.statusCode)
+        assertEquals(1, h.scanSink.restarts)
+        assertTrue(r.body.contains("\"action\":\"scan\""))
+    }
+
+    @Test
+    fun `post scan without sender returns 503`() {
+        val h = Harness()
+        val r = h.control(withScanSender = false).handle("/charger/scan", POST, headers(SECRET), "")
+        assertEquals(503, r.statusCode)
+        assertEquals(0, h.scanSink.restarts)
+    }
+
+    @Test
+    fun `post scan requires the secret`() {
+        val h = Harness()
+        assertEquals(401, h.control().handle("/charger/scan", POST, emptyMap(), "").statusCode)
+        assertEquals(0, h.scanSink.restarts)
     }
 
     // ---- auth primitives ----

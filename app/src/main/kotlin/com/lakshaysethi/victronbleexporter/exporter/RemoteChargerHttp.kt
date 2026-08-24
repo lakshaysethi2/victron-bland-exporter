@@ -18,11 +18,12 @@ import java.security.MessageDigest
  *   GET  / or /charger   -> mobile control page (shell; every API call inside
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
- *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status + app version + last GATT voltages); kicks a CHARGER_READ when mode is still unknown
+ *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status + app version + last GATT voltages + lastBleAdAt); kicks a CHARGER_READ when mode is still unknown
  *   POST /charger        -> JSON body {"action":"on"|"off"|"read", "mac"?: "AA:BB:..."} flips or reads the charger
  *   POST /charger/schedule -> JSON {enabled, enable, disable, mac?} saves the daily window
  *   POST /charger/key    -> JSON {mac, key} saves an Instant Readout key (never echoed)
  *   POST /charger/tunnel -> JSON {token} saves + starts the named tunnel, or {action:"start"|"stop"} (token never echoed)
+ *   POST /charger/scan   -> restarts BLE scanning (no body)
  *   GET  /voltage        -> JSON voltage settings (auth required)
  *   POST /voltage        -> JSON {battery_voltage_setting, absorption_voltage, float_voltage, mac?}
  *                           writes the matching GATT registers (auth required; confirm in UI)
@@ -52,6 +53,7 @@ class RemoteChargerHttp(
     private val keySender: KeyCommandSender? = null,
     private val readSender: ChargerReadSender? = null,
     private val tunnelSender: TunnelCommandSender? = null,
+    private val scanSender: ScanCommandSender? = null,
 ) {
 
     /**
@@ -95,6 +97,7 @@ class RemoteChargerHttp(
             uri == "/charger/schedule" && method == "POST" -> handleSchedule(body)
             uri == "/charger/key" && method == "POST" -> handleKey(body)
             uri == "/charger/tunnel" && method == "POST" -> handleTunnel(body)
+            uri == "/charger/scan" && method == "POST" -> handleScan()
             uri == "/voltage" && method == "GET" -> handleVoltageGet()
             uri == "/voltage" && method == "POST" -> handleVoltagePost(body)
             else -> notFound()
@@ -214,6 +217,13 @@ class RemoteChargerHttp(
                 "{\"error\":\"body must be JSON: {\\\"token\\\":\\\"...\\\"} or {\\\"action\\\":\\\"start\\\"|\\\"stop\\\"}\"}\n",
             )
         }
+    }
+
+    private fun handleScan(): HttpResult {
+        val sender = scanSender
+            ?: return HttpResult(503, MIME_JSON, "{\"error\":\"scan restart unavailable on this build\"}\n")
+        sender.restartScan()
+        return HttpResult(202, MIME_JSON, "{\"accepted\":true,\"action\":\"scan\"}\n")
     }
 
     private data class ScheduleBody(val enabled: Boolean, val enable: String, val disable: String)
@@ -389,6 +399,11 @@ interface TunnelCommandSender {
     fun stop()
 }
 
+/** Restarts BLE scanning. Production: RESTART_SCAN intent. */
+fun interface ScanCommandSender {
+    fun restartScan()
+}
+
 /** Recently seen BLE advertisement — never includes the encryption key. */
 data class SightedDevice(
     val mac: String,
@@ -491,6 +506,7 @@ data class ChargerStatusSnapshot(
     val floatVoltage: Double? = null,
     val chargerVoltage: Double? = null,
     val panelVoltage: Double? = null,
+    val lastBleAdAt: Long = 0L,
 ) {
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
 
@@ -522,6 +538,7 @@ data class ChargerStatusSnapshot(
         append(",\"floatVoltage\":").append(floatVoltage ?: "null")
         append(",\"chargerVoltage\":").append(chargerVoltage ?: "null")
         append(",\"panelVoltage\":").append(panelVoltage ?: "null")
+        append(",\"lastBleAdAt\":").append(lastBleAdAt)
         append(",\"live\":[")
         live.forEachIndexed { i, row ->
             if (i > 0) append(",")
@@ -563,6 +580,7 @@ data class ChargerStatusSnapshot(
                 floatVoltage = vs?.floatVolts,
                 chargerVoltage = vs?.chargerVolts,
                 panelVoltage = vs?.panelVolts,
+                lastBleAdAt = AppState.lastBleAdAt,
             )
         }
     }
@@ -717,6 +735,7 @@ private val CONTROL_PAGE: String = """
   <button class="btn on" id="btnOn" disabled>ENABLE CHARGER</button>
   <button class="btn off" id="btnOff" disabled>DISABLE CHARGER</button>
   <button class="btn small" id="btnRead" disabled>Read state</button>
+  <button class="btn small" id="btnScan" disabled>Restart BLE scan</button>
   <div class="sub" style="margin:14px 0 8px">Daily schedule (phone clock below)</div>
   <label class="hint"><input type="checkbox" id="schedOn"> Enforce window</label>
   <div class="row"><input type="text" id="enTime" placeholder="ON 08:30" inputmode="numeric"><input type="text" id="disTime" placeholder="OFF 18:00" inputmode="numeric"></div>
@@ -752,6 +771,7 @@ private val CONTROL_PAGE: String = """
       btnTunSave = document.getElementById("btnTunSave"),
       btnTunStart = document.getElementById("btnTunStart"),
       btnTunStop = document.getElementById("btnTunStop"),
+      btnScan = document.getElementById("btnScan"),
       tunToken = document.getElementById("tunToken"),
       keyMac = document.getElementById("keyMac"),
       keyHex = document.getElementById("keyHex"),
@@ -760,7 +780,7 @@ private val CONTROL_PAGE: String = """
       disTime = document.getElementById("disTime"),
       secretInput = document.getElementById("secret");
   function setErr(t) { err.textContent = t || ""; }
-  function setBusy(b) { btnOn.disabled = b; btnOff.disabled = b; btnRead.disabled = b; btnSched.disabled = b; btnKey.disabled = b; btnTunSave.disabled = b; btnTunStart.disabled = b; btnTunStop.disabled = b; if (b) { dot.className = "dot busy"; } }
+  function setBusy(b) { btnOn.disabled = b; btnOff.disabled = b; btnRead.disabled = b; btnScan.disabled = b; btnSched.disabled = b; btnKey.disabled = b; btnTunSave.disabled = b; btnTunStart.disabled = b; btnTunStop.disabled = b; if (b) { dot.className = "dot busy"; } }
   function api(path, opts) {
     opts = opts || {};
     opts.headers = Object.assign({ "X-Remote-Secret": secret }, opts.headers || {});
@@ -798,6 +818,12 @@ private val CONTROL_PAGE: String = """
     if (data.chargerVoltage != null) vbits.push("chg " + data.chargerVoltage + " V");
     if (data.panelVoltage != null) vbits.push("pv " + data.panelVoltage + " V");
     if (vbits.length) parts.push(vbits.join(" "));
+    if (data.lastBleAdAt) {
+      var ageSec = Math.max(0, Math.round((Date.now() - data.lastBleAdAt) / 1000));
+      parts.push(ageSec < 90 ? ("BLE " + ageSec + "s ago") : ("BLE quiet " + Math.round(ageSec / 60) + "m"));
+    } else {
+      parts.push("BLE none");
+    }
     if (selectedMac || data.mac) parts.push("target " + (selectedMac || data.mac));
     meta.textContent = parts.join(" \u00b7 ");
     if (!schedFilled) {
@@ -821,7 +847,11 @@ private val CONTROL_PAGE: String = """
     if (!selectedMac && data.mac) selectedMac = data.mac;
     if (!selectedMac && rows.length) selectedMac = rows[0].mac;
     if (selectedMac && !keyMac.value) keyMac.value = selectedMac;
-    if (!rows.length) { liveBox.textContent = "No fresh advertisement"; }
+    if (!rows.length) {
+      liveBox.textContent = data.lastBleAdAt
+        ? ("No fresh advertisement (last " + Math.round((Date.now() - data.lastBleAdAt) / 1000) + "s ago)")
+        : "No fresh advertisement";
+    }
     else {
       liveBox.innerHTML = rows.map(function (row) {
         var d = row.live;
@@ -938,6 +968,18 @@ private val CONTROL_PAGE: String = """
   });
   btnTunStart.addEventListener("click", function () { sendTunnel({ action: "start" }); });
   btnTunStop.addEventListener("click", function () { sendTunnel({ action: "stop" }); });
+  btnScan.addEventListener("click", function () {
+    if (!secret) return;
+    setBusy(true); setErr("");
+    api("/charger/scan", { method: "POST" })
+      .then(function (r) { return r.json().then(function (d) { return { r: r, d: d }; }); })
+      .then(function (x) {
+        if (x.r.status === 401) { setBusy(false); return; }
+        if (x.r.ok) { if (x.d.error) setErr(x.d.error); loadStatus(); }
+        else { setBusy(false); setErr(x.d.error || ("Status " + x.r.status)); }
+      })
+      .catch(function () { setBusy(false); setErr("Request failed."); });
+  });
   btnRefresh.addEventListener("click", function () { schedFilled = false; loadStatus(); });
   loadStatus();
   setInterval(loadStatus, 3000);
