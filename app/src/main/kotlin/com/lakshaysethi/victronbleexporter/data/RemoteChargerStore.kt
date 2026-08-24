@@ -8,16 +8,15 @@ import android.content.SharedPreferences
  * (the HTTP API + control page served on port 5338 and reachable through the
  * Cloudflare tunnel).
  *
- * Follows the ChargerScheduleStore pattern (context-provided prefs, defensive
- * reads). The auth secret is deliberately NOT encrypted: same trade-off as the
+ * Device-protected so a locked-boot service can authenticate /charger before
+ * unlock. The auth secret is deliberately NOT encrypted: same trade-off as the
  * rest of the app's prefs — the app sandbox keeps prefs app-private, and the
  * secret never leaves the device except over the TLS tunnel inside an
  * `X-Remote-Secret` request header. Never log it, never put it in a URL.
  */
 class RemoteChargerStore(context: Context) {
 
-    private val prefs: SharedPreferences =
-        context.getSharedPreferences("victron_remote_settings", Context.MODE_PRIVATE)
+    private val prefs: SharedPreferences = bootSafePrefs(context, PREFS)
 
     /** Master switch: when false every /charger* route answers 404 (feature hidden). */
     var enabled: Boolean
@@ -43,7 +42,8 @@ class RemoteChargerStore(context: Context) {
         val authSecret: String,
     )
 
-    private companion object {
+    internal companion object {
+        const val PREFS = "victron_remote_settings"
         const val KEY_ENABLED = "remote_control_enabled"
         const val KEY_AUTH_SECRET = "remote_control_secret"
     }
