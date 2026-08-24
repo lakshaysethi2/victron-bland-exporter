@@ -24,7 +24,7 @@ class UpdateCheckerTest {
     }
 
     @Test
-    fun `update check tries the log host then the public github release`() {
+    fun `update check asks the log host and the public github release`() {
         assertEquals(
             listOf(UpdateChecker.LATEST_URL, UpdateChecker.GITHUB_LATEST_JSON),
             UpdateChecker.CANDIDATE_URLS

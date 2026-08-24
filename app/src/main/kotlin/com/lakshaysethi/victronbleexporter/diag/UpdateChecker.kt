@@ -8,11 +8,14 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * In-app update check. Tries the mppt-log-server first, then the public GitHub
- * Release that CI publishes on main:
+ * In-app update check. Asks both the mppt-log-server and the public GitHub
+ * Release that CI publishes on main, then keeps the higher versionCode:
  *   GET https://mppt-logs.lak.nz/api/latest.json
  *   GET https://github.com/.../releases/latest/download/latest.json
  *     -> {"versionCode", "versionName", "apkUrl", "notes"}
+ *
+ * A stale-but-up log host (VERSION still 0.1.0) must not hide a newer GitHub
+ * APK. Ties keep the log-host body (it is listed first).
  *
  * The versionCode comparison ([isNewer]) is a pure function so the decision is
  * unit-testable on the JVM.
@@ -63,17 +66,14 @@ object UpdateChecker {
         }
     }
 
-    /** First well-formed body wins; used so a 502 log host falls through to GitHub. */
-    fun firstValidRelease(bodies: Iterable<String?>): LatestRelease? =
-        bodies.firstNotNullOfOrNull { body -> body?.let(::parseLatest) }
+    /** Highest versionCode wins; a dead/malformed body is skipped. */
+    fun newestRelease(bodies: Iterable<String?>): LatestRelease? =
+        bodies.mapNotNull { it?.let(::parseLatest) }.maxByOrNull { it.versionCode }
 
-    /** Fetch the latest release from the server; null when unreachable/malformed. */
+    /** Fetch both hosts and keep the newest well-formed release. */
     suspend fun fetchLatest(): LatestRelease? = withContext(Dispatchers.IO) {
         try {
-            for (url in CANDIDATE_URLS) {
-                parseLatest(fetchJson(url) ?: continue)?.let { return@withContext it }
-            }
-            null
+            newestRelease(CANDIDATE_URLS.map(::fetchJson))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

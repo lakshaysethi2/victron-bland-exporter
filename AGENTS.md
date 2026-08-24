@@ -26,7 +26,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 ## Remote diagnostics + in-app updates
 
-- App-side owner is `diag/` (`AppLog`, `Diagnostics`, `UpdateChecker`). Logs POST to `https://mppt-logs.lak.nz/api/logs`; update check is `GET https://mppt-logs.lak.nz/api/latest.json`, then the public GitHub `releases/latest/download/latest.json` if that host is down. Server lives in the sibling `mppt-log-server` repo, not this one.
+- App-side owner is `diag/` (`AppLog`, `Diagnostics`, `UpdateChecker`). Logs POST to `https://mppt-logs.lak.nz/api/logs`; update check GETs both `https://mppt-logs.lak.nz/api/latest.json` and the public GitHub `releases/latest/download/latest.json` and keeps the higher `versionCode` (a stale-but-up log host must not hide a newer GitHub APK). Server lives in the sibling `mppt-log-server` repo, not this one.
 - `ChargerDebugLog` mirrors into `AppLog` so a Send Diagnostics tap includes the BLE exchange. Auto-send is once/hour; the button always sends. Failures stay local.
 - Bump `versionCode` / `versionName` in `app/build.gradle.kts` when cutting an APK the downstairs phone should be offered.
 

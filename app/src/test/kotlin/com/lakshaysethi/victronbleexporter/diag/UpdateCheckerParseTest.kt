@@ -73,15 +73,38 @@ class UpdateCheckerParseTest {
     }
 
     @Test
-    fun `first valid body wins so a dead log host falls through to github`() {
+    fun `dead log host still falls through to github`() {
         val github = """{"versionCode":2,"versionName":"0.2.0","apkUrl":"https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/victron-ble-exporter.apk"}"""
-        val release = UpdateChecker.firstValidRelease(listOf(null, "not json", github))
+        val release = UpdateChecker.newestRelease(listOf(null, "not json", github))
         assertNotNull(release)
         assertEquals(2, release!!.versionCode)
         assertEquals(
             "https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/victron-ble-exporter.apk",
             release.apkUrl
         )
+    }
+
+    @Test
+    fun `stale log host loses to a newer github release`() {
+        val staleLog = """{"versionCode":1,"versionName":"0.1.0","apkUrl":"https://mppt-logs.lak.nz/apk/latest.apk"}"""
+        val github = """{"versionCode":2,"versionName":"0.2.0","apkUrl":"https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/victron-ble-exporter.apk"}"""
+        val release = UpdateChecker.newestRelease(listOf(staleLog, github))
+        assertNotNull(release)
+        assertEquals(2, release!!.versionCode)
+        assertEquals(
+            "https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/victron-ble-exporter.apk",
+            release.apkUrl
+        )
+    }
+
+    @Test
+    fun `newer log host wins over an older github release`() {
+        val log = """{"versionCode":3,"versionName":"0.3.0","apkUrl":"https://mppt-logs.lak.nz/apk/latest.apk"}"""
+        val github = """{"versionCode":2,"versionName":"0.2.0","apkUrl":"https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/victron-ble-exporter.apk"}"""
+        val release = UpdateChecker.newestRelease(listOf(log, github))
+        assertNotNull(release)
+        assertEquals(3, release!!.versionCode)
+        assertEquals("https://mppt-logs.lak.nz/apk/latest.apk", release.apkUrl)
     }
 
     @Test
