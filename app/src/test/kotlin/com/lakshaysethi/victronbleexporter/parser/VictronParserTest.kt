@@ -60,7 +60,7 @@ class VictronParserTest {
         assertEquals(50.0, data["soc_percent"] as Double, 0.1)
         // Per reference convention, consumed is negative for discharge
         assertEquals(-50.0, data["consumed_ah"] as Double, 0.1)
-        assertEquals(0, data["aux_mode"]) // typical for voltage aux in fixture
+        assertEquals(3, data["aux_mode"]) // AuxMode.DISABLED in keshavdv/victron-ble
     }
 
     @Test

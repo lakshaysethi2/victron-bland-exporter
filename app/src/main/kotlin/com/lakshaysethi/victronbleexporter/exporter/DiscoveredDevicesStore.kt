@@ -17,7 +17,8 @@ data class DiscoveredDevice(
     val lastSeenTimestamp: Long, // epoch millis
     val hasKey: Boolean,
     val parsed: ParsedDevice? = null,
-    val needsKey: Boolean = !hasKey || parsed == null
+    val needsKey: Boolean = !hasKey || parsed == null,
+    val wrongKey: Boolean = false
 )
 
 object DiscoveredDevicesStore {
@@ -30,7 +31,8 @@ object DiscoveredDevicesStore {
         recordType: Int?,
         rssi: Int,
         hasKey: Boolean,
-        parsed: ParsedDevice?
+        parsed: ParsedDevice?,
+        decryptFailed: Boolean = false
     ) {
         val now = System.currentTimeMillis()
         val normalizedMac = mac.uppercase()
@@ -48,6 +50,13 @@ object DiscoveredDevicesStore {
         // Keep strongest RSSI recent, but always update timestamp
         val mergedHasKey = hasKey || existing?.hasKey == true
         val bestParsed = parsed ?: existing?.parsed
+        // Only a real decrypt attempt can claim wrong-key. The UI scanner never
+        // parses, so it must not flip this just because parsed is still null.
+        val wrongKey = when {
+            bestParsed != null -> false
+            decryptFailed && mergedHasKey -> true
+            else -> existing?.wrongKey == true
+        }
 
         devices[normalizedMac] = DiscoveredDevice(
             mac = normalizedMac,
@@ -58,14 +67,19 @@ object DiscoveredDevicesStore {
             lastSeenTimestamp = now,
             hasKey = mergedHasKey,
             parsed = bestParsed,
-            needsKey = !mergedHasKey || bestParsed == null
+            needsKey = !mergedHasKey || bestParsed == null,
+            wrongKey = wrongKey
         )
     }
 
     fun markHasKey(mac: String, hasKey: Boolean = true) {
         val normalized = mac.uppercase()
         devices[normalized]?.let { existing ->
-            devices[normalized] = existing.copy(hasKey = hasKey, needsKey = !hasKey || existing.parsed == null)
+            devices[normalized] = existing.copy(
+                hasKey = hasKey,
+                needsKey = !hasKey || existing.parsed == null,
+                wrongKey = false
+            )
         }
     }
 

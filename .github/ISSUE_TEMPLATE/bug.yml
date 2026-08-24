@@ -1,0 +1,29 @@
+name: Bug report
+description: Something in the exporter, tunnel, charger control, or metrics is wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do **not** paste a Cloudflare tunnel token, Victron Instant Readout key, remote-control secret, or a log that contains any of those. See [SECURITY.md](https://github.com/lakshaysethi2/victron-bland-exporter/blob/main/SECURITY.md).
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: No secrets in this issue
+      options:
+        - label: I have not pasted a tunnel token, Instant Readout key, remote secret, or a log that contains them
+          required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected vs what the phone or remote page actually did.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: From the app footer or the remote /charger status line (for example 0.2.10).
+    validations:
+      required: true

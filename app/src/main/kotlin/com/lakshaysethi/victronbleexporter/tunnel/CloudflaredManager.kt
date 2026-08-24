@@ -19,6 +19,8 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 import com.lakshaysethi.victronbleexporter.AppState
+import com.lakshaysethi.victronbleexporter.diag.AppLog
+import com.lakshaysethi.victronbleexporter.diag.Diagnostics
 
 private const val TAG = "CloudflaredManager"
 
@@ -216,6 +218,8 @@ class CloudflaredManager(
             }
         }
         publishStatus(message, generation, onStatus)
+        AppLog.e("Tunnel start failed: $message")
+        Diagnostics.autoSend(appContext)
     }
 
     /**
@@ -264,6 +268,8 @@ class CloudflaredManager(
             val reason = prep.blockedStatus ?: "No working network/DNS"
             Log.e(TAG, "Refusing to start cloudflared: $reason")
             publishStatus(reason, generation, onStatus)
+            AppLog.e("Tunnel refused: $reason")
+            Diagnostics.autoSend(appContext)
             return
         }
 
@@ -534,6 +540,9 @@ class CloudflaredManager(
     }
 
     fun isRunning(): Boolean = process?.isAlive == true
+
+    /** True after Stop until the next Start; a crash leaves this false so the service can restore. */
+    fun wasManuallyStopped(): Boolean = manualStopRequested
 
     // ---- debug log ----
 

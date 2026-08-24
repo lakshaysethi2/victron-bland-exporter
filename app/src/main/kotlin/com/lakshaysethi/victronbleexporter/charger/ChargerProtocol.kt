@@ -58,6 +58,7 @@ object ChargerProtocol {
     const val REG_FLOAT_VOLTAGE = 0xEDF6 // un16, 0.01 V
     const val REG_EQUALISATION_VOLTAGE = 0xEDF4 // un16, 0.01 V
     const val REG_CHARGER_VOLTAGE = 0xEDD5 // un16, 0.01 V – live read-only
+    const val REG_PANEL_VOLTAGE = 0xEDBB // un16, 0.01 V – PV input; Instant Readout does not carry this
 
     /**
      * Session bootstrap, byte-for-byte from verified captures of what
@@ -136,6 +137,13 @@ object ChargerProtocol {
         return u16 / 100.0
     }
 
+    /** Panel voltage in volts. 0xFFFF is the device NA (night / no PV), not 655.35 V. */
+    fun panelVoltageOf(raw: ByteArray?): Double? {
+        if (raw == null || raw.size < 2) return null
+        val centivolts = (raw[0].toInt() and 0xFF) or ((raw[1].toInt() and 0xFF) shl 8)
+        return if (centivolts == 0xFFFF) null else centivolts / 100.0
+    }
+
     /** Decode a u8 voltage setting (register 0xEDEF, volts as integer). */
     fun decodeBatteryVoltageSetting(raw: ByteArray): Int? {
         if (raw.isEmpty()) return null
@@ -183,6 +191,9 @@ object ChargerProtocol {
     }
 
     fun isChargerOn(mode: Int?): Boolean = mode == MODE_CHARGER_ON
+
+    /** Stack queued the write and the device acknowledged GATT_SUCCESS (0). Status 133 is a failure now that writes are acknowledged. */
+    fun gattWriteAccepted(queued: Boolean, status: Int): Boolean = queued && status == 0
 
     /** True when [mode] satisfies a request to set the charger to [on] (1 = on, 0/4 = off). */
     fun modeMatchesRequest(mode: Int?, on: Boolean): Boolean = when (mode) {

@@ -7,28 +7,42 @@ import android.app.*
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.*
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.lakshaysethi.victronbleexporter.AppState
+import com.lakshaysethi.victronbleexporter.BuildConfig
 import com.lakshaysethi.victronbleexporter.R
 import com.lakshaysethi.victronbleexporter.charger.ChargerController
 import com.lakshaysethi.victronbleexporter.charger.ChargerDebugLog
 import com.lakshaysethi.victronbleexporter.charger.ChargerSchedule
+import com.lakshaysethi.victronbleexporter.charger.ChargerScheduleAlarm
+import com.lakshaysethi.victronbleexporter.charger.ExporterKeepAliveAlarm
 import com.lakshaysethi.victronbleexporter.data.ChargerScheduleStore
 import com.lakshaysethi.victronbleexporter.data.DeviceRepository
+import com.lakshaysethi.victronbleexporter.diag.AppLog
+import com.lakshaysethi.victronbleexporter.diag.Diagnostics
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
 import com.lakshaysethi.victronbleexporter.exporter.ChargerCommandSender
+import com.lakshaysethi.victronbleexporter.exporter.ChargerReadSender
 import com.lakshaysethi.victronbleexporter.exporter.ChargerStatusSnapshot
+import com.lakshaysethi.victronbleexporter.exporter.KeyCommandSender
+import com.lakshaysethi.victronbleexporter.exporter.LiveReadout
+import com.lakshaysethi.victronbleexporter.exporter.ScheduleCommandSender
+import com.lakshaysethi.victronbleexporter.exporter.SightedDevice
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
 import com.lakshaysethi.victronbleexporter.exporter.VoltageCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
 import com.lakshaysethi.victronbleexporter.exporter.PrometheusExporter
 import com.lakshaysethi.victronbleexporter.exporter.RemoteChargerHttp
+import com.lakshaysethi.victronbleexporter.exporter.ScanCommandSender
+import com.lakshaysethi.victronbleexporter.exporter.TunnelCommandSender
 import com.lakshaysethi.victronbleexporter.parser.VictronParser
 import com.lakshaysethi.victronbleexporter.tunnel.CloudflaredManager
 import kotlinx.coroutines.*
@@ -54,7 +68,10 @@ class VictronBleExporterService : Service() {
     private val chargerController: ChargerController by lazy { ChargerController(this) }
     private val chargerScheduleStore: ChargerScheduleStore by lazy { ChargerScheduleStore(this) }
     private var lastScheduledMode: Boolean? = null
+    private var lastScheduledAppliedAt = 0L
     private var scheduleRetryAt = 0L
+    private var lastVoltagePollAt = 0L
+    private var lastTunnelRestoreAt = 0L
 
     /**
      * Remote charger-control HTTP surface. Commands are forwarded to this
@@ -65,7 +82,27 @@ class VictronBleExporterService : Service() {
     private val remoteChargerControl: RemoteChargerHttp by lazy {
         RemoteChargerHttp(
             settingsProvider = { RemoteChargerStore(this).load() },
-            statusProvider = { ChargerStatusSnapshot.fromAppState() },
+            statusProvider = {
+                val s = chargerScheduleStore.load()
+                val minutes = Calendar.getInstance().let { it.get(Calendar.HOUR_OF_DAY) * 60 + it.get(Calendar.MINUTE) }
+                ChargerStatusSnapshot.fromAppState().copy(
+                    scheduleEnabled = s.scheduleEnabled,
+                    enableTime = ChargerSchedule.formatMinutes(s.enableMinutes),
+                    disableTime = ChargerSchedule.formatMinutes(s.disableMinutes),
+                    scheduleWantsOn = ChargerSchedule.scheduledOn(minutes, s.enableMinutes, s.disableMinutes),
+                    nextTransition = ChargerSchedule.formatMinutes(
+                        ChargerSchedule.nextTransition(minutes, s.enableMinutes, s.disableMinutes),
+                    ),
+                    exactAlarm = ChargerScheduleAlarm.canExact(this),
+                    batteryIgnored = ExporterKeepAliveAlarm.ignoringBatteryOptimizations(this),
+                    live = LiveReadout.fromFreshMetrics(),
+                    sighted = SightedDevice.fromStore(),
+                    debug = ChargerDebugLog.snapshot().takeLast(ChargerStatusSnapshot.REMOTE_DEBUG_LINES),
+                    tunnelHasToken = savedTunnelToken() != null,
+                    appVersion = BuildConfig.VERSION_NAME,
+                    versionCode = BuildConfig.VERSION_CODE,
+                )
+            },
             macProvider = { AppState.chargerMac ?: chargerScheduleStore.load().chargerMac.ifBlank { null } },
             commandSender = ChargerCommandSender { enable, mac ->
                 try {
@@ -80,8 +117,21 @@ class VictronBleExporterService : Service() {
                     Log.e(TAG, "Remote charger command could not be sent", e)
                 }
             },
-        ).also { http ->
-            http.attachVoltageSender(object : VoltageCommandSender {
+            scheduleSender = ScheduleCommandSender { enabled, enableTime, disableTime, mac ->
+                try {
+                    startForegroundService(Intent(this, VictronBleExporterService::class.java).apply {
+                        action = "CHARGER_SCHEDULE_SAVE"
+                        putExtra("mac", mac)
+                        putExtra("schedule_enabled", enabled)
+                        putExtra("enable_time", enableTime)
+                        putExtra("disable_time", disableTime)
+                    })
+                    Log.i(TAG, "Remote schedule save: $mac ${if (enabled) "on" else "off"} $enableTime-$disableTime")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Remote schedule save could not be sent", e)
+                }
+            },
+            voltageCommandSender = object : VoltageCommandSender {
                 override fun sendBatteryVoltageSetting(mac: String, volts: Int) {
                     try {
                         startForegroundService(Intent(this@VictronBleExporterService, VictronBleExporterService::class.java).apply {
@@ -115,12 +165,88 @@ class VictronBleExporterService : Service() {
                         Log.e(TAG, "Remote voltage read failed", e)
                     }
                 }
-            })
-        }
+            },
+            keySender = KeyCommandSender { mac, key ->
+                try {
+                    startForegroundService(Intent(this, VictronBleExporterService::class.java).apply {
+                        action = "ADD_KEY"
+                        putExtra("mac", mac)
+                        putExtra("key", key)
+                    })
+                    Log.i(TAG, "Remote Instant Readout key save for $mac")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Remote key save could not be sent", e)
+                }
+            },
+            readSender = ChargerReadSender { mac ->
+                try {
+                    startForegroundService(Intent(this, VictronBleExporterService::class.java).apply {
+                        action = "CHARGER_READ"
+                        putExtra("mac", mac)
+                    })
+                    Log.i(TAG, "Remote charger read for $mac")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Remote charger read could not be sent", e)
+                }
+            },
+            tunnelSender = object : TunnelCommandSender {
+                override fun start(token: String?) {
+                    try {
+                        startForegroundService(Intent(this@VictronBleExporterService, VictronBleExporterService::class.java).apply {
+                            if (token.isNullOrBlank()) {
+                                action = "START_SAVED_TUNNEL"
+                            } else {
+                                action = "START_TUNNEL"
+                                putExtra("tunnel_token", token)
+                            }
+                        })
+                        Log.i(TAG, "Remote named-tunnel start")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Remote named-tunnel start could not be sent", e)
+                    }
+                }
+                override fun stop() {
+                    try {
+                        startForegroundService(Intent(this@VictronBleExporterService, VictronBleExporterService::class.java).apply {
+                            action = "STOP_TUNNEL"
+                        })
+                        Log.i(TAG, "Remote named-tunnel stop")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Remote named-tunnel stop could not be sent", e)
+                    }
+                }
+            },
+            scanSender = ScanCommandSender {
+                try {
+                    startForegroundService(Intent(this, VictronBleExporterService::class.java).apply {
+                        action = "RESTART_SCAN"
+                    })
+                    Log.i(TAG, "Remote BLE scan restart")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Remote BLE scan restart could not be sent", e)
+                }
+            },
+        )
     }
 
     // Device encryption keys: MAC -> key (hex) - in-memory cache, persisted via DeviceRepository
     private val deviceKeys = mutableMapOf<String, String>()
+
+    // BLE scan health: last advertisement or successful startScan. 0 = never started.
+    @Volatile private var lastScanResultAt = 0L
+
+    private val unlockReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != Intent.ACTION_USER_UNLOCKED) return
+            try {
+                deviceRepository = DeviceRepository(this@VictronBleExporterService)
+                loadPersistedKeys()
+                Log.i(TAG, "Reloaded keys after user unlock")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to reload keys after unlock", e)
+            }
+        }
+    }
 
     fun addDeviceKey(mac: String, key: String) {
         val normalizedMac = DeviceRepository.normalizeMacInput(mac)
@@ -154,9 +280,13 @@ class VictronBleExporterService : Service() {
         }
     }
 
+    @SuppressLint("WakelockTimeout")
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "Service onCreate")
+        AppLog.init(this)
+        AppLog.i("Service starting — app v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+        Diagnostics.autoSend(this)
 
         try {
             createNotificationChannel()
@@ -170,11 +300,25 @@ class VictronBleExporterService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to init DeviceRepository", e)
         }
+        try {
+            val filter = IntentFilter(Intent.ACTION_USER_UNLOCKED)
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(unlockReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(unlockReceiver, filter)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to register unlock receiver", e)
+        }
 
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VictronBleExporter::WakeLock")
-            wakeLock?.acquire(10 * 60 * 1000L /*10 minutes*/)
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VictronBleExporter::WakeLock").apply {
+                setReferenceCounted(false)
+            }
+            // Held for the life of the service so the tunnel + schedule loop survive Doze.
+            @Suppress("DEPRECATION")
+            wakeLock?.acquire()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to acquire wakeLock", e)
         }
@@ -214,6 +358,9 @@ class VictronBleExporterService : Service() {
         }
 
         startChargerScheduleLoop()
+        armScheduleAlarm()
+        ExporterKeepAliveAlarm.arm(this)
+        startScanWatchdog()
     }
 
     // ---- Charger control (enable/disable over BLE + daily schedule) ----
@@ -223,6 +370,7 @@ class VictronBleExporterService : Service() {
             while (isActive) {
                 try {
                     enforceChargerSchedule()
+                    maybeRefreshVoltageSettings()
                 } catch (e: Exception) {
                     Log.w(TAG, "Charger schedule tick failed", e)
                 }
@@ -237,39 +385,52 @@ class VictronBleExporterService : Service() {
      */
     private suspend fun enforceChargerSchedule() {
         val settings = chargerScheduleStore.load()
-        if (settings.chargerMac.isBlank()) return
         val now = System.currentTimeMillis()
         if (settings.manualOverrideUntil in 1..now) {
             chargerScheduleStore.clearOverride()
             AppState.chargerOverrideUntil = 0L
             lastScheduledMode = null
+            lastScheduledAppliedAt = 0L
             ChargerDebugLog.append("Manual override ended — schedule resumes")
         }
         if (!settings.scheduleEnabled) return
         if (chargerScheduleStore.manualOverrideUntil > now) return // manual override active
         if (now < scheduleRetryAt) return
 
+        val mac = ExporterKeepAlive.scheduleTargetMac(
+            settings.chargerMac,
+            MetricsStore.getFresh(now).keys.sorted(),
+        ) ?: return
+        if (settings.chargerMac.isBlank()) {
+            chargerScheduleStore.chargerMac = mac
+            AppState.chargerMac = mac
+            ChargerDebugLog.append("Schedule target set from live Instant Readout: $mac")
+        }
+
         val cal = Calendar.getInstance()
         val minutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
         val desiredOn = ChargerSchedule.scheduledOn(minutes, settings.enableMinutes, settings.disableMinutes)
-        if (desiredOn == lastScheduledMode) return
+        if (!ExporterKeepAlive.shouldApplySchedule(desiredOn, lastScheduledMode, lastScheduledAppliedAt, now)) return
 
         ChargerDebugLog.append(
             "Schedule tick: window=${ChargerSchedule.formatMinutes(settings.enableMinutes)}-${ChargerSchedule.formatMinutes(settings.disableMinutes)}" +
                 " -> charger ${if (desiredOn) "ON" else "OFF"}"
         )
-        val result = chargerController.setMode(settings.chargerMac, desiredOn)
+        val result = chargerController.setMode(mac, desiredOn)
         if (result.success) {
             lastScheduledMode = desiredOn
+            lastScheduledAppliedAt = now
             AppState.chargerMode = result.mode
-            AppState.chargerMac = settings.chargerMac
+            AppState.chargerMac = mac
             AppState.chargerStateUpdatedAt = System.currentTimeMillis()
             AppState.chargerLastAction = "Schedule: charger ${if (desiredOn) "ENABLED" else "DISABLED"} (${result.modeText})"
             AppState.chargerLastError = null
         } else {
             AppState.chargerLastAction = "Schedule apply failed: ${result.message}"
             AppState.chargerLastError = result.message
-            scheduleRetryAt = now + 10 * 60_000L
+            AppLog.e("Charger schedule apply failed: ${result.message}")
+            Diagnostics.autoSend(this)
+            scheduleRetryAt = now + ExporterKeepAlive.SCHEDULE_RETRY_MS
         }
     }
 
@@ -298,12 +459,16 @@ class VictronBleExporterService : Service() {
             } else {
                 AppState.chargerLastAction = "Failed: ${result.message}"
                 AppState.chargerLastError = result.message
+                AppLog.e("Charger ${if (enable) "enable" else "disable"} failed: ${result.message}")
+                Diagnostics.autoSend(this)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Charger set failed", e)
             AppState.chargerLastAction = "Failed: ${e.message}"
             AppState.chargerLastError = e.message
             ChargerDebugLog.append("ERROR: ${e.message}")
+            AppLog.e("Charger set failed: ${e.message}")
+            Diagnostics.autoSend(this)
         } finally {
             AppState.chargerBusy = false
         }
@@ -322,18 +487,47 @@ class VictronBleExporterService : Service() {
             AppState.chargerMode = result.mode
             AppState.chargerStateUpdatedAt = System.currentTimeMillis()
             AppState.chargerLastAction = if (result.success) "Read: ${result.modeText}" else "Read failed: ${result.message}"
-            if (!result.success) AppState.chargerLastError = result.message
+            if (!result.success) {
+                AppState.chargerLastError = result.message
+                AppLog.e("Charger state read failed: ${result.message}")
+                Diagnostics.autoSend(this)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Charger read failed", e)
             AppState.chargerLastAction = "Read failed: ${e.message}"
             AppState.chargerLastError = e.message
             ChargerDebugLog.append("ERROR: ${e.message}")
+            AppLog.e("Charger read failed: ${e.message}")
+            Diagnostics.autoSend(this)
         } finally {
             AppState.chargerBusy = false
         }
     }
 
     // ---- voltage settings (battery system voltage + absorption/float) ----
+
+    /** Background GATT read of voltage settings + panel voltage; skips when a user op is in flight. */
+    private suspend fun maybeRefreshVoltageSettings() {
+        if (AppState.chargerBusy) return
+        val mac = chargerScheduleStore.load().chargerMac.ifBlank { return }
+        val now = System.currentTimeMillis()
+        if (!ExporterKeepAlive.voltagePollDue(
+                now,
+                lastVoltagePollAt,
+                AppState.voltageSettingsUpdatedAt,
+                AppState.voltageSettingsLastError,
+            )
+        ) return
+        val result = chargerController.tryReadVoltageSettings(mac) ?: return
+        lastVoltagePollAt = System.currentTimeMillis()
+        if (result.success) {
+            AppState.voltageSettings = result.settings
+            AppState.voltageSettingsUpdatedAt = lastVoltagePollAt
+            AppState.voltageSettingsLastError = null
+        } else {
+            AppState.voltageSettingsLastError = result.message
+        }
+    }
 
     private suspend fun performVoltageRead(mac: String) {
         chargerScheduleStore.chargerMac = mac
@@ -347,16 +541,16 @@ class VictronBleExporterService : Service() {
             if (result.success) {
                 AppState.voltageSettings = result.settings
                 AppState.voltageSettingsUpdatedAt = System.currentTimeMillis()
-                AppState.chargerLastAction = "Voltage: ${'$'}result"
+                AppState.chargerLastAction = "Voltage: $result"
             } else {
-                AppState.chargerLastAction = "Voltage read failed: ${'$'}{result.message}"
+                AppState.chargerLastAction = "Voltage read failed: ${result.message}"
                 AppState.voltageSettingsLastError = result.message
             }
         } catch (e: Exception) {
             Log.w(TAG, "Voltage read failed", e)
-            AppState.chargerLastAction = "Voltage read failed: ${'$'}{e.message}"
+            AppState.chargerLastAction = "Voltage read failed: ${e.message}"
             AppState.voltageSettingsLastError = e.message
-            ChargerDebugLog.append("ERROR: ${'$'}{e.message}")
+            ChargerDebugLog.append("ERROR: ${e.message}")
         } finally {
             AppState.chargerBusy = false
         }
@@ -366,24 +560,24 @@ class VictronBleExporterService : Service() {
         chargerScheduleStore.chargerMac = mac
         AppState.chargerMac = mac
         AppState.chargerBusy = true
-        AppState.chargerLastAction = "Setting battery voltage to ${'$'}volts V…"
+        AppState.chargerLastAction = "Setting battery voltage to $volts V…"
         AppState.voltageSettingsLastError = null
-        ChargerDebugLog.append("Set battery voltage ${'$'}volts V for $mac")
+        ChargerDebugLog.append("Set battery voltage $volts V for $mac")
         try {
             val result = chargerController.setBatteryVoltageSetting(mac, volts)
             if (result.success) {
                 AppState.voltageSettings = result.settings
                 AppState.voltageSettingsUpdatedAt = System.currentTimeMillis()
-                AppState.chargerLastAction = "Battery voltage set to ${'$'}volts V"
+                AppState.chargerLastAction = "Battery voltage set to $volts V"
             } else {
-                AppState.chargerLastAction = "Battery voltage write failed: ${'$'}{result.message}"
+                AppState.chargerLastAction = "Battery voltage write failed: ${result.message}"
                 AppState.voltageSettingsLastError = result.message
             }
         } catch (e: Exception) {
             Log.w(TAG, "Battery voltage set failed", e)
-            AppState.chargerLastAction = "Failed: ${'$'}{e.message}"
+            AppState.chargerLastAction = "Failed: ${e.message}"
             AppState.voltageSettingsLastError = e.message
-            ChargerDebugLog.append("ERROR: ${'$'}{e.message}")
+            ChargerDebugLog.append("ERROR: ${e.message}")
         } finally {
             AppState.chargerBusy = false
         }
@@ -395,22 +589,22 @@ class VictronBleExporterService : Service() {
         AppState.chargerBusy = true
         AppState.chargerLastAction = "Setting charge voltages…"
         AppState.voltageSettingsLastError = null
-        ChargerDebugLog.append("Set charging voltages abs=${'$'}absorptionVolts float=${'$'}floatVolts for $mac")
+        ChargerDebugLog.append("Set charging voltages abs=$absorptionVolts float=$floatVolts for $mac")
         try {
             val result = chargerController.setChargingVoltages(mac, absorptionVolts, floatVolts)
             if (result.success) {
                 AppState.voltageSettings = result.settings
                 AppState.voltageSettingsUpdatedAt = System.currentTimeMillis()
-                AppState.chargerLastAction = "Charge voltages updated: ${'$'}result"
+                AppState.chargerLastAction = "Charge voltages updated: $result"
             } else {
-                AppState.chargerLastAction = "Charge voltage write failed: ${'$'}{result.message}"
+                AppState.chargerLastAction = "Charge voltage write failed: ${result.message}"
                 AppState.voltageSettingsLastError = result.message
             }
         } catch (e: Exception) {
             Log.w(TAG, "Charge voltage set failed", e)
-            AppState.chargerLastAction = "Failed: ${'$'}{e.message}"
+            AppState.chargerLastAction = "Failed: ${e.message}"
             AppState.voltageSettingsLastError = e.message
-            ChargerDebugLog.append("ERROR: ${'$'}{e.message}")
+            ChargerDebugLog.append("ERROR: ${e.message}")
         } finally {
             AppState.chargerBusy = false
         }
@@ -420,23 +614,35 @@ class VictronBleExporterService : Service() {
         chargerScheduleStore.save(enabled, enableTime, disableTime, mac)
         AppState.chargerMac = mac
         AppState.chargerOverrideUntil = 0L
-        lastScheduledMode = null // force a fresh apply on the next tick
+        lastScheduledMode = null // force a fresh apply now, not after the 30s loop delay
+        lastScheduledAppliedAt = 0L
         ChargerDebugLog.append(
             "Schedule saved: $mac ${if (enabled) "enabled" else "disabled"} " +
-                "($enableTime → $disableTime). Applies while the app is open."
+                "($enableTime → $disableTime). Applies while the exporter notification is showing."
+        )
+        armScheduleAlarm()
+        serviceScope.launch { enforceChargerSchedule() }
+    }
+
+    private fun armScheduleAlarm() {
+        val s = chargerScheduleStore.load()
+        if (!s.scheduleEnabled) {
+            ChargerScheduleAlarm.cancel(this)
+            return
+        }
+        val at = ChargerScheduleAlarm.arm(this, s.enableMinutes, s.disableMinutes)
+        val next = ChargerSchedule.nextTransition(
+            Calendar.getInstance().let { it.get(Calendar.HOUR_OF_DAY) * 60 + it.get(Calendar.MINUTE) },
+            s.enableMinutes,
+            s.disableMinutes,
+        )
+        ChargerDebugLog.append(
+            "Schedule alarm armed for ${ChargerSchedule.formatMinutes(next)} (epoch $at)"
         )
     }
 
-    private fun nextTransitionEpoch(nextMinutesOfDay: Int): Long {
-        val cal = Calendar.getInstance()
-        val nowMinutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
-        if (nextMinutesOfDay <= nowMinutes) cal.add(Calendar.DAY_OF_YEAR, 1)
-        cal.set(Calendar.HOUR_OF_DAY, nextMinutesOfDay / 60)
-        cal.set(Calendar.MINUTE, nextMinutesOfDay % 60)
-        cal.set(Calendar.SECOND, 0)
-        cal.set(Calendar.MILLISECOND, 0)
-        return cal.timeInMillis
-    }
+    private fun nextTransitionEpoch(nextMinutesOfDay: Int): Long =
+        ChargerSchedule.epochAtMinutesOfDay(System.currentTimeMillis(), nextMinutesOfDay)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         intent?.let {
@@ -444,17 +650,20 @@ class VictronBleExporterService : Service() {
                 "START_TUNNEL" -> {
                     val token = it.getStringExtra("tunnel_token")
                     if (!token.isNullOrBlank()) {
+                        persistTunnelToken(token)
                         cloudflaredManager.startNamedTunnel(token) { status ->
                             updateNotification(status)
                         }
                     } else {
-                        // Quick tunnel fallback
+                        // Explicit quick-tunnel from the UI; do not steal a saved named token.
                         cloudflaredManager.startQuickTunnel(5338) { status ->
                             updateNotification(status)
                         }
                     }
                 }
                 "STOP_TUNNEL" -> cloudflaredManager.stop()
+                "START_SAVED_TUNNEL" -> startSavedTunnelNow()
+                "RESTART_SCAN" -> restartScan()
                 "ADD_KEY" -> {
                     val mac = it.getStringExtra("mac") ?: return@let
                     val key = it.getStringExtra("key") ?: return@let
@@ -475,6 +684,19 @@ class VictronBleExporterService : Service() {
                     val enableTime = it.getStringExtra("enable_time") ?: ChargerSchedule.DEFAULT_ENABLE
                     val disableTime = it.getStringExtra("disable_time") ?: ChargerSchedule.DEFAULT_DISABLE
                     saveChargerSchedule(mac, enabled, enableTime, disableTime)
+                }
+                ChargerScheduleAlarm.ACTION -> {
+                    lastScheduledMode = null
+                    lastScheduledAppliedAt = 0L
+                    restoreSavedTunnel()
+                    armScheduleAlarm()
+                    serviceScope.launch { enforceChargerSchedule() }
+                }
+                ExporterKeepAliveAlarm.ACTION -> {
+                    lastScheduledMode = null
+                    lastScheduledAppliedAt = 0L
+                    restoreSavedTunnel()
+                    serviceScope.launch { enforceChargerSchedule() }
                 }
                 "VOLTAGE_READ" -> {
                     val mac = it.getStringExtra("mac") ?: return@let
@@ -497,8 +719,109 @@ class VictronBleExporterService : Service() {
                 }
             }
         }
+        if (intent?.action == null) {
+            // Boot / sticky restart / Start Scan with no command: restore the named tunnel if it is down.
+            restoreSavedTunnel()
+        }
         updateNotification("Running")
+        ExporterKeepAliveAlarm.arm(this)
         return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.i(TAG, "Task removed — keeping exporter running")
+        try {
+            startForegroundService(Intent(this, VictronBleExporterService::class.java))
+        } catch (e: Exception) {
+            Log.w(TAG, "restart after task-removed failed", e)
+        }
+    }
+
+    private fun persistTunnelToken(token: String) {
+        try {
+            if (!::deviceRepository.isInitialized) {
+                deviceRepository = DeviceRepository(this)
+            }
+            deviceRepository.saveTunnelToken(token)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to persist tunnel token", e)
+        }
+    }
+
+    private fun savedTunnelToken(): String? = try {
+        if (!::deviceRepository.isInitialized) {
+            deviceRepository = DeviceRepository(this)
+        }
+        deviceRepository.getTunnelToken()
+    } catch (e: Exception) {
+        Log.w(TAG, "Failed to read persisted tunnel token", e)
+        null
+    }
+
+    /** Explicit start from the saved token — ignores a previous user Stop. */
+    private fun startSavedTunnelNow() {
+        val token = savedTunnelToken()
+        if (token.isNullOrBlank()) {
+            Log.w(TAG, "Remote named-tunnel start skipped — no token saved")
+            return
+        }
+        lastTunnelRestoreAt = System.currentTimeMillis()
+        Log.i(TAG, "Starting named tunnel from saved token")
+        AppLog.i("Starting named tunnel from saved token")
+        cloudflaredManager.startNamedTunnel(token) { status -> updateNotification(status) }
+    }
+
+    /** Starts the named tunnel from the persisted token; no-ops when already running, user-stopped, or none saved. */
+    private fun restoreSavedTunnel(): Boolean {
+        val alreadyRunning = ::cloudflaredManager.isInitialized && cloudflaredManager.isRunning()
+        val userStopped = ::cloudflaredManager.isInitialized && cloudflaredManager.wasManuallyStopped()
+        val token = try {
+            if (!::deviceRepository.isInitialized) {
+                deviceRepository = DeviceRepository(this)
+            }
+            deviceRepository.getTunnelToken()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to read persisted tunnel token", e)
+            null
+        }
+        val now = System.currentTimeMillis()
+        if (!ExporterKeepAlive.shouldRestoreNamedTunnel(alreadyRunning, token, userStopped, lastTunnelRestoreAt, now)) {
+            return alreadyRunning
+        }
+        lastTunnelRestoreAt = now
+        Log.i(TAG, "Restoring named tunnel from saved token")
+        AppLog.i("Restoring named tunnel from saved token")
+        cloudflaredManager.startNamedTunnel(token!!) { status -> updateNotification(status) }
+        return true
+    }
+
+    /** Restarts the BLE scan if Android dropped it without onScanFailed. */
+    private fun startScanWatchdog() {
+        serviceScope.launch {
+            while (isActive) {
+                try {
+                    if (ExporterKeepAlive.shouldRestartScan(lastScanResultAt, System.currentTimeMillis())) {
+                        Log.w(TAG, "No scan results for ${ExporterKeepAlive.SCAN_RESTART_AFTER_MS}ms — restarting BLE scan")
+                        AppLog.w("No scan results for ${ExporterKeepAlive.SCAN_RESTART_AFTER_MS}ms — restarting BLE scan")
+                        restartScan()
+                    }
+                    restoreSavedTunnel()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Scan watchdog tick failed", e)
+                }
+                delay(60_000)
+            }
+        }
+    }
+
+    private fun restartScan() {
+        try {
+            stopBleScan()
+        } catch (e: Exception) {
+            Log.w(TAG, "stopBleScan failed", e)
+        }
+        startBleScan()
     }
 
     private fun startBleScan() {
@@ -506,6 +829,8 @@ class VictronBleExporterService : Service() {
         val adapter = bluetoothManager.adapter
         if (adapter == null || !adapter.isEnabled) {
             Log.w(TAG, "Bluetooth not available or disabled")
+            AppLog.e("BLE unavailable/disabled — scan skipped")
+            Diagnostics.autoSend(this)
             return
         }
 
@@ -523,6 +848,8 @@ class VictronBleExporterService : Service() {
         scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 try {
+                    lastScanResultAt = System.currentTimeMillis()
+                    AppState.lastBleAdAt = lastScanResultAt
                     val device = result.device
                     val scanRecord = result.scanRecord ?: return
                     val mfgData = scanRecord.getManufacturerSpecificData(0x02E1) ?: return
@@ -556,7 +883,8 @@ class VictronBleExporterService : Service() {
                             recordType = recordType,
                             rssi = rssi,
                             hasKey = hasKey,
-                            parsed = parsed
+                            parsed = parsed,
+                            decryptFailed = hasKey && parsed == null
                         )
                     } catch (e: Exception) {
                         Log.w(TAG, "Failed to update discovered store", e)
@@ -578,15 +906,25 @@ class VictronBleExporterService : Service() {
             }
 
             override fun onScanFailed(errorCode: Int) {
-                Log.e(TAG, "BLE Scan failed: $errorCode")
+                Log.e(TAG, "BLE Scan failed: $errorCode — restarting scan")
+                AppLog.e("BLE scan failed: errorCode=$errorCode")
+                Diagnostics.autoSend(this@VictronBleExporterService)
+                lastScanResultAt = 0L
+                serviceScope.launch {
+                    delay(5_000)
+                    restartScan()
+                }
             }
         }
 
         try {
             bluetoothLeScanner?.startScan(listOf(scanFilter), scanSettings, scanCallback)
+            lastScanResultAt = System.currentTimeMillis()
             Log.i(TAG, "BLE scan started for Victron devices")
         } catch (e: SecurityException) {
             Log.e(TAG, "Missing BLE permission", e)
+            AppLog.e("BLE scan start blocked — permission missing")
+            Diagnostics.autoSend(this)
         }
     }
 
@@ -666,6 +1004,7 @@ class VictronBleExporterService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Log.i(TAG, "Service onDestroy")
+        AppLog.i("Service stopped")
         try { stopBleScan() } catch (e: Exception) { Log.w(TAG, "stopBleScan failed", e) }
         try {
             if (::prometheusExporter.isInitialized) prometheusExporter.stopServer()
@@ -687,8 +1026,61 @@ class VictronBleExporterService : Service() {
         } catch (e: Exception) {
             Log.w(TAG, "charger controller shutdown failed", e)
         }
+        try {
+            unregisterReceiver(unlockReceiver)
+        } catch (e: Exception) {
+            Log.w(TAG, "unlock receiver unregister failed", e)
+        }
         serviceScope.cancel()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+}
+
+/** Keep-alive / restore policy, kept Android-free so it can be unit-tested on the JVM. */
+internal object ExporterKeepAlive {
+    const val SCHEDULE_RETRY_MS = 60_000L
+    const val SCHEDULE_REENFORCE_MS = 600_000L
+    const val VOLTAGE_POLL_MS = 60_000L
+    const val VOLTAGE_POLL_BACKOFF_MS = 300_000L
+    const val VOLTAGE_FRESH_MS = 300_000L
+    const val SCAN_RESTART_AFTER_MS = 180_000L
+    const val TUNNEL_RESTART_AFTER_MS = 60_000L
+
+    fun shouldRestoreNamedTunnel(
+        alreadyRunning: Boolean,
+        savedToken: String?,
+        userStopped: Boolean = false,
+        lastRestartAt: Long = 0L,
+        now: Long = Long.MAX_VALUE,
+    ): Boolean {
+        if (userStopped || alreadyRunning || savedToken.isNullOrBlank()) return false
+        if (lastRestartAt > 0L && now - lastRestartAt < TUNNEL_RESTART_AFTER_MS) return false
+        return true
+    }
+
+    /** Stored charger MAC wins; otherwise the first live Instant Readout. */
+    fun scheduleTargetMac(stored: String?, liveMacs: List<String>): String? {
+        val saved = stored?.trim().orEmpty()
+        if (saved.isNotEmpty()) return saved
+        return liveMacs.firstOrNull { it.isNotBlank() }
+    }
+
+    /** Apply on a window change, or again every 10 minutes so a dropped write is retried. */
+    fun shouldApplySchedule(desiredOn: Boolean, lastAppliedOn: Boolean?, lastAppliedAt: Long, now: Long): Boolean {
+        if (lastAppliedOn != desiredOn) return true
+        if (lastAppliedAt <= 0L) return true
+        return now - lastAppliedAt >= SCHEDULE_REENFORCE_MS
+    }
+
+    fun voltagePollDue(now: Long, lastPollAt: Long, lastSuccessAt: Long, lastError: String?): Boolean {
+        val interval = if (lastError != null) VOLTAGE_POLL_BACKOFF_MS else VOLTAGE_POLL_MS
+        return now - maxOf(lastPollAt, lastSuccessAt) >= interval
+    }
+
+    fun voltageFresh(now: Long, updatedAt: Long): Boolean =
+        updatedAt > 0L && now - updatedAt < VOLTAGE_FRESH_MS
+
+    fun shouldRestartScan(lastScanResultAt: Long, now: Long): Boolean =
+        lastScanResultAt != 0L && now - lastScanResultAt >= SCAN_RESTART_AFTER_MS
 }

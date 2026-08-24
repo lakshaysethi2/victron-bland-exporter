@@ -2,23 +2,34 @@ package com.lakshaysethi.victronbleexporter.exporter
 
 import com.lakshaysethi.victronbleexporter.AppState
 import com.lakshaysethi.victronbleexporter.charger.ChargerProtocol
+import com.lakshaysethi.victronbleexporter.charger.ChargerSchedule
+import com.lakshaysethi.victronbleexporter.data.DeviceRepository
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
+import com.lakshaysethi.victronbleexporter.parser.ParsedDevice
+import com.lakshaysethi.victronbleexporter.parser.VictronParser
 import java.security.MessageDigest
 
 /**
  * HTTP surface for REMOTE charger control, served by [PrometheusExporter]
  * under `/charger*` and reachable from any browser through the Cloudflare
- * named tunnel (`https://mppt.lak.nz/charger`).
+ * named tunnel hostname or `/charger`.
  *
  * Routes:
- *   GET  /charger        -> mobile control page (shell; every API call inside
+ *   GET  / or /charger   -> mobile control page (shell; every API call inside
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
- *   GET  /charger/status -> JSON status snapshot (reuses AppState.chargerMode)
- *   POST /charger        -> JSON body {"action":"on"|"off"} flips the charger
+ *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status + app version + last GATT voltages + lastBleAdAt + overrideUntilText + exactAlarm + batteryIgnored); kicks a CHARGER_READ when mode is still unknown
+ *   POST /charger        -> JSON body {"action":"on"|"off"|"read", "mac"?: "AA:BB:..."} flips or reads the charger
+ *   POST /charger/schedule -> JSON {enabled, enable, disable, mac?} saves the daily window
+ *   POST /charger/key    -> JSON {mac, key} saves an Instant Readout key (never echoed)
+ *   POST /charger/tunnel -> JSON {token} saves + starts the named tunnel, or {action:"start"|"stop"} (token never echoed)
+ *   POST /charger/scan   -> restarts BLE scanning (no body)
  *   GET  /voltage        -> JSON voltage settings (auth required)
- *   POST /voltage        -> JSON {battery_voltage_setting, absorption_voltage, float_voltage}
+ *   POST /voltage        -> JSON {battery_voltage_setting, absorption_voltage, float_voltage, mac?}
  *                           writes the matching GATT registers (auth required; confirm in UI)
+ *
+ * Target MAC: optional body `mac` wins, then the stored charger MAC, then the
+ * first fresh Instant Readout device — so a downstairs MAC tap is not required.
  *
  * Auth: the secret set in the app's Remote Control settings must be sent as an
  * `X-Remote-Secret: <secret>` header (or `Authorization: Bearer <secret>`).
@@ -37,6 +48,12 @@ class RemoteChargerHttp(
     private val statusProvider: () -> ChargerStatusSnapshot,
     private val macProvider: () -> String?,
     private val commandSender: ChargerCommandSender,
+    private val scheduleSender: ScheduleCommandSender? = null,
+    private val voltageCommandSender: VoltageCommandSender? = null,
+    private val keySender: KeyCommandSender? = null,
+    private val readSender: ChargerReadSender? = null,
+    private val tunnelSender: TunnelCommandSender? = null,
+    private val scanSender: ScanCommandSender? = null,
 ) {
 
     /**
@@ -45,7 +62,7 @@ class RemoteChargerHttp(
      * (empty for GET). Pure logic — returns an [HttpResult] the server renders.
      */
     fun handle(uri: String, method: String, headers: Map<String, String>, body: String): HttpResult {
-        if (!uri.startsWith("/charger")) {
+        if (uri != "/" && !uri.startsWith("/charger") && uri != "/voltage") {
             return notFound()
         }
         val settings = settingsProvider()
@@ -56,15 +73,11 @@ class RemoteChargerHttp(
         // attach custom headers to a top-level navigation, so the page itself is
         // served without the secret. Everything functional on the page — status
         // and commands — still requires the secret below.
-        if (uri == "/charger" && method == "GET") {
+        // GET / is the named-host landing — same shell as /charger.
+        if ((uri == "/" || uri == "/charger") && method == "GET") {
             return HttpResult(200, MIME_HTML, CONTROL_PAGE)
         }
-        if (uri == "/voltage" && method == "GET" && headers.containsKey("accept") && headers["accept"]?.contains("text/html") == true) {
-            // Browser navigating to /voltage without API Accept still gets JSON unless they asked for html
-        }
-        // Serve the voltage HTML shell at GET /voltage when the request looks like a browser navigation
-        // (no X-Remote-Secret yet — same pattern as /charger shell). The JSON API at /voltage still
-        // requires auth; the shell is inert without it. Detect by Accept header containing text/html.
+        // Browser navigation cannot send X-Remote-Secret; serve the inert voltage shell the same way as /charger.
         val wantsHtml = (headers["accept"] ?: "").contains("text/html", ignoreCase = true)
         if (uri == "/voltage" && method == "GET" && wantsHtml && RemoteChargerAuth.extractSecret(headers) == null) {
             return HttpResult(200, MIME_HTML, VOLTAGE_PAGE)
@@ -79,13 +92,25 @@ class RemoteChargerHttp(
             )
         }
         return when {
-            uri == "/charger/status" && method == "GET" ->
-                HttpResult(200, MIME_JSON, statusProvider().toJson() + "\n")
+            uri == "/charger/status" && method == "GET" -> handleStatusGet()
             uri == "/charger" && method == "POST" -> handleCommand(body)
+            uri == "/charger/schedule" && method == "POST" -> handleSchedule(body)
+            uri == "/charger/key" && method == "POST" -> handleKey(body)
+            uri == "/charger/tunnel" && method == "POST" -> handleTunnel(body)
+            uri == "/charger/scan" && method == "POST" -> handleScan()
             uri == "/voltage" && method == "GET" -> handleVoltageGet()
             uri == "/voltage" && method == "POST" -> handleVoltagePost(body)
             else -> notFound()
         }
+    }
+
+    /** Snapshot first; if the phone just rebooted, kick one GATT read so the page is not stuck on Unknown. */
+    private fun handleStatusGet(): HttpResult {
+        val snap = statusProvider()
+        if (snap.mode == null && !snap.busy) {
+            macFromRequest("")?.let { readSender?.readCharger(it) }
+        }
+        return HttpResult(200, MIME_JSON, snap.toJson() + "\n")
     }
 
     private fun handleCommand(body: String): HttpResult {
@@ -94,15 +119,18 @@ class RemoteChargerHttp(
             return HttpResult(
                 statusCode = 400,
                 mimeType = MIME_JSON,
-                body = "{\"error\":\"body must be JSON: {\\\"action\\\": \\\"on\\\" | \\\"off\\\"}\"}\n",
+                body = "{\"error\":\"body must be JSON: {\\\"action\\\": \\\"on\\\" | \\\"off\\\" | \\\"read\\\"}\"}\n",
             )
         }
-        val mac = macProvider()
-        if (mac.isNullOrBlank()) {
+        val mac = macFromRequest(body) ?: return missingMac(body)
+        if (action == "read") {
+            val sender = readSender
+                ?: return HttpResult(503, MIME_JSON, "{\"error\":\"charger read unavailable on this build\"}\n")
+            sender.readCharger(mac)
             return HttpResult(
-                statusCode = 503,
+                statusCode = 202,
                 mimeType = MIME_JSON,
-                body = "{\"error\":\"no charger configured — set a charger device MAC in the app first\"}\n",
+                body = "{\"accepted\":true,\"action\":\"read\",\"mac\":\"${RemoteChargerHttpJson.escape(mac)}\"}\n",
             )
         }
         val enable = action == "on"
@@ -114,7 +142,105 @@ class RemoteChargerHttp(
         )
     }
 
+    private fun handleSchedule(body: String): HttpResult {
+        val parsed = parseSchedule(body)
+        if (parsed == null) {
+            return HttpResult(
+                statusCode = 400,
+                mimeType = MIME_JSON,
+                body = "{\"error\":\"body must be JSON: {\\\"enabled\\\":true,\\\"enable\\\":\\\"HH:mm\\\",\\\"disable\\\":\\\"HH:mm\\\"}\"}\n",
+            )
+        }
+        val sender = scheduleSender
+            ?: return HttpResult(503, MIME_JSON, "{\"error\":\"schedule control unavailable on this build\"}\n")
+        val mac = macFromRequest(body) ?: return missingMac(body)
+        sender.saveSchedule(parsed.enabled, parsed.enable, parsed.disable, mac)
+        return HttpResult(
+            statusCode = 202,
+            mimeType = MIME_JSON,
+            body = "{\"accepted\":true,\"enabled\":${parsed.enabled},\"enable\":\"${RemoteChargerHttpJson.escape(parsed.enable)}\",\"disable\":\"${RemoteChargerHttpJson.escape(parsed.disable)}\"}\n",
+        )
+    }
+
+    private fun handleKey(body: String): HttpResult {
+        val sender = keySender
+            ?: return HttpResult(503, MIME_JSON, "{\"error\":\"key save unavailable on this build\"}\n")
+        val macRaw = MAC_FIELD.find(body.trim())?.groupValues?.get(1)?.trim()
+        val keyRaw = KEY_FIELD.find(body.trim())?.groupValues?.get(1)?.trim()
+        if (macRaw == null || keyRaw == null) {
+            return HttpResult(
+                400, MIME_JSON,
+                "{\"error\":\"body must be JSON: {\\\"mac\\\":\\\"AA:BB:...\\\",\\\"key\\\":\\\"32 hex chars\\\"}\"}\n",
+            )
+        }
+        val mac = DeviceRepository.normalizeMacInput(macRaw)
+        val key = DeviceRepository.normalizeKeyInput(keyRaw)
+        if (!DeviceRepository.isValidMac(mac)) {
+            return HttpResult(400, MIME_JSON, "{\"error\":\"mac must look like AA:BB:CC:DD:EE:FF\"}\n")
+        }
+        if (!DeviceRepository.isValidKey(key)) {
+            return HttpResult(400, MIME_JSON, "{\"error\":\"key must be 32 hex characters\"}\n")
+        }
+        sender.saveKey(mac, key)
+        return HttpResult(
+            202, MIME_JSON,
+            "{\"accepted\":true,\"mac\":\"${RemoteChargerHttpJson.escape(mac)}\"}\n",
+        )
+    }
+
+    private fun handleTunnel(body: String): HttpResult {
+        val sender = tunnelSender
+            ?: return HttpResult(503, MIME_JSON, "{\"error\":\"tunnel control unavailable on this build\"}\n")
+        val token = TOKEN_FIELD.find(body.trim())?.groupValues?.get(1)?.trim().orEmpty()
+        val action = TUNNEL_ACTION.find(body.trim())?.groupValues?.get(1)?.lowercase()
+        if (token.isNotEmpty()) {
+            if (token.length < 20) {
+                return HttpResult(400, MIME_JSON, "{\"error\":\"token looks too short for a named-tunnel token\"}\n")
+            }
+            sender.start(token)
+            return HttpResult(202, MIME_JSON, "{\"accepted\":true,\"action\":\"start\"}\n")
+        }
+        when (action) {
+            "stop" -> {
+                sender.stop()
+                return HttpResult(202, MIME_JSON, "{\"accepted\":true,\"action\":\"stop\"}\n")
+            }
+            "start" -> {
+                if (!statusProvider().tunnelHasToken) {
+                    return HttpResult(400, MIME_JSON, "{\"error\":\"no named-tunnel token saved — paste one\"}\n")
+                }
+                sender.start(null)
+                return HttpResult(202, MIME_JSON, "{\"accepted\":true,\"action\":\"start\"}\n")
+            }
+            else -> return HttpResult(
+                400, MIME_JSON,
+                "{\"error\":\"body must be JSON: {\\\"token\\\":\\\"...\\\"} or {\\\"action\\\":\\\"start\\\"|\\\"stop\\\"}\"}\n",
+            )
+        }
+    }
+
+    private fun handleScan(): HttpResult {
+        val sender = scanSender
+            ?: return HttpResult(503, MIME_JSON, "{\"error\":\"scan restart unavailable on this build\"}\n")
+        sender.restartScan()
+        return HttpResult(202, MIME_JSON, "{\"accepted\":true,\"action\":\"scan\"}\n")
+    }
+
+    private data class ScheduleBody(val enabled: Boolean, val enable: String, val disable: String)
+
+    private fun parseSchedule(body: String): ScheduleBody? {
+        val trimmed = body.trim()
+        val enabled = ENABLED_REGEX.find(trimmed)?.groupValues?.get(1)?.lowercase() ?: return null
+        val enable = ENABLE_TIME_REGEX.find(trimmed)?.groupValues?.get(1)?.trim() ?: return null
+        val disable = DISABLE_TIME_REGEX.find(trimmed)?.groupValues?.get(1)?.trim() ?: return null
+        if (!ChargerSchedule.isValidTime(enable) || !ChargerSchedule.isValidTime(disable)) return null
+        return ScheduleBody(enabled == "true", enable, disable)
+    }
+
     private fun handleVoltageGet(): HttpResult {
+        if (AppState.voltageSettings == null) {
+            macFromRequest("")?.let { voltageCommandSender?.requestVoltageRead(it) }
+        }
         val vs = AppState.voltageSettings
         val body = buildString {
             append("{")
@@ -123,6 +249,7 @@ class RemoteChargerHttp(
             append(",\"float_voltage\":").append(vs?.floatVolts?.toString() ?: "null")
             append(",\"equalisation_voltage\":").append(vs?.equalisationVolts?.toString() ?: "null")
             append(",\"charger_voltage\":").append(vs?.chargerVolts?.toString() ?: "null")
+            append(",\"panel_voltage\":").append(vs?.panelVolts?.toString() ?: "null")
             append(",\"mac\":").append(if (AppState.chargerMac.isNullOrBlank()) "null" else "\"${RemoteChargerHttpJson.escape(AppState.chargerMac!!)}\"")
             append(",\"updatedAt\":").append(AppState.voltageSettingsUpdatedAt)
             append(",\"lastError\":").append(if (AppState.voltageSettingsLastError == null) "null" else "\"${RemoteChargerHttpJson.escape(AppState.voltageSettingsLastError!!)}\"")
@@ -133,10 +260,7 @@ class RemoteChargerHttp(
     }
 
     private fun handleVoltagePost(body: String): HttpResult {
-        val mac = macProvider()
-        if (mac.isNullOrBlank()) {
-            return HttpResult(503, MIME_JSON, "{\"error\":\"no charger configured — set a charger device MAC in the app first\"}\n")
-        }
+        val mac = macFromRequest(body) ?: return missingMac(body)
         val parsed = parseVoltageBody(body)
         if (parsed == null) {
             return HttpResult(
@@ -144,13 +268,11 @@ class RemoteChargerHttp(
                 "{\"error\":\"body must be JSON with at least one of battery_voltage_setting (12/24/48), absorption_voltage, float_voltage\"}\n",
             )
         }
+        val sender = voltageCommandSender
+            ?: return HttpResult(503, MIME_JSON, "{\"error\":\"voltage control unavailable on this build\"}\n")
         val (battSetting, absVolts, floatVolts) = parsed
-        // Split into one or two service intents (one BLE session per op on the existing controller).
-        if (battSetting != null) voltageCommandSender?.sendBatteryVoltageSetting(mac, battSetting)
-        if (absVolts != null || floatVolts != null) voltageCommandSender?.sendChargingVoltages(mac, absVolts, floatVolts)
-        if (voltageCommandSender == null) {
-            return HttpResult(503, MIME_JSON, "{\"error\":\"voltage control unavailable on this build\"}\n")
-        }
+        if (battSetting != null) sender.sendBatteryVoltageSetting(mac, battSetting)
+        if (absVolts != null || floatVolts != null) sender.sendChargingVoltages(mac, absVolts, floatVolts)
         return HttpResult(202, MIME_JSON, "{\"accepted\":true,\"mac\":\"${RemoteChargerHttpJson.escape(mac)}\"}\n")
     }
 
@@ -170,8 +292,26 @@ class RemoteChargerHttp(
         return Triple(batt, abs, fl)
     }
 
-    private var voltageCommandSender: VoltageCommandSender? = null
-    fun attachVoltageSender(sender: VoltageCommandSender) { voltageCommandSender = sender }
+    /** Body `mac` wins, then the stored target, then the first live Instant Readout. */
+    private fun macFromRequest(body: String): String? {
+        val raw = MAC_FIELD.find(body.trim())?.groupValues?.get(1)?.trim()
+        if (raw != null) return raw.takeIf { MAC_SHAPE.matches(it) }?.uppercase()
+        return macProvider()?.takeIf { it.isNotBlank() }
+            ?: statusProvider().live.firstOrNull()?.mac?.takeIf { it.isNotBlank() }
+    }
+
+    private fun missingMac(body: String): HttpResult {
+        val explicit = MAC_FIELD.find(body.trim()) != null
+        return HttpResult(
+            statusCode = if (explicit) 400 else 503,
+            mimeType = MIME_JSON,
+            body = if (explicit) {
+                "{\"error\":\"mac must look like AA:BB:CC:DD:EE:FF\"}\n"
+            } else {
+                "{\"error\":\"no charger configured — pick a live device or set a charger MAC in the app\"}\n"
+            },
+        )
+    }
 
     private fun notFound() = HttpResult(404, MIME_PLAINTEXT, "Not Found\n")
 
@@ -180,9 +320,17 @@ class RemoteChargerHttp(
         const val MIME_JSON = "application/json; charset=utf-8"
         const val MIME_PLAINTEXT = "text/plain; charset=utf-8"
 
-        val ACTION_REGEX = Regex("""(?s)"action"\s*:\s*"(on|off)"""", RegexOption.IGNORE_CASE)
+        val ACTION_REGEX = Regex("""(?s)"action"\s*:\s*"(on|off|read)"""", RegexOption.IGNORE_CASE)
+        val ENABLED_REGEX = Regex("\"enabled\"\\s*:\\s*(true|false)", RegexOption.IGNORE_CASE)
+        val ENABLE_TIME_REGEX = Regex("\"enable\"\\s*:\\s*\"([^\"]+)\"")
+        val DISABLE_TIME_REGEX = Regex("\"disable\"\\s*:\\s*\"([^\"]+)\"")
+        val MAC_FIELD = Regex("\"mac\"\\s*:\\s*\"([^\"]+)\"")
+        val KEY_FIELD = Regex("\"key\"\\s*:\\s*\"([^\"]+)\"")
+        val TOKEN_FIELD = Regex("\"token\"\\s*:\\s*\"([^\"]+)\"")
+        val TUNNEL_ACTION = Regex("\"action\"\\s*:\\s*\"(start|stop)\"", RegexOption.IGNORE_CASE)
+        val MAC_SHAPE = Regex("(?i)^([0-9A-F]{2}:){5}[0-9A-F]{2}$")
 
-        /** Tiny JSON field extractor — the API accepts exactly `{"action":"on"|"off"}`. */
+        /** Tiny JSON field extractor — the API accepts `{"action":"on"|"off"|"read"}`. */
         fun parseAction(body: String): String? =
             ACTION_REGEX.find(body.trim())?.groupValues?.get(1)?.lowercase()
     }
@@ -223,11 +371,110 @@ fun interface ChargerCommandSender {
     fun sendChargerCommand(enable: Boolean, mac: String)
 }
 
+/** Reads charger mode over GATT. Production: CHARGER_READ intent to the service. */
+fun interface ChargerReadSender {
+    fun readCharger(mac: String)
+}
+
+/** Saves the daily enable/disable window. Production: CHARGER_SCHEDULE_SAVE intent. */
+fun interface ScheduleCommandSender {
+    fun saveSchedule(enabled: Boolean, enableTime: String, disableTime: String, mac: String)
+}
+
 /** Voltage settings commands (battery system voltage + charge voltages). */
 interface VoltageCommandSender {
     fun sendBatteryVoltageSetting(mac: String, volts: Int)
     fun sendChargingVoltages(mac: String, absorptionVolts: Double?, floatVolts: Double?)
     fun requestVoltageRead(mac: String)
+}
+
+/** Saves an Instant Readout encryption key. Production: ADD_KEY intent. */
+fun interface KeyCommandSender {
+    fun saveKey(mac: String, key: String)
+}
+
+/** Starts or stops the named Cloudflare tunnel. Production: START_TUNNEL / STOP_TUNNEL / START_SAVED_TUNNEL. */
+interface TunnelCommandSender {
+    fun start(token: String?)
+    fun stop()
+}
+
+/** Restarts BLE scanning. Production: RESTART_SCAN intent. */
+fun interface ScanCommandSender {
+    fun restartScan()
+}
+
+/** Recently seen BLE advertisement — never includes the encryption key. */
+data class SightedDevice(
+    val mac: String,
+    val model: String,
+    val hasKey: Boolean,
+    val wrongKey: Boolean,
+    val lastSeen: Long,
+    val rssi: Int,
+) {
+    fun toJson(): String = buildString {
+        append("{\"mac\":\"${RemoteChargerHttpJson.escape(mac)}\"")
+        append(",\"model\":\"${RemoteChargerHttpJson.escape(model)}\"")
+        append(",\"hasKey\":").append(hasKey)
+        append(",\"wrongKey\":").append(wrongKey)
+        append(",\"lastSeen\":").append(lastSeen)
+        append(",\"rssi\":").append(rssi)
+        append("}")
+    }
+
+    companion object {
+        fun fromStore(now: Long = System.currentTimeMillis()): List<SightedDevice> =
+            DiscoveredDevicesStore.getSortedByRssi()
+                .filter { it.lastSeenTimestamp > 0L && now - it.lastSeenTimestamp < MetricsStore.FRESH_MS }
+                .map {
+                    SightedDevice(
+                        mac = it.mac,
+                        model = it.modelName,
+                        hasKey = it.hasKey,
+                        wrongKey = it.wrongKey,
+                        lastSeen = it.lastSeenTimestamp,
+                        rssi = it.rssi,
+                    )
+                }
+    }
+}
+
+/** Fresh Instant Readout row for the remote page. */
+data class LiveReadout(
+    val mac: String,
+    val model: String,
+    val solarPowerW: Number?,
+    val batteryVoltage: Number?,
+    val batteryCurrent: Number?,
+    val socPercent: Number?,
+    val lastSeen: Long,
+) {
+    fun toJson(): String = buildString {
+        append("{\"mac\":\"${RemoteChargerHttpJson.escape(mac)}\"")
+        append(",\"model\":\"${RemoteChargerHttpJson.escape(model)}\"")
+        append(",\"solarPowerW\":").append(solarPowerW ?: "null")
+        append(",\"batteryVoltage\":").append(batteryVoltage ?: "null")
+        append(",\"batteryCurrent\":").append(batteryCurrent ?: "null")
+        append(",\"socPercent\":").append(socPercent ?: "null")
+        append(",\"lastSeen\":").append(lastSeen)
+        append("}")
+    }
+
+    companion object {
+        fun fromDevice(device: ParsedDevice): LiveReadout = LiveReadout(
+            mac = device.mac,
+            model = VictronParser.getModelName(device.modelId),
+            solarPowerW = device.data["solar_power_w"] as? Number,
+            batteryVoltage = device.data["battery_voltage"] as? Number,
+            batteryCurrent = device.data["battery_current"] as? Number,
+            socPercent = device.data["soc_percent"] as? Number,
+            lastSeen = device.lastSeen,
+        )
+
+        fun fromFreshMetrics(now: Long = System.currentTimeMillis()): List<LiveReadout> =
+            MetricsStore.getFresh(now).values.sortedBy { it.mac }.map { fromDevice(it) }
+    }
 }
 
 /** Immutable status snapshot for the web UI. Reuses the app's charger state. */
@@ -239,8 +486,35 @@ data class ChargerStatusSnapshot(
     val lastError: String?,
     val overrideUntil: Long,
     val stateUpdatedAt: Long,
+    val scheduleEnabled: Boolean = false,
+    val enableTime: String = ChargerSchedule.DEFAULT_ENABLE,
+    val disableTime: String = ChargerSchedule.DEFAULT_DISABLE,
+    val live: List<LiveReadout> = emptyList(),
+    val sighted: List<SightedDevice> = emptyList(),
+    val debug: List<String> = emptyList(),
+    val phoneTime: String = "",
+    val phoneZone: String = "",
+    val scheduleWantsOn: Boolean = false,
+    val nextTransition: String = "",
+    val tunnelStatus: String = "",
+    val tunnelUrl: String? = null,
+    val tunnelHasToken: Boolean = false,
+    val appVersion: String = "",
+    val versionCode: Int = 0,
+    val batteryVoltageSetting: Int? = null,
+    val absorptionVoltage: Double? = null,
+    val floatVoltage: Double? = null,
+    val chargerVoltage: Double? = null,
+    val panelVoltage: Double? = null,
+    val lastBleAdAt: Long = 0L,
+    val exactAlarm: Boolean = false,
+    val batteryIgnored: Boolean = false,
 ) {
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
+
+    /** Phone-local HH:mm while a manual on/off is pausing the daily window; empty otherwise. */
+    fun overrideUntilText(now: Long = System.currentTimeMillis()): String =
+        if (overrideUntil > now) java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(overrideUntil)) else ""
 
     fun toJson(): String = buildString {
         append("{\"mode\":").append(if (mode == null) "null" else "\"${RemoteChargerHttpJson.escape(modeText)}\"")
@@ -250,20 +524,74 @@ data class ChargerStatusSnapshot(
         append(",\"lastAction\":\"${RemoteChargerHttpJson.escape(lastAction)}\"")
         append(",\"lastError\":").append(if (lastError == null) "null" else "\"${RemoteChargerHttpJson.escape(lastError)}\"")
         append(",\"overrideUntil\":").append(overrideUntil)
+        append(",\"overrideUntilText\":\"${RemoteChargerHttpJson.escape(overrideUntilText())}\"")
         append(",\"stateUpdatedAt\":").append(stateUpdatedAt)
-        append("}")
+        append(",\"scheduleEnabled\":").append(scheduleEnabled)
+        append(",\"enableTime\":\"${RemoteChargerHttpJson.escape(enableTime)}\"")
+        append(",\"disableTime\":\"${RemoteChargerHttpJson.escape(disableTime)}\"")
+        append(",\"phoneTime\":\"${RemoteChargerHttpJson.escape(phoneTime)}\"")
+        append(",\"phoneZone\":\"${RemoteChargerHttpJson.escape(phoneZone)}\"")
+        append(",\"scheduleWantsOn\":").append(scheduleWantsOn)
+        append(",\"nextTransition\":\"${RemoteChargerHttpJson.escape(nextTransition)}\"")
+        append(",\"tunnelStatus\":\"${RemoteChargerHttpJson.escape(tunnelStatus)}\"")
+        append(",\"tunnelHasToken\":").append(tunnelHasToken)
+        append(",\"tunnelUrl\":").append(
+            if (tunnelUrl.isNullOrBlank()) "null" else "\"${RemoteChargerHttpJson.escape(tunnelUrl)}\"",
+        )
+        append(",\"appVersion\":\"${RemoteChargerHttpJson.escape(appVersion)}\"")
+        append(",\"versionCode\":").append(versionCode)
+        append(",\"batteryVoltageSetting\":").append(batteryVoltageSetting ?: "null")
+        append(",\"absorptionVoltage\":").append(absorptionVoltage ?: "null")
+        append(",\"floatVoltage\":").append(floatVoltage ?: "null")
+        append(",\"chargerVoltage\":").append(chargerVoltage ?: "null")
+        append(",\"panelVoltage\":").append(panelVoltage ?: "null")
+        append(",\"lastBleAdAt\":").append(lastBleAdAt)
+        append(",\"exactAlarm\":").append(exactAlarm)
+        append(",\"batteryIgnored\":").append(batteryIgnored)
+        append(",\"live\":[")
+        live.forEachIndexed { i, row ->
+            if (i > 0) append(",")
+            append(row.toJson())
+        }
+        append("],\"sighted\":[")
+        sighted.forEachIndexed { i, row ->
+            if (i > 0) append(",")
+            append(row.toJson())
+        }
+        append("],\"debug\":[")
+        debug.forEachIndexed { i, line ->
+            if (i > 0) append(",")
+            append("\"${RemoteChargerHttpJson.escape(line)}\"")
+        }
+        append("]}")
     }
 
     companion object {
-        fun fromAppState(): ChargerStatusSnapshot = ChargerStatusSnapshot(
-            mode = AppState.chargerMode,
-            mac = AppState.chargerMac,
-            busy = AppState.chargerBusy,
-            lastAction = AppState.chargerLastAction,
-            lastError = AppState.chargerLastError,
-            overrideUntil = AppState.chargerOverrideUntil,
-            stateUpdatedAt = AppState.chargerStateUpdatedAt,
-        )
+        const val REMOTE_DEBUG_LINES = 20
+
+        fun fromAppState(): ChargerStatusSnapshot {
+            val clock = ChargerSchedule.phoneClock()
+            val vs = AppState.voltageSettings
+            return ChargerStatusSnapshot(
+                mode = AppState.chargerMode,
+                mac = AppState.chargerMac,
+                busy = AppState.chargerBusy,
+                lastAction = AppState.chargerLastAction,
+                lastError = AppState.chargerLastError,
+                overrideUntil = AppState.chargerOverrideUntil,
+                stateUpdatedAt = AppState.chargerStateUpdatedAt,
+                phoneTime = clock.first,
+                phoneZone = clock.second,
+                tunnelStatus = AppState.tunnelStatus,
+                tunnelUrl = AppState.tunnelUrl,
+                batteryVoltageSetting = vs?.batteryVoltageSetting,
+                absorptionVoltage = vs?.absorptionVolts,
+                floatVoltage = vs?.floatVolts,
+                chargerVoltage = vs?.chargerVolts,
+                panelVoltage = vs?.panelVolts,
+                lastBleAdAt = AppState.lastBleAdAt,
+            )
+        }
     }
 }
 
@@ -334,7 +662,7 @@ private val VOLTAGE_PAGE: String = """
   var kv=document.getElementById("kv"), err=document.getElementById("err"), secretInput=document.getElementById("secret");
   function setErr(t){err.textContent=t||"";}
   function api(path, opts){opts=opts||{}; opts.headers=Object.assign({"X-Remote-Secret":secret}, opts.headers||{}); return fetch(path, opts).then(function(r){ if(r.status===401){ secret=null; try{sessionStorage.removeItem(KEY);}catch(e){} setErr("Wrong secret — enter it again."); } return r; }); }
-  function load(){ if(!secret){ kv.textContent="Enter the remote secret to unlock."; return; } setErr(""); api("/voltage").then(function(r){return r.json().then(function(d){return {r:r,d:d};});}).then(function(x){ if(x.r.status===401) return; if(x.r.ok){ var d=x.d; kv.textContent="Battery: "+(d.battery_voltage_setting!=null?d.battery_voltage_setting+" V":"—")+"  •  Abs: "+(d.absorption_voltage!=null?d.absorption_voltage+" V":"—")+"  •  Float: "+(d.float_voltage!=null?d.float_voltage+" V":"—")+(d.charger_voltage!=null?"  •  Live "+d.charger_voltage+" V":""); } else setErr(x.d.error||("Status "+x.r.status)); }).catch(function(){ setErr("Can't reach the app."); }); }
+  function load(){ if(!secret){ kv.textContent="Enter the remote secret to unlock."; return; } setErr(""); api("/voltage").then(function(r){return r.json().then(function(d){return {r:r,d:d};});}).then(function(x){ if(x.r.status===401) return; if(x.r.ok){ var d=x.d; kv.textContent="Battery: "+(d.battery_voltage_setting!=null?d.battery_voltage_setting+" V":"—")+"  •  Abs: "+(d.absorption_voltage!=null?d.absorption_voltage+" V":"—")+"  •  Float: "+(d.float_voltage!=null?d.float_voltage+" V":"—")+(d.charger_voltage!=null?"  •  Live "+d.charger_voltage+" V":"")+(d.panel_voltage!=null?"  •  Panel "+d.panel_voltage+" V":""); } else setErr(x.d.error||("Status "+x.r.status)); }).catch(function(){ setErr("Can't reach the app."); }); }
   function post(body){ if(!secret) return; setErr(""); api("/voltage",{method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)}).then(function(r){return r.json().then(function(d){return {r:r,d:d};});}).then(function(x){ if(x.r.status===401) return; if(!x.r.ok) setErr(x.d.error||("Status "+x.r.status)); else setTimeout(load, 1500); }).catch(function(){ setErr("Request failed."); }); }
   document.getElementById("btnUnlock").addEventListener("click", function(){ var v=secretInput.value.trim(); if(!v) return; secret=v; try{sessionStorage.setItem(KEY,v);}catch(e){} secretInput.value=""; load(); });
   secretInput.addEventListener("keydown", function(ev){ if(ev.key==="Enter") document.getElementById("btnUnlock").click(); });
@@ -371,12 +699,16 @@ private val CONTROL_PAGE: String = """
   .status .label { font-size: 12px; color: #8fa3bf; }
   .status .value { font-size: 20px; font-weight: 700; }
   .status .meta { font-size: 12px; color: #8fa3bf; margin-top: 3px; line-height: 1.4; }
+  #dbg { margin: 0; max-height: 160px; overflow: auto; white-space: pre-wrap; word-break: break-word; font: 11px/1.4 ui-monospace, monospace; color: #8fa3bf; }
+  #live div[data-mac] { cursor: pointer; padding: 4px 0; }
+  #live div.sel { color: #e6edf7; }
   .btn { display: block; width: 100%; border: none; border-radius: 12px; padding: 16px; font-size: 17px; font-weight: 700; color: #0b1220; margin-bottom: 10px; cursor: pointer; }
   .btn:disabled { opacity: .45; }
   .btn.on { background: #22c55e; }
   .btn.off { background: #ef4444; }
   .btn.small { background: #24344d; color: #e6edf7; font-weight: 600; padding: 12px; font-size: 15px; }
-  input[type=password] { width: 100%; padding: 14px; border-radius: 12px; border: 1px solid #24344d; background: #0d1626; color: #e6edf7; font-size: 16px; margin-bottom: 10px; }
+  input[type=password], input[type=text] { width: 100%; padding: 14px; border-radius: 12px; border: 1px solid #24344d; background: #0d1626; color: #e6edf7; font-size: 16px; margin-bottom: 10px; }
+  .row { display: flex; gap: 8px; }
   .err { color: #f87171; font-size: 13px; margin: 8px 0; min-height: 18px; }
   .hint { color: #8fa3bf; font-size: 12px; line-height: 1.5; }
   @keyframes pulse { 50% { opacity: .4; } }
@@ -385,7 +717,7 @@ private val CONTROL_PAGE: String = """
 <body>
 <div class="card">
   <h1>MPPT Charger</h1>
-  <div class="sub">Remote enable / disable</div>
+  <div class="sub">Remote enable / disable — tap a live device to target it</div>
   <div class="status">
     <div class="dot" id="dot"></div>
     <div class="txt">
@@ -394,27 +726,72 @@ private val CONTROL_PAGE: String = """
       <div class="meta" id="meta"></div>
     </div>
   </div>
+  <div class="status" id="liveBox" style="display:block">
+    <div class="txt">
+      <div class="label">Live Instant Readout</div>
+      <div class="meta" id="live">No fresh advertisement</div>
+    </div>
+  </div>
+  <div class="status">
+    <div class="txt">
+      <div class="label">Charger log</div>
+      <pre id="dbg">No charger log yet</pre>
+    </div>
+  </div>
   <div class="err" id="err"></div>
   <input type="password" id="secret" placeholder="Remote secret" autocomplete="off" autocapitalize="off" spellcheck="false">
   <button class="btn small" id="btnUnlock">Unlock</button>
   <button class="btn on" id="btnOn" disabled>ENABLE CHARGER</button>
   <button class="btn off" id="btnOff" disabled>DISABLE CHARGER</button>
+  <button class="btn small" id="btnRead" disabled>Read state</button>
+  <button class="btn small" id="btnScan" disabled>Restart BLE scan</button>
+  <div class="sub" style="margin:14px 0 8px">Daily schedule (phone clock below)</div>
+  <label class="hint"><input type="checkbox" id="schedOn"> Enforce window</label>
+  <div class="row"><input type="text" id="enTime" placeholder="ON 08:30" inputmode="numeric"><input type="text" id="disTime" placeholder="OFF 18:00" inputmode="numeric"></div>
+  <button class="btn small" id="btnSched" disabled>Save schedule</button>
+  <button class="btn small" id="btnResume" disabled>Resume schedule</button>
+  <div class="sub" style="margin:14px 0 8px">Instant Readout key (VictronConnect → Product info)</div>
+  <input type="text" id="keyMac" placeholder="MAC AA:BB:..." autocapitalize="characters" autocomplete="off" spellcheck="false">
+  <input type="password" id="keyHex" placeholder="32-char hex key" autocomplete="off" spellcheck="false">
+  <button class="btn small" id="btnKey" disabled>Save key</button>
+  <div class="sub" style="margin:14px 0 8px">Named Cloudflare tunnel (LAN can restore the public bridge)</div>
+  <input type="password" id="tunToken" placeholder="Named-tunnel token" autocomplete="off" spellcheck="false">
+  <button class="btn small" id="btnTunSave" disabled>Save + start named</button>
+  <button class="btn small" id="btnTunStart" disabled>Start saved tunnel</button>
+  <button class="btn small" id="btnTunStop" disabled>Stop tunnel</button>
   <button class="btn small" id="btnRefresh">Refresh</button>
+  <div class="hint"><a href="/voltage" style="color:#8fa3bf">Voltage settings</a></div>
   <div class="hint">The secret is stored only in this browser session and sent only in a request header &mdash; never in the URL.</div>
 </div>
 <script>
 (function () {
   var KEY = "mppt_remote_secret";
   var secret = null;
+  var selectedMac = null;
+  var schedFilled = false;
   try { secret = sessionStorage.getItem(KEY); } catch (e) {}
   var dot = document.getElementById("dot"), state = document.getElementById("state"),
       meta = document.getElementById("meta"), err = document.getElementById("err"),
       btnOn = document.getElementById("btnOn"), btnOff = document.getElementById("btnOff"),
       btnRefresh = document.getElementById("btnRefresh"),
       btnUnlock = document.getElementById("btnUnlock"),
+      btnRead = document.getElementById("btnRead"),
+      btnSched = document.getElementById("btnSched"),
+      btnKey = document.getElementById("btnKey"),
+      btnTunSave = document.getElementById("btnTunSave"),
+      btnTunStart = document.getElementById("btnTunStart"),
+      btnTunStop = document.getElementById("btnTunStop"),
+      btnScan = document.getElementById("btnScan"),
+      btnResume = document.getElementById("btnResume"),
+      tunToken = document.getElementById("tunToken"),
+      keyMac = document.getElementById("keyMac"),
+      keyHex = document.getElementById("keyHex"),
+      schedOn = document.getElementById("schedOn"),
+      enTime = document.getElementById("enTime"),
+      disTime = document.getElementById("disTime"),
       secretInput = document.getElementById("secret");
   function setErr(t) { err.textContent = t || ""; }
-  function setBusy(b) { btnOn.disabled = b; btnOff.disabled = b; if (b) { dot.className = "dot busy"; } }
+  function setBusy(b) { btnOn.disabled = b; btnOff.disabled = b; btnRead.disabled = b; btnScan.disabled = b; btnSched.disabled = b; btnResume.disabled = b; btnKey.disabled = b; btnTunSave.disabled = b; btnTunStart.disabled = b; btnTunStop.disabled = b; if (b) { dot.className = "dot busy"; } }
   function api(path, opts) {
     opts = opts || {};
     opts.headers = Object.assign({ "X-Remote-Secret": secret }, opts.headers || {});
@@ -436,7 +813,78 @@ private val CONTROL_PAGE: String = """
     if (data.busy) parts.push("working\u2026");
     if (data.lastAction) parts.push(data.lastAction);
     if (data.lastError) parts.push(data.lastError);
+    if (data.scheduleEnabled) {
+      parts.push("schedule " + (data.enableTime || "?") + "-" + (data.disableTime || "?"));
+      parts.push("window " + (data.scheduleWantsOn ? "ON" : "OFF") + (data.nextTransition ? " until " + data.nextTransition : ""));
+      parts.push(data.exactAlarm ? "exact alarm" : "inexact alarm (may miss 08:30/18:00)");
+    }
+    parts.push(data.batteryIgnored ? "battery unrestricted" : "battery restricted (OEM may kill overnight)");
+    if (data.overrideUntilText) parts.push("manual override until " + data.overrideUntilText + " (Resume schedule to hand back to the window)");
+    if (data.phoneTime) parts.push("phone " + data.phoneTime + (data.phoneZone ? " " + data.phoneZone : ""));
+    if (data.tunnelStatus) parts.push("tunnel " + data.tunnelStatus);
+    if (data.tunnelUrl) parts.push(data.tunnelUrl);
+    if (data.tunnelHasToken) parts.push("token saved");
+    if (data.appVersion) parts.push("app v" + data.appVersion);
+    var vbits = [];
+    if (data.batteryVoltageSetting != null) vbits.push("batt " + data.batteryVoltageSetting + " V");
+    if (data.absorptionVoltage != null) vbits.push("abs " + data.absorptionVoltage + " V");
+    if (data.floatVoltage != null) vbits.push("float " + data.floatVoltage + " V");
+    if (data.chargerVoltage != null) vbits.push("chg " + data.chargerVoltage + " V");
+    if (data.panelVoltage != null) vbits.push("pv " + data.panelVoltage + " V");
+    if (vbits.length) parts.push(vbits.join(" "));
+    if (data.lastBleAdAt) {
+      var ageSec = Math.max(0, Math.round((Date.now() - data.lastBleAdAt) / 1000));
+      parts.push(ageSec < 90 ? ("BLE " + ageSec + "s ago") : ("BLE quiet " + Math.round(ageSec / 60) + "m"));
+    } else {
+      parts.push("BLE none");
+    }
+    if (selectedMac || data.mac) parts.push("target " + (selectedMac || data.mac));
     meta.textContent = parts.join(" \u00b7 ");
+    if (!schedFilled) {
+      if (typeof data.scheduleEnabled === "boolean") schedOn.checked = data.scheduleEnabled;
+      if (data.enableTime) enTime.value = data.enableTime;
+      if (data.disableTime) disTime.value = data.disableTime;
+      schedFilled = true;
+    }
+    var liveBox = document.getElementById("live");
+    var liveMap = {};
+    (data.live || []).forEach(function (d) { liveMap[d.mac] = d; });
+    var rows = [];
+    var seen = {};
+    (data.sighted || []).forEach(function (s) {
+      seen[s.mac] = true;
+      rows.push({ mac: s.mac, model: s.model, live: liveMap[s.mac], sighted: s });
+    });
+    (data.live || []).forEach(function (d) {
+      if (!seen[d.mac]) rows.push({ mac: d.mac, model: d.model, live: d, sighted: null });
+    });
+    if (!selectedMac && data.mac) selectedMac = data.mac;
+    if (!selectedMac && rows.length) selectedMac = rows[0].mac;
+    if (selectedMac && !keyMac.value) keyMac.value = selectedMac;
+    if (!rows.length) {
+      liveBox.textContent = data.lastBleAdAt
+        ? ("No fresh advertisement (last " + Math.round((Date.now() - data.lastBleAdAt) / 1000) + "s ago)")
+        : "No fresh advertisement";
+    }
+    else {
+      liveBox.innerHTML = rows.map(function (row) {
+        var d = row.live;
+        var bits = [];
+        if (d) {
+          if (d.solarPowerW != null) bits.push(d.solarPowerW + " W");
+          if (d.batteryVoltage != null) bits.push(d.batteryVoltage + " V");
+          if (d.batteryCurrent != null) bits.push(d.batteryCurrent + " A");
+          if (d.socPercent != null) bits.push(d.socPercent + "%");
+        }
+        if (row.sighted && row.sighted.wrongKey) bits.push("wrong key");
+        else if (row.sighted && !row.sighted.hasKey) bits.push("needs key");
+        var cls = row.mac === selectedMac ? " sel" : "";
+        return "<div class='dev"+cls+"' data-mac='"+row.mac+"'><b>" + (row.model || row.mac) + "</b> " + (bits.join(" \u00b7 ") || row.mac) + "</div>";
+      }).join("");
+    }
+    var dbg = document.getElementById("dbg");
+    var lines = data.debug || [];
+    dbg.textContent = lines.length ? lines.join("\n") : "No charger log yet";
     setBusy(!!data.busy);
   }
   function loadStatus() {
@@ -453,7 +901,8 @@ private val CONTROL_PAGE: String = """
   function send(action) {
     if (!secret) return;
     setBusy(true); setErr("");
-    api("/charger", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: action }) })
+    var payload = { action: action }; if (selectedMac) payload.mac = selectedMac;
+    api("/charger", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
       .then(function (r) { return r.json().then(function (d) { return { r: r, d: d }; }); })
       .then(function (x) {
         if (x.r.status === 401) { setBusy(false); return; }
@@ -472,9 +921,81 @@ private val CONTROL_PAGE: String = """
   }
   btnUnlock.addEventListener("click", unlock);
   secretInput.addEventListener("keydown", function (ev) { if (ev.key === "Enter") unlock(); });
+  function saveSched() {
+    if (!secret) return;
+    setBusy(true); setErr("");
+    var payload = { enabled: schedOn.checked, enable: enTime.value.trim(), disable: disTime.value.trim() };
+    if (selectedMac) payload.mac = selectedMac;
+    api("/charger/schedule", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload) })
+      .then(function (r) { return r.json().then(function (d) { return { r: r, d: d }; }); })
+      .then(function (x) {
+        if (x.r.status === 401) { setBusy(false); return; }
+        if (x.r.ok) { if (x.d.error) setErr(x.d.error); loadStatus(); }
+        else { setBusy(false); setErr(x.d.error || ("Status " + x.r.status)); }
+      })
+      .catch(function () { setBusy(false); setErr("Request failed."); });
+  }
+  function saveKey() {
+    if (!secret) return;
+    var mac = keyMac.value.trim();
+    var key = keyHex.value.trim();
+    if (!mac || !key) { setErr("MAC and 32-char key required"); return; }
+    setBusy(true); setErr("");
+    api("/charger/key", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mac: mac, key: key }) })
+      .then(function (r) { return r.json().then(function (d) { return { r: r, d: d }; }); })
+      .then(function (x) {
+        if (x.r.status === 401) { setBusy(false); return; }
+        if (x.r.ok) { keyHex.value = ""; if (x.d.error) setErr(x.d.error); loadStatus(); }
+        else { setBusy(false); setErr(x.d.error || ("Status " + x.r.status)); }
+      })
+      .catch(function () { setBusy(false); setErr("Request failed."); });
+  }
+  document.getElementById("live").addEventListener("click", function (ev) {
+    var n = ev.target;
+    while (n && n !== ev.currentTarget && !(n.getAttribute && n.getAttribute("data-mac"))) n = n.parentNode;
+    if (n && n.getAttribute) { selectedMac = n.getAttribute("data-mac"); keyMac.value = selectedMac; loadStatus(); }
+  });
   btnOn.addEventListener("click", function () { send("on"); });
   btnOff.addEventListener("click", function () { send("off"); });
-  btnRefresh.addEventListener("click", loadStatus);
+  btnRead.addEventListener("click", function () { send("read"); });
+  function sendTunnel(body) {
+    if (!secret) return;
+    setBusy(true); setErr("");
+    api("/charger/tunnel", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) })
+      .then(function (r) { return r.json().then(function (d) { return { r: r, d: d }; }); })
+      .then(function (x) {
+        if (x.r.status === 401) { setBusy(false); return; }
+        if (x.r.ok) { tunToken.value = ""; if (x.d.error) setErr(x.d.error); loadStatus(); }
+        else { setBusy(false); setErr(x.d.error || ("Status " + x.r.status)); }
+      })
+      .catch(function () { setBusy(false); setErr("Request failed."); });
+  }
+  btnSched.addEventListener("click", saveSched);
+  btnResume.addEventListener("click", saveSched);
+  btnKey.addEventListener("click", saveKey);
+  btnTunSave.addEventListener("click", function () {
+    var t = tunToken.value.trim();
+    if (!t) { setErr("Paste a named-tunnel token"); return; }
+    sendTunnel({ token: t });
+  });
+  btnTunStart.addEventListener("click", function () { sendTunnel({ action: "start" }); });
+  btnTunStop.addEventListener("click", function () { sendTunnel({ action: "stop" }); });
+  btnScan.addEventListener("click", function () {
+    if (!secret) return;
+    setBusy(true); setErr("");
+    api("/charger/scan", { method: "POST" })
+      .then(function (r) { return r.json().then(function (d) { return { r: r, d: d }; }); })
+      .then(function (x) {
+        if (x.r.status === 401) { setBusy(false); return; }
+        if (x.r.ok) { if (x.d.error) setErr(x.d.error); loadStatus(); }
+        else { setBusy(false); setErr(x.d.error || ("Status " + x.r.status)); }
+      })
+      .catch(function () { setBusy(false); setErr("Request failed."); });
+  });
+  btnRefresh.addEventListener("click", function () { schedFilled = false; loadStatus(); });
   loadStatus();
   setInterval(loadStatus, 3000);
 })();

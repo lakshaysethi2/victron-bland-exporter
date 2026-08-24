@@ -37,14 +37,20 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import com.lakshaysethi.victronbleexporter.charger.ExporterKeepAliveAlarm
 import com.lakshaysethi.victronbleexporter.data.DeviceRepository
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
+import com.lakshaysethi.victronbleexporter.diag.AppLog
+import com.lakshaysethi.victronbleexporter.diag.Diagnostics
+import com.lakshaysethi.victronbleexporter.diag.UpdateChecker
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevice
 import com.lakshaysethi.victronbleexporter.exporter.DiscoveredDevicesStore
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
 import com.lakshaysethi.victronbleexporter.service.VictronBleExporterService
 import com.lakshaysethi.victronbleexporter.tunnel.CloudflaredManager
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -87,12 +93,20 @@ class MainActivity : ComponentActivity() {
                     onCopyTunnelUrl = { url -> copyTunnelUrl(url) },
                     onShareTunnelUrl = { url -> shareTunnelUrl(url) },
                     onDnsSelfTest = { runDnsSelfTest() },
-                    onDisableBatteryOpt = { requestDisableBatteryOptimizations() }
+                    onDisableBatteryOpt = { requestDisableBatteryOptimizations() },
+                    onCheckUpdates = { checkForUpdates() },
+                    onSendDiagnostics = { sendDiagnostics() },
+                    onDownloadUpdate = { url -> downloadUpdate(url) }
                 )
             }
         }
 
         checkAndRequestPermissions()
+
+        AppLog.init(this)
+        AppLog.i("App opened — app v${BuildConfig.VERSION_NAME}")
+        Diagnostics.autoSend(applicationContext)
+        lifecycleScope.launch { runUpdateCheck(showResult = false) }
     }
 
     private fun checkAndRequestPermissions() {
@@ -143,6 +157,7 @@ class MainActivity : ComponentActivity() {
 
     private fun stopExporterService() {
         try {
+            ExporterKeepAliveAlarm.cancel(this)
             val intent = Intent(this, VictronBleExporterService::class.java)
             stopService(intent)
             Toast.makeText(this, "Service stopped", Toast.LENGTH_SHORT).show()
@@ -335,6 +350,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startTunnel(token: String) {
+        try {
+            DeviceRepository(this).saveTunnelToken(token)
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Failed to persist tunnel token", e)
+        }
         val intent = Intent(this, VictronBleExporterService::class.java).apply {
             action = "START_TUNNEL"
             putExtra("tunnel_token", token)
@@ -456,6 +476,63 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Failed to open battery settings: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
+
+    private fun checkForUpdates() = runUpdateCheck(showResult = true)
+
+    private fun runUpdateCheck(showResult: Boolean) {
+        AppState.updateChecking = true
+        if (showResult) AppState.updateCheckMessage = null
+        lifecycleScope.launch {
+            try {
+                val latest = UpdateChecker.fetchLatest()
+                if (latest != null) {
+                    AppState.updateVersionName = latest.versionName
+                    AppState.updateNotes = latest.notes
+                    AppState.updateApkUrl = latest.apkUrl
+                    if (UpdateChecker.isNewer(latest.versionCode, BuildConfig.VERSION_CODE)) {
+                        AppState.updateAvailable = true
+                        if (showResult) {
+                            AppState.updateCheckMessage = "Update available (v${latest.versionName}) — tap Download to install."
+                        }
+                    } else {
+                        AppState.updateAvailable = false
+                        if (showResult) {
+                            AppState.updateCheckMessage = "You're on the latest version (v${BuildConfig.VERSION_NAME})."
+                        }
+                    }
+                } else if (showResult) {
+                    AppState.updateCheckMessage = "Update check failed — server unreachable. Try again later."
+                }
+            } finally {
+                AppState.updateChecking = false
+            }
+        }
+    }
+
+    private fun sendDiagnostics() {
+        AppState.diagnosticsSending = true
+        AppState.diagnosticsResult = null
+        lifecycleScope.launch {
+            try {
+                val result = Diagnostics.sendLogs(applicationContext)
+                AppState.diagnosticsResult = result.fold(
+                    onSuccess = { "Diagnostics sent ✓ (${Diagnostics.currentEntries().size} entries)" },
+                    onFailure = { "Send failed: ${it.message ?: "no connection"} — logs kept locally." }
+                )
+                Toast.makeText(this@MainActivity, AppState.diagnosticsResult, Toast.LENGTH_SHORT).show()
+            } finally {
+                AppState.diagnosticsSending = false
+            }
+        }
+    }
+
+    private fun downloadUpdate(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (e: Exception) {
+            Toast.makeText(this, "No app found to open $url", Toast.LENGTH_LONG).show()
+        }
+    }
 }
 
 @Composable
@@ -479,7 +556,10 @@ fun VictronBleExporterScreen(
     onCopyTunnelUrl: (String) -> Unit,
     onShareTunnelUrl: (String) -> Unit,
     onDnsSelfTest: () -> Unit,
-    onDisableBatteryOpt: () -> Unit
+    onDisableBatteryOpt: () -> Unit,
+    onCheckUpdates: () -> Unit,
+    onSendDiagnostics: () -> Unit,
+    onDownloadUpdate: (String) -> Unit
 ) {
     val context = LocalContext.current
     var deviceCount by remember { mutableStateOf(0) }
@@ -490,6 +570,7 @@ fun VictronBleExporterScreen(
     var macInput by remember { mutableStateOf("") }
     var keyInput by remember { mutableStateOf("") }
     var tunnelToken by remember { mutableStateOf("") }
+    var tunnelTokenLoaded by remember { mutableStateOf(false) }
 
     // Charger control UI state
     var chargerMac by remember { mutableStateOf("") }
@@ -519,6 +600,25 @@ fun VictronBleExporterScreen(
     var tunnelUrl by remember { mutableStateOf(AppState.tunnelUrl) }
     var dnsSelfTestResult by remember { mutableStateOf(AppState.dnsSelfTestResult) }
     var isScanning by remember { mutableStateOf(false) }
+
+    val versionText = remember {
+        try {
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            val code = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) info.longVersionCode
+            else @Suppress("DEPRECATION") info.versionCode.toLong()
+            "v${info.versionName ?: "?"} (build $code)"
+        } catch (e: Exception) {
+            "v?"
+        }
+    }
+    var updateChecking by remember { mutableStateOf(AppState.updateChecking) }
+    var updateAvailable by remember { mutableStateOf(AppState.updateAvailable) }
+    var updateVersionName by remember { mutableStateOf(AppState.updateVersionName) }
+    var updateNotes by remember { mutableStateOf(AppState.updateNotes) }
+    var updateApkUrl by remember { mutableStateOf(AppState.updateApkUrl) }
+    var updateCheckMessage by remember { mutableStateOf(AppState.updateCheckMessage) }
+    var diagnosticsSending by remember { mutableStateOf(AppState.diagnosticsSending) }
+    var diagnosticsResult by remember { mutableStateOf(AppState.diagnosticsResult) }
 
     // Clipboard helpers
     fun pasteFromClipboard(): String {
@@ -634,8 +734,8 @@ fun VictronBleExporterScreen(
 
         while (true) {
             try {
-                // Live parsed devices
-                val all = MetricsStore.getAll()
+                // Live parsed devices (omit Instant Readout older than 90s)
+                val all = MetricsStore.getFresh()
                 deviceCount = all.size
                 liveDevices = all.map { (mac, parsed) -> mac to parsed.data }
 
@@ -672,6 +772,14 @@ fun VictronBleExporterScreen(
                 chargerLastAction = AppState.chargerLastAction
                 chargerLastError = AppState.chargerLastError
                 chargerOverrideUntil = AppState.chargerOverrideUntil
+                updateChecking = AppState.updateChecking
+                updateAvailable = AppState.updateAvailable
+                updateVersionName = AppState.updateVersionName
+                updateNotes = AppState.updateNotes
+                updateApkUrl = AppState.updateApkUrl
+                updateCheckMessage = AppState.updateCheckMessage
+                diagnosticsSending = AppState.diagnosticsSending
+                diagnosticsResult = AppState.diagnosticsResult
                 voltageSnapshot = AppState.voltageSettings
                 if (voltageSnapshot != null && batteryVoltageInput.isBlank() && voltageSnapshot?.batteryVoltageSetting != null) {
                     batteryVoltageInput = voltageSnapshot!!.batteryVoltageSetting.toString()
@@ -700,6 +808,15 @@ fun VictronBleExporterScreen(
                     } catch (e: Exception) {
                         // ignore
                     }
+                }
+                // Load persisted named-tunnel token once so the field survives restart.
+                if (!tunnelTokenLoaded) {
+                    try {
+                        DeviceRepository(context).getTunnelToken()?.let { saved ->
+                            tunnelToken = saved
+                        }
+                    } catch (_: Exception) { }
+                    tunnelTokenLoaded = true
                 }
                 // Load persisted remote-control settings once
                 if (!remoteSettingsLoaded) {
@@ -733,6 +850,11 @@ fun VictronBleExporterScreen(
         Text(
             "Easy MPPT discovery • Auto-scan • Saves keys",
             style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            versionText,
+            style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(Modifier.height(12.dp))
@@ -855,6 +977,7 @@ fun VictronBleExporterScreen(
                                 Column(horizontalAlignment = androidx.compose.ui.Alignment.End) {
                                     Badge(
                                         containerColor = when {
+                                            dev.wrongKey -> MaterialTheme.colorScheme.error
                                             dev.hasKey && dev.parsed != null -> MaterialTheme.colorScheme.primary
                                             dev.hasKey -> MaterialTheme.colorScheme.secondary
                                             else -> MaterialTheme.colorScheme.error
@@ -862,6 +985,7 @@ fun VictronBleExporterScreen(
                                     ) {
                                         Text(
                                             when {
+                                                dev.wrongKey -> "Wrong key"
                                                 dev.hasKey && dev.parsed != null -> "Ready ✓"
                                                 dev.hasKey -> "Key saved"
                                                 else -> "Needs key"
@@ -895,7 +1019,7 @@ fun VictronBleExporterScreen(
                                         onClick = { macInput = dev.mac },
                                         modifier = Modifier.weight(1f)
                                     ) {
-                                        Text("Select & Add Key")
+                                        Text(if (dev.wrongKey) "Replace key" else "Select & Add Key")
                                     }
                                     OutlinedButton(
                                         onClick = {
@@ -1056,11 +1180,34 @@ fun VictronBleExporterScreen(
         // Live metrics from parsed devices
         Text("Live Metrics ($deviceCount MPPT / Shunt)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         if (liveDevices.isEmpty()) {
-            Text(
-                "No decrypted data yet. Add key for a discovered device above.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            val hasWrongKey = discoveredDevices.any { it.wrongKey }
+            if (hasWrongKey) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            "Wrong key — decrypt failed",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "A saved key did not decrypt data. Remove it and add the 32-char hex key from VictronConnect.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+            } else {
+                Text(
+                    "No decrypted data yet. Add key for a discovered device above.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 liveDevices.forEach { (mac, data) ->
@@ -1226,7 +1373,7 @@ fun VictronBleExporterScreen(
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Note: the schedule applies while the app is open (foreground service running). " +
+                    "Note: the schedule applies while the exporter notification is showing (stays up after you leave the app). " +
                         "Manual Enable/Disable pauses the schedule until the next window boundary.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1260,6 +1407,7 @@ fun VictronBleExporterScreen(
                     Text("Absorption: ${vs.absorptionVolts?.let { "$it V" } ?: "—"}  •  Float: ${vs.floatVolts?.let { "$it V" } ?: "—"}", style = MaterialTheme.typography.bodySmall)
                     vs.equalisationVolts?.let { Text("Equalisation: $it V", style = MaterialTheme.typography.bodySmall) }
                     vs.chargerVolts?.let { Text("Live charger voltage: $it V", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+                    vs.panelVolts?.let { Text("Panel voltage: $it V", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
                 }
                 AppState.voltageSettingsLastError?.let {
                     Spacer(Modifier.height(4.dp))
@@ -1304,7 +1452,7 @@ fun VictronBleExporterScreen(
         // ===== REMOTE CHARGER CONTROL (HTTP + Cloudflare tunnel) =====
         Text("Remote Charger Control", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Text(
-            "Flip the charger from any browser via the named tunnel: https://mppt.lak.nz/charger. " +
+            "Flip the charger from any browser via the named tunnel hostname (/charger) or LAN http://<phone-ip>:5338/charger. " +
                 "Every request must carry the secret below — never share it or put it in a URL.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1413,6 +1561,66 @@ fun VictronBleExporterScreen(
         OutlinedButton(onClick = onDnsSelfTest, modifier = Modifier.fillMaxWidth()) {
             Text("DNS Self-Test")
         }
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        Text("Diagnostics & Updates", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(
+            "Sends the last ${AppLog.MAX_ENTRIES} app/charger log entries plus device info to the configured log host. " +
+                "Auto-sends on app start and after significant errors (max once/hour).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+
+        if (updateAvailable) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "Update available (v${updateVersionName ?: ""})",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    updateNotes?.takeIf { it.isNotBlank() }?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall)
+                    }
+                    Button(onClick = { onDownloadUpdate(updateApkUrl ?: UpdateChecker.DEFAULT_APK_URL) }) {
+                        Text("Download & Install")
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(
+                onClick = onCheckUpdates,
+                modifier = Modifier.weight(1f),
+                enabled = !updateChecking
+            ) {
+                Text(if (updateChecking) "Checking…" else "Check for Updates")
+            }
+            Button(
+                onClick = onSendDiagnostics,
+                modifier = Modifier.weight(1f),
+                enabled = !diagnosticsSending
+            ) {
+                Text(if (diagnosticsSending) "Sending…" else "Send Diagnostics")
+            }
+        }
+        updateCheckMessage?.let {
+            Spacer(Modifier.height(6.dp))
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        diagnosticsResult?.let {
+            Spacer(Modifier.height(6.dp))
+            Text(it, style = MaterialTheme.typography.bodySmall)
+        }
+
         dnsSelfTestResult?.let { report ->
             Spacer(Modifier.height(8.dp))
             Card(

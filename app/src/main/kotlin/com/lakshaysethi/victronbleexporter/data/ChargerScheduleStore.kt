@@ -7,13 +7,11 @@ import com.lakshaysethi.victronbleexporter.charger.ChargerSchedule
 /**
  * Plain SharedPreferences store for the charger control settings:
  * schedule window, target device MAC, and the manual-override deadline.
- * Follows the DeviceRepository pattern (context-provided prefs, defensive
- * reads) but schedule settings are not secret so no encryption is needed.
+ * Device-protected so LOCKED_BOOT_COMPLETED can enforce the window before unlock.
  */
 class ChargerScheduleStore(context: Context) {
 
-    private val prefs: SharedPreferences =
-        context.getSharedPreferences("victron_charger_settings", Context.MODE_PRIVATE)
+    private val prefs: SharedPreferences = bootSafePrefs(context, PREFS)
 
     var scheduleEnabled: Boolean
         get() = prefs.getBoolean(KEY_SCHEDULE_ENABLED, false)
@@ -69,7 +67,8 @@ class ChargerScheduleStore(context: Context) {
         val manualOverrideUntil: Long,
     )
 
-    private companion object {
+    internal companion object {
+        const val PREFS = "victron_charger_settings"
         const val KEY_SCHEDULE_ENABLED = "schedule_enabled"
         const val KEY_ENABLE_TIME = "enable_time"
         const val KEY_DISABLE_TIME = "disable_time"

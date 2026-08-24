@@ -12,7 +12,8 @@ data class ParsedDevice(
     val modelId: Int,
     val recordType: Int,
     val data: Map<String, Any?>,
-    val rssi: Int
+    val rssi: Int,
+    val lastSeen: Long = System.currentTimeMillis(),
 )
 
 object VictronParser {

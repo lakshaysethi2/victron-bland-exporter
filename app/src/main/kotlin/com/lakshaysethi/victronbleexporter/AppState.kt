@@ -48,6 +48,9 @@ object AppState {
     /** Epoch millis until which a manual override pauses the schedule; 0 = none. */
     @Volatile var chargerOverrideUntil: Long = 0L
 
+    /** Epoch millis of the last Victron BLE advertisement. Survives the 90s fresh window so remote status can say how long the bridge has been quiet. */
+    @Volatile var lastBleAdAt: Long = 0L
+
     /** Last read/written voltage settings (null = not read yet). Written by VictronBleExporterService. */
     @Volatile var voltageSettings: VoltageSettings? = null
 
@@ -56,6 +59,26 @@ object AppState {
     @Volatile var voltageSettingsLastError: String? = null
 
     val chargerModeText: String get() = ChargerProtocol.chargerModeText(chargerMode)
+
+    // ---- remote diagnostics + in-app updates (written by MainActivity / Diagnostics) ----
+
+    /** True while the manual "Send diagnostics" button is in flight. */
+    @Volatile var diagnosticsSending: Boolean = false
+
+    /** Human-readable outcome of the last manual send (shown under the button). */
+    @Volatile var diagnosticsResult: String? = null
+
+    /** True while a manual/silent update check is in flight. */
+    @Volatile var updateChecking: Boolean = false
+
+    /** Set when a newer release is served; drives the banner. */
+    @Volatile var updateAvailable: Boolean = false
+    @Volatile var updateVersionName: String? = null
+    @Volatile var updateNotes: String? = null
+    @Volatile var updateApkUrl: String? = null
+
+    /** Outcome of the last manual check ("You're on the latest version" / error). */
+    @Volatile var updateCheckMessage: String? = null
 
     /** Section appended to the shared debug log so the captain can diagnose BLE writes. */
     fun chargerDebugSection(): String {
