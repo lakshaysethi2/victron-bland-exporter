@@ -104,8 +104,8 @@ In the app's **Remote Charger Control** section, enable remote control and set a
 
 - `GET  /charger` — mobile control page (login shell; everything on it requires the secret)
 - `GET  /charger/status` — JSON state (`mode`, schedule times, live Instant Readout watts/volts, last charger debug lines, …)
-- `POST /charger` — `{"action":"on"|"off"}` flips the charger
-- `POST /charger/schedule` — `{"enabled":true,"enable":"08:30","disable":"18:00"}` saves the daily window
+- `POST /charger` — `{"action":"on"|"off", "mac"?: "AA:BB:..."}` flips the charger (body mac, else stored, else first live Instant Readout)
+- `POST /charger/schedule` — `{"enabled":true,"enable":"08:30","disable":"18:00", "mac"?: "AA:BB:..."}` saves the daily window
 - `GET  /voltage` — JSON voltage settings; `POST /voltage` writes battery/absorption/float
 
 Auth: every status/command call must send the secret as an `X-Remote-Secret` (or `Authorization: Bearer`) header. It is compared constant-time and **never logged or placed in a URL**; the page keeps it only in the browser session. When remote control is disabled, `/charger*` and `/voltage` answer 404. A remote flip or voltage write goes through the same service path as a local tap, so it gets the same BLE readback verification.

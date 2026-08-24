@@ -18,11 +18,14 @@ import java.security.MessageDigest
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
  *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + live Instant Readout + last charger debug lines)
- *   POST /charger        -> JSON body {"action":"on"|"off"} flips the charger
- *   POST /charger/schedule -> JSON {enabled, enable, disable} saves the daily window
+ *   POST /charger        -> JSON body {"action":"on"|"off", "mac"?: "AA:BB:..."} flips the charger
+ *   POST /charger/schedule -> JSON {enabled, enable, disable, mac?} saves the daily window
  *   GET  /voltage        -> JSON voltage settings (auth required)
- *   POST /voltage        -> JSON {battery_voltage_setting, absorption_voltage, float_voltage}
+ *   POST /voltage        -> JSON {battery_voltage_setting, absorption_voltage, float_voltage, mac?}
  *                           writes the matching GATT registers (auth required; confirm in UI)
+ *
+ * Target MAC: optional body `mac` wins, then the stored charger MAC, then the
+ * first fresh Instant Readout device — so a downstairs MAC tap is not required.
  *
  * Auth: the secret set in the app's Remote Control settings must be sent as an
  * `X-Remote-Secret: <secret>` header (or `Authorization: Bearer <secret>`).
@@ -99,14 +102,7 @@ class RemoteChargerHttp(
                 body = "{\"error\":\"body must be JSON: {\\\"action\\\": \\\"on\\\" | \\\"off\\\"}\"}\n",
             )
         }
-        val mac = macProvider()
-        if (mac.isNullOrBlank()) {
-            return HttpResult(
-                statusCode = 503,
-                mimeType = MIME_JSON,
-                body = "{\"error\":\"no charger configured — set a charger device MAC in the app first\"}\n",
-            )
-        }
+        val mac = macFromRequest(body) ?: return missingMac(body)
         val enable = action == "on"
         commandSender.sendChargerCommand(enable, mac)
         return HttpResult(
@@ -127,14 +123,7 @@ class RemoteChargerHttp(
         }
         val sender = scheduleSender
             ?: return HttpResult(503, MIME_JSON, "{\"error\":\"schedule control unavailable on this build\"}\n")
-        val mac = macProvider()
-        if (mac.isNullOrBlank()) {
-            return HttpResult(
-                statusCode = 503,
-                mimeType = MIME_JSON,
-                body = "{\"error\":\"no charger configured — set a charger device MAC in the app first\"}\n",
-            )
-        }
+        val mac = macFromRequest(body) ?: return missingMac(body)
         sender.saveSchedule(parsed.enabled, parsed.enable, parsed.disable, mac)
         return HttpResult(
             statusCode = 202,
@@ -156,7 +145,7 @@ class RemoteChargerHttp(
 
     private fun handleVoltageGet(): HttpResult {
         if (AppState.voltageSettings == null) {
-            macProvider()?.takeIf { it.isNotBlank() }?.let { voltageCommandSender?.requestVoltageRead(it) }
+            macFromRequest("")?.let { voltageCommandSender?.requestVoltageRead(it) }
         }
         val vs = AppState.voltageSettings
         val body = buildString {
@@ -177,10 +166,7 @@ class RemoteChargerHttp(
     }
 
     private fun handleVoltagePost(body: String): HttpResult {
-        val mac = macProvider()
-        if (mac.isNullOrBlank()) {
-            return HttpResult(503, MIME_JSON, "{\"error\":\"no charger configured — set a charger device MAC in the app first\"}\n")
-        }
+        val mac = macFromRequest(body) ?: return missingMac(body)
         val parsed = parseVoltageBody(body)
         if (parsed == null) {
             return HttpResult(
@@ -212,6 +198,27 @@ class RemoteChargerHttp(
         return Triple(batt, abs, fl)
     }
 
+    /** Body `mac` wins, then the stored target, then the first live Instant Readout. */
+    private fun macFromRequest(body: String): String? {
+        val raw = MAC_FIELD.find(body.trim())?.groupValues?.get(1)?.trim()
+        if (raw != null) return raw.takeIf { MAC_SHAPE.matches(it) }?.uppercase()
+        return macProvider()?.takeIf { it.isNotBlank() }
+            ?: statusProvider().live.firstOrNull()?.mac?.takeIf { it.isNotBlank() }
+    }
+
+    private fun missingMac(body: String): HttpResult {
+        val explicit = MAC_FIELD.find(body.trim()) != null
+        return HttpResult(
+            statusCode = if (explicit) 400 else 503,
+            mimeType = MIME_JSON,
+            body = if (explicit) {
+                "{\"error\":\"mac must look like AA:BB:CC:DD:EE:FF\"}\n"
+            } else {
+                "{\"error\":\"no charger configured — pick a live device or set a charger MAC in the app\"}\n"
+            },
+        )
+    }
+
     private fun notFound() = HttpResult(404, MIME_PLAINTEXT, "Not Found\n")
 
     private companion object {
@@ -223,6 +230,8 @@ class RemoteChargerHttp(
         val ENABLED_REGEX = Regex("\"enabled\"\\s*:\\s*(true|false)", RegexOption.IGNORE_CASE)
         val ENABLE_TIME_REGEX = Regex("\"enable\"\\s*:\\s*\"([^\"]+)\"")
         val DISABLE_TIME_REGEX = Regex("\"disable\"\\s*:\\s*\"([^\"]+)\"")
+        val MAC_FIELD = Regex("\"mac\"\\s*:\\s*\"([^\"]+)\"")
+        val MAC_SHAPE = Regex("(?i)^([0-9A-F]{2}:){5}[0-9A-F]{2}$")
 
         /** Tiny JSON field extractor — the API accepts exactly `{"action":"on"|"off"}`. */
         fun parseAction(body: String): String? =
@@ -476,6 +485,8 @@ private val CONTROL_PAGE: String = """
   .status .value { font-size: 20px; font-weight: 700; }
   .status .meta { font-size: 12px; color: #8fa3bf; margin-top: 3px; line-height: 1.4; }
   #dbg { margin: 0; max-height: 160px; overflow: auto; white-space: pre-wrap; word-break: break-word; font: 11px/1.4 ui-monospace, monospace; color: #8fa3bf; }
+  #live div[data-mac] { cursor: pointer; padding: 4px 0; }
+  #live div.sel { color: #e6edf7; }
   .btn { display: block; width: 100%; border: none; border-radius: 12px; padding: 16px; font-size: 17px; font-weight: 700; color: #0b1220; margin-bottom: 10px; cursor: pointer; }
   .btn:disabled { opacity: .45; }
   .btn.on { background: #22c55e; }
@@ -491,7 +502,7 @@ private val CONTROL_PAGE: String = """
 <body>
 <div class="card">
   <h1>MPPT Charger</h1>
-  <div class="sub">Remote enable / disable</div>
+  <div class="sub">Remote enable / disable — tap a live device to target it</div>
   <div class="status">
     <div class="dot" id="dot"></div>
     <div class="txt">
@@ -529,6 +540,7 @@ private val CONTROL_PAGE: String = """
 (function () {
   var KEY = "mppt_remote_secret";
   var secret = null;
+  var selectedMac = null;
   try { secret = sessionStorage.getItem(KEY); } catch (e) {}
   var dot = document.getElementById("dot"), state = document.getElementById("state"),
       meta = document.getElementById("meta"), err = document.getElementById("err"),
@@ -564,12 +576,15 @@ private val CONTROL_PAGE: String = """
     if (data.lastAction) parts.push(data.lastAction);
     if (data.lastError) parts.push(data.lastError);
     if (data.scheduleEnabled) parts.push("schedule " + (data.enableTime || "?") + "-" + (data.disableTime || "?"));
+    if (selectedMac || data.mac) parts.push("target " + (selectedMac || data.mac));
     meta.textContent = parts.join(" \u00b7 ");
     if (typeof data.scheduleEnabled === "boolean") schedOn.checked = data.scheduleEnabled;
     if (data.enableTime) enTime.value = data.enableTime;
     if (data.disableTime) disTime.value = data.disableTime;
     var live = document.getElementById("live");
     var devices = data.live || [];
+    if (!selectedMac && data.mac) selectedMac = data.mac;
+    if (!selectedMac && devices.length) selectedMac = devices[0].mac;
     if (!devices.length) { live.textContent = "No fresh advertisement"; }
     else {
       live.innerHTML = devices.map(function (d) {
@@ -578,7 +593,8 @@ private val CONTROL_PAGE: String = """
         if (d.batteryVoltage != null) bits.push(d.batteryVoltage + " V");
         if (d.batteryCurrent != null) bits.push(d.batteryCurrent + " A");
         if (d.socPercent != null) bits.push(d.socPercent + "%");
-        return "<div><b>" + (d.model || d.mac) + "</b> " + (bits.join(" \u00b7 ") || d.mac) + "</div>";
+        var cls = d.mac === selectedMac ? " sel" : "";
+        return "<div class='dev"+cls+"' data-mac='"+d.mac+"'><b>" + (d.model || d.mac) + "</b> " + (bits.join(" \u00b7 ") || d.mac) + "</div>";
       }).join("");
     }
     var dbg = document.getElementById("dbg");
@@ -600,7 +616,8 @@ private val CONTROL_PAGE: String = """
   function send(action) {
     if (!secret) return;
     setBusy(true); setErr("");
-    api("/charger", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: action }) })
+    var payload = { action: action }; if (selectedMac) payload.mac = selectedMac;
+    api("/charger", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
       .then(function (r) { return r.json().then(function (d) { return { r: r, d: d }; }); })
       .then(function (x) {
         if (x.r.status === 401) { setBusy(false); return; }
@@ -622,8 +639,10 @@ private val CONTROL_PAGE: String = """
   function saveSched() {
     if (!secret) return;
     setBusy(true); setErr("");
+    var payload = { enabled: schedOn.checked, enable: enTime.value.trim(), disable: disTime.value.trim() };
+    if (selectedMac) payload.mac = selectedMac;
     api("/charger/schedule", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: schedOn.checked, enable: enTime.value.trim(), disable: disTime.value.trim() }) })
+      body: JSON.stringify(payload) })
       .then(function (r) { return r.json().then(function (d) { return { r: r, d: d }; }); })
       .then(function (x) {
         if (x.r.status === 401) { setBusy(false); return; }
@@ -632,6 +651,11 @@ private val CONTROL_PAGE: String = """
       })
       .catch(function () { setBusy(false); setErr("Request failed."); });
   }
+  document.getElementById("live").addEventListener("click", function (ev) {
+    var n = ev.target;
+    while (n && n !== ev.currentTarget && !(n.getAttribute && n.getAttribute("data-mac"))) n = n.parentNode;
+    if (n && n.getAttribute) { selectedMac = n.getAttribute("data-mac"); loadStatus(); }
+  });
   btnOn.addEventListener("click", function () { send("on"); });
   btnOff.addEventListener("click", function () { send("off"); });
   btnSched.addEventListener("click", saveSched);

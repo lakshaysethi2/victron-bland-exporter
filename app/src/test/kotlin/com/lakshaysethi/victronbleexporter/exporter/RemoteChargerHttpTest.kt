@@ -284,6 +284,54 @@ class RemoteChargerHttpTest {
         assertTrue(h.sink.calls.isEmpty())
     }
 
+    @Test
+    fun `post uses body mac over the stored target`() {
+        val h = Harness(mac = "AA:BB:CC:DD:EE:FF")
+        val r = h.control().handle(
+            "/charger", POST, headers(SECRET),
+            """{"action":"off","mac":"11:22:33:44:55:66"}""",
+        )
+        assertEquals(202, r.statusCode)
+        assertEquals(listOf(false to "11:22:33:44:55:66"), h.sink.calls)
+    }
+
+    @Test
+    fun `post without stored mac falls back to the first live device`() {
+        val h = Harness(mac = null)
+        h.snapshot = h.snapshot.copy(
+            mac = null,
+            live = listOf(
+                LiveReadout("DE:AD:BE:EF:00:01", "SmartSolar", 10, 12.8, 1.0, null, 1L),
+                LiveReadout("DE:AD:BE:EF:00:02", "SmartShunt", null, 12.6, null, 80, 1L),
+            ),
+        )
+        val r = h.control().handle("/charger", POST, headers(SECRET), """{"action":"on"}""")
+        assertEquals(202, r.statusCode)
+        assertEquals(listOf(true to "DE:AD:BE:EF:00:01"), h.sink.calls)
+    }
+
+    @Test
+    fun `post with a malformed mac is rejected`() {
+        val h = Harness()
+        val r = h.control().handle(
+            "/charger", POST, headers(SECRET),
+            """{"action":"on","mac":"not-a-mac"}""",
+        )
+        assertEquals(400, r.statusCode)
+        assertTrue(h.sink.calls.isEmpty())
+    }
+
+    @Test
+    fun `post schedule uses body mac when no charger is stored`() {
+        val h = Harness(mac = null)
+        val r = h.control().handle(
+            "/charger/schedule", POST, headers(SECRET),
+            """{"enabled":true,"enable":"09:00","disable":"17:30","mac":"aa:bb:cc:dd:ee:ff"}""",
+        )
+        assertEquals(202, r.statusCode)
+        assertEquals(listOf(listOf(true, "09:00", "17:30", "AA:BB:CC:DD:EE:FF")), h.scheduleSink.calls)
+    }
+
     // ---- control page ----
 
     @Test
@@ -300,6 +348,8 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("Save schedule"))
         assertTrue(r.body.contains("/charger/schedule"))
         assertTrue(r.body.contains("/voltage"))
+        assertTrue(r.body.contains("selectedMac"))
+        assertTrue(r.body.contains("data-mac"))
         assertFalse(r.body.contains(SECRET))
     }
 
