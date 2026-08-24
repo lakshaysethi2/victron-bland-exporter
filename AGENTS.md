@@ -23,6 +23,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Implementation: `charger/ChargerController.kt` (one GATT session per op, latches + dedicated HandlerThread, serialized by a Mutex; also voltage reads/writes for 0xEDEF/0xEDF7/0xEDF6/0xED4/0xDD5 with readback), `charger/ChargerSchedule.kt` + `data/ChargerScheduleStore.kt` (daily window, manual override until next boundary), `ChargerDebugLog` ring buffer (200 lines) included in Share Debug Logs. Schedule is enforced while the foreground service runs; the service stays up after the UI is dismissed (`stopWithTask=false`, lifetime wake lock).
 - Voltage settings: battery system voltage (`0xEDEF`, e.g. 12/24/48) + absorption/float/equalisation + live charger voltage + **panel/PV voltage** (`0xEDBB`, 0.01 V; Instant Readout does not carry it; `0xFFFF` = night NA) over the same GATT service. Wired to UI in `MainActivity` (Voltage Settings card + confirm dialogs), to `AppState.voltageSettings` + `PrometheusExporter` metrics (`victron_*_voltage_volts`, including `victron_panel_voltage_volts` only while fresh), and to remote `GET/POST /voltage` in `RemoteChargerHttp` (same auth secret as `/charger`; web shell at `/voltage`). Service intents: `VOLTAGE_READ`, `VOLTAGE_SET_BATTERY`, `VOLTAGE_SET_CHARGING` — see `ChargerProtocol` for frame layouts and `mppt_registers.json` provenance. Background poll (~60s, 5 min backoff after a failed GATT read) skips when a user charger op is in flight.
 
+## Remote diagnostics + in-app updates
+
+- App-side owner is `diag/` (`AppLog`, `Diagnostics`, `UpdateChecker`). Logs POST to `https://mppt-logs.lak.nz/api/logs`; update check is `GET https://mppt-logs.lak.nz/api/latest.json`. Server lives in the sibling `mppt-log-server` repo, not this one.
+- `ChargerDebugLog` mirrors into `AppLog` so a Send Diagnostics tap includes the BLE exchange. Auto-send is once/hour; the button always sends. Failures stay local.
+- Bump `versionCode` / `versionName` in `app/build.gradle.kts` when cutting an APK the downstairs phone should be offered.
+
 ## Remote charger control over HTTP/tunnel
 
 - The app serves a remote charger-control surface on the same NanoHTTPD server (port 5338): `GET /charger` (mobile control page), `GET /charger/status` (JSON snapshot of AppState.chargerMode), `POST /charger` with `{"action":"on"|"off"}`. Authoritative code: `exporter/RemoteChargerHttp.kt` + `data/RemoteChargerStore.kt` (auth secret in plain SharedPreferences, master `enabled` switch — disabled = every /charger* route 404s).
