@@ -1,5 +1,7 @@
 package com.lakshaysethi.victronbleexporter.charger
 
+import java.util.Calendar
+import java.util.TimeZone
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -81,6 +83,15 @@ class ChargerScheduleTest {
         assertTrue(ChargerSchedule.scheduledOn(9 * 60, 8 * 60 + 30, 18 * 60))
         assertFalse(ChargerSchedule.scheduledOn(19 * 60, 8 * 60 + 30, 18 * 60))
         assertTrue(ChargerSchedule.scheduledOn(19 * 60, 18 * 60, 8 * 60 + 30))
+    }
+
+    @Test
+    fun `phoneClock uses the calendar hour and zone id`() {
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("Pacific/Auckland"))
+        cal.set(2026, Calendar.AUGUST, 24, 15, 42, 0)
+        val (time, zone) = ChargerSchedule.phoneClock(cal)
+        assertEquals("15:42", time)
+        assertEquals("Pacific/Auckland", zone)
     }
 
     @Test

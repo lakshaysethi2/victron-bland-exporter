@@ -142,6 +142,18 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"disableTime\":\"18:00\""))
         assertTrue(r.body.contains("\"live\":[]"))
         assertTrue(r.body.contains("\"debug\":[]"))
+        assertTrue(r.body.contains("\"phoneTime\":\"\""))
+        assertTrue(r.body.contains("\"phoneZone\":\"\""))
+    }
+
+    @Test
+    fun `status includes the phone clock the schedule uses`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(phoneTime = "15:42", phoneZone = "Pacific/Auckland")
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"phoneTime\":\"15:42\""))
+        assertTrue(r.body.contains("\"phoneZone\":\"Pacific/Auckland\""))
     }
 
     @Test
@@ -350,6 +362,8 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("/voltage"))
         assertTrue(r.body.contains("selectedMac"))
         assertTrue(r.body.contains("data-mac"))
+        assertTrue(r.body.contains("schedFilled"))
+        assertTrue(r.body.contains("phoneTime"))
         assertFalse(r.body.contains(SECRET))
     }
 

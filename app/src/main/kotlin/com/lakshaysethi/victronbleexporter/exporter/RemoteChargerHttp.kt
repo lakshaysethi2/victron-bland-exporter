@@ -17,7 +17,7 @@ import java.security.MessageDigest
  *   GET  /charger        -> mobile control page (shell; every API call inside
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
- *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + live Instant Readout + last charger debug lines)
+ *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + last charger debug lines)
  *   POST /charger        -> JSON body {"action":"on"|"off", "mac"?: "AA:BB:..."} flips the charger
  *   POST /charger/schedule -> JSON {enabled, enable, disable, mac?} saves the daily window
  *   GET  /voltage        -> JSON voltage settings (auth required)
@@ -337,6 +337,8 @@ data class ChargerStatusSnapshot(
     val disableTime: String = ChargerSchedule.DEFAULT_DISABLE,
     val live: List<LiveReadout> = emptyList(),
     val debug: List<String> = emptyList(),
+    val phoneTime: String = "",
+    val phoneZone: String = "",
 ) {
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
 
@@ -352,6 +354,8 @@ data class ChargerStatusSnapshot(
         append(",\"scheduleEnabled\":").append(scheduleEnabled)
         append(",\"enableTime\":\"${RemoteChargerHttpJson.escape(enableTime)}\"")
         append(",\"disableTime\":\"${RemoteChargerHttpJson.escape(disableTime)}\"")
+        append(",\"phoneTime\":\"${RemoteChargerHttpJson.escape(phoneTime)}\"")
+        append(",\"phoneZone\":\"${RemoteChargerHttpJson.escape(phoneZone)}\"")
         append(",\"live\":[")
         live.forEachIndexed { i, row ->
             if (i > 0) append(",")
@@ -368,15 +372,20 @@ data class ChargerStatusSnapshot(
     companion object {
         const val REMOTE_DEBUG_LINES = 20
 
-        fun fromAppState(): ChargerStatusSnapshot = ChargerStatusSnapshot(
-            mode = AppState.chargerMode,
-            mac = AppState.chargerMac,
-            busy = AppState.chargerBusy,
-            lastAction = AppState.chargerLastAction,
-            lastError = AppState.chargerLastError,
-            overrideUntil = AppState.chargerOverrideUntil,
-            stateUpdatedAt = AppState.chargerStateUpdatedAt,
-        )
+        fun fromAppState(): ChargerStatusSnapshot {
+            val clock = ChargerSchedule.phoneClock()
+            return ChargerStatusSnapshot(
+                mode = AppState.chargerMode,
+                mac = AppState.chargerMac,
+                busy = AppState.chargerBusy,
+                lastAction = AppState.chargerLastAction,
+                lastError = AppState.chargerLastError,
+                overrideUntil = AppState.chargerOverrideUntil,
+                stateUpdatedAt = AppState.chargerStateUpdatedAt,
+                phoneTime = clock.first,
+                phoneZone = clock.second,
+            )
+        }
     }
 }
 
@@ -528,7 +537,7 @@ private val CONTROL_PAGE: String = """
   <button class="btn small" id="btnUnlock">Unlock</button>
   <button class="btn on" id="btnOn" disabled>ENABLE CHARGER</button>
   <button class="btn off" id="btnOff" disabled>DISABLE CHARGER</button>
-  <div class="sub" style="margin:14px 0 8px">Daily schedule (phone time)</div>
+  <div class="sub" style="margin:14px 0 8px">Daily schedule (phone clock below)</div>
   <label class="hint"><input type="checkbox" id="schedOn"> Enforce window</label>
   <div class="row"><input type="text" id="enTime" placeholder="ON 08:30" inputmode="numeric"><input type="text" id="disTime" placeholder="OFF 18:00" inputmode="numeric"></div>
   <button class="btn small" id="btnSched" disabled>Save schedule</button>
@@ -541,6 +550,7 @@ private val CONTROL_PAGE: String = """
   var KEY = "mppt_remote_secret";
   var secret = null;
   var selectedMac = null;
+  var schedFilled = false;
   try { secret = sessionStorage.getItem(KEY); } catch (e) {}
   var dot = document.getElementById("dot"), state = document.getElementById("state"),
       meta = document.getElementById("meta"), err = document.getElementById("err"),
@@ -576,11 +586,15 @@ private val CONTROL_PAGE: String = """
     if (data.lastAction) parts.push(data.lastAction);
     if (data.lastError) parts.push(data.lastError);
     if (data.scheduleEnabled) parts.push("schedule " + (data.enableTime || "?") + "-" + (data.disableTime || "?"));
+    if (data.phoneTime) parts.push("phone " + data.phoneTime + (data.phoneZone ? " " + data.phoneZone : ""));
     if (selectedMac || data.mac) parts.push("target " + (selectedMac || data.mac));
     meta.textContent = parts.join(" \u00b7 ");
-    if (typeof data.scheduleEnabled === "boolean") schedOn.checked = data.scheduleEnabled;
-    if (data.enableTime) enTime.value = data.enableTime;
-    if (data.disableTime) disTime.value = data.disableTime;
+    if (!schedFilled) {
+      if (typeof data.scheduleEnabled === "boolean") schedOn.checked = data.scheduleEnabled;
+      if (data.enableTime) enTime.value = data.enableTime;
+      if (data.disableTime) disTime.value = data.disableTime;
+      schedFilled = true;
+    }
     var live = document.getElementById("live");
     var devices = data.live || [];
     if (!selectedMac && data.mac) selectedMac = data.mac;
@@ -659,7 +673,7 @@ private val CONTROL_PAGE: String = """
   btnOn.addEventListener("click", function () { send("on"); });
   btnOff.addEventListener("click", function () { send("off"); });
   btnSched.addEventListener("click", saveSched);
-  btnRefresh.addEventListener("click", loadStatus);
+  btnRefresh.addEventListener("click", function () { schedFilled = false; loadStatus(); });
   loadStatus();
   setInterval(loadStatus, 3000);
 })();

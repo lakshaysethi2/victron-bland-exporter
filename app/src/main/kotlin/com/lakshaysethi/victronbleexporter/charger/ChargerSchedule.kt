@@ -1,5 +1,7 @@
 package com.lakshaysethi.victronbleexporter.charger
 
+import java.util.Calendar
+
 /**
  * Pure charger-schedule logic: a daily enable/disable window, expressed in
  * minutes since midnight. Kept free of Android dependencies so it can be unit
@@ -56,4 +58,10 @@ object ChargerSchedule {
     /** The charger state the schedule wants at nowMinutes (true = ON). */
     fun scheduledOn(nowMinutes: Int, enableMinutes: Int, disableMinutes: Int): Boolean =
         isInWindow(nowMinutes, enableMinutes, disableMinutes)
+
+    /** Phone-local HH:mm and zone id the daily window actually uses. */
+    fun phoneClock(now: Calendar = Calendar.getInstance()): Pair<String, String> {
+        val minutes = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
+        return formatMinutes(minutes) to now.timeZone.id
+    }
 }
