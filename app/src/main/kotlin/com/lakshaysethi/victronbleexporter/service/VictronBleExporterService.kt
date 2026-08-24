@@ -651,7 +651,8 @@ class VictronBleExporterService : Service() {
                             recordType = recordType,
                             rssi = rssi,
                             hasKey = hasKey,
-                            parsed = parsed
+                            parsed = parsed,
+                            decryptFailed = hasKey && parsed == null
                         )
                     } catch (e: Exception) {
                         Log.w(TAG, "Failed to update discovered store", e)

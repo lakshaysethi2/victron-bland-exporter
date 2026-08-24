@@ -870,6 +870,7 @@ fun VictronBleExporterScreen(
                                 Column(horizontalAlignment = androidx.compose.ui.Alignment.End) {
                                     Badge(
                                         containerColor = when {
+                                            dev.wrongKey -> MaterialTheme.colorScheme.error
                                             dev.hasKey && dev.parsed != null -> MaterialTheme.colorScheme.primary
                                             dev.hasKey -> MaterialTheme.colorScheme.secondary
                                             else -> MaterialTheme.colorScheme.error
@@ -877,6 +878,7 @@ fun VictronBleExporterScreen(
                                     ) {
                                         Text(
                                             when {
+                                                dev.wrongKey -> "Wrong key"
                                                 dev.hasKey && dev.parsed != null -> "Ready ✓"
                                                 dev.hasKey -> "Key saved"
                                                 else -> "Needs key"
@@ -910,7 +912,7 @@ fun VictronBleExporterScreen(
                                         onClick = { macInput = dev.mac },
                                         modifier = Modifier.weight(1f)
                                     ) {
-                                        Text("Select & Add Key")
+                                        Text(if (dev.wrongKey) "Replace key" else "Select & Add Key")
                                     }
                                     OutlinedButton(
                                         onClick = {
@@ -1071,11 +1073,34 @@ fun VictronBleExporterScreen(
         // Live metrics from parsed devices
         Text("Live Metrics ($deviceCount MPPT / Shunt)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         if (liveDevices.isEmpty()) {
-            Text(
-                "No decrypted data yet. Add key for a discovered device above.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            val hasWrongKey = discoveredDevices.any { it.wrongKey }
+            if (hasWrongKey) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            "Wrong key — decrypt failed",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "A saved key did not decrypt data. Remove it and add the 32-char hex key from VictronConnect.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+            } else {
+                Text(
+                    "No decrypted data yet. Add key for a discovered device above.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 liveDevices.forEach { (mac, data) ->
