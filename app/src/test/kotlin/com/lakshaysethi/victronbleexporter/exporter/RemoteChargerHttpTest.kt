@@ -323,6 +323,7 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"mode\":null"))
         assertTrue(r.body.contains("\"mac\":null"))
         assertTrue(r.body.contains("\"lastError\":\"boom\""))
+        assertEquals(listOf("AA:BB:CC:DD:EE:FF"), h.readSink.calls)
     }
 
     // ---- commands ----
@@ -439,6 +440,59 @@ class RemoteChargerHttpTest {
         assertEquals(503, r.statusCode)
         assertTrue(h.readSink.calls.isEmpty())
         assertTrue(h.sink.calls.isEmpty())
+    }
+
+    @Test
+    fun `status get kicks a charger read when mode is still unknown`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(mode = null, busy = false)
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"mode\":null"))
+        assertEquals(listOf("AA:BB:CC:DD:EE:FF"), h.readSink.calls)
+        assertTrue(h.sink.calls.isEmpty())
+    }
+
+    @Test
+    fun `status get does not kick a read when mode is already known or busy`() {
+        val known = Harness()
+        known.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertTrue(known.readSink.calls.isEmpty())
+
+        val busy = Harness()
+        busy.snapshot = busy.snapshot.copy(mode = null, busy = true)
+        busy.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertTrue(busy.readSink.calls.isEmpty())
+    }
+
+    @Test
+    fun `status get uses a live Instant Readout when no charger mac is stored`() {
+        val h = Harness(mac = null)
+        h.snapshot = h.snapshot.copy(
+            mode = null,
+            mac = null,
+            live = listOf(
+                LiveReadout(
+                    mac = "11:22:33:44:55:66",
+                    model = "SmartSolar",
+                    solarPowerW = 10,
+                    batteryVoltage = 13.0,
+                    batteryCurrent = 1.0,
+                    socPercent = null,
+                    lastSeen = 1L,
+                ),
+            ),
+        )
+        h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(listOf("11:22:33:44:55:66"), h.readSink.calls)
+    }
+
+    @Test
+    fun `status get does not kick a read when there is no mac and no live device`() {
+        val h = Harness(mac = null)
+        h.snapshot = h.snapshot.copy(mode = null, mac = null, live = emptyList())
+        h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertTrue(h.readSink.calls.isEmpty())
     }
 
     @Test

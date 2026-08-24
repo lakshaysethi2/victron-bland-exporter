@@ -18,7 +18,7 @@ import java.security.MessageDigest
  *   GET  /charger        -> mobile control page (shell; every API call inside
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
- *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status)
+ *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status); kicks a CHARGER_READ when mode is still unknown
  *   POST /charger        -> JSON body {"action":"on"|"off"|"read", "mac"?: "AA:BB:..."} flips or reads the charger
  *   POST /charger/schedule -> JSON {enabled, enable, disable, mac?} saves the daily window
  *   POST /charger/key    -> JSON {mac, key} saves an Instant Readout key (never echoed)
@@ -89,8 +89,7 @@ class RemoteChargerHttp(
             )
         }
         return when {
-            uri == "/charger/status" && method == "GET" ->
-                HttpResult(200, MIME_JSON, statusProvider().toJson() + "\n")
+            uri == "/charger/status" && method == "GET" -> handleStatusGet()
             uri == "/charger" && method == "POST" -> handleCommand(body)
             uri == "/charger/schedule" && method == "POST" -> handleSchedule(body)
             uri == "/charger/key" && method == "POST" -> handleKey(body)
@@ -99,6 +98,15 @@ class RemoteChargerHttp(
             uri == "/voltage" && method == "POST" -> handleVoltagePost(body)
             else -> notFound()
         }
+    }
+
+    /** Snapshot first; if the phone just rebooted, kick one GATT read so the page is not stuck on Unknown. */
+    private fun handleStatusGet(): HttpResult {
+        val snap = statusProvider()
+        if (snap.mode == null && !snap.busy) {
+            macFromRequest("")?.let { readSender?.readCharger(it) }
+        }
+        return HttpResult(200, MIME_JSON, snap.toJson() + "\n")
     }
 
     private fun handleCommand(body: String): HttpResult {
