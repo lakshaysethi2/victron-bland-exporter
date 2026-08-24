@@ -215,6 +215,7 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"panelVoltage\":null"))
         assertTrue(r.body.contains("\"lastBleAdAt\":0"))
         assertTrue(r.body.contains("\"exactAlarm\":false"))
+        assertTrue(r.body.contains("\"batteryIgnored\":false"))
         assertTrue(r.body.contains("\"overrideUntil\":0"))
         assertTrue(r.body.contains("\"overrideUntilText\":\"\""))
     }
@@ -277,6 +278,7 @@ class RemoteChargerHttpTest {
             assertEquals("", snap.appVersion)
             assertEquals(0, snap.versionCode)
             assertFalse(snap.exactAlarm)
+            assertFalse(snap.batteryIgnored)
             assertEquals(1_700_000_000_000L, snap.lastBleAdAt)
         } finally {
             AppState.tunnelStatus = prevStatus
@@ -334,6 +336,15 @@ class RemoteChargerHttpTest {
         val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
         assertEquals(200, r.statusCode)
         assertTrue(r.body.contains("\"exactAlarm\":true"))
+    }
+
+    @Test
+    fun `status includes whether battery optimizations are ignored`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(batteryIgnored = true)
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"batteryIgnored\":true"))
     }
 
     @Test
@@ -660,6 +671,8 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("overrideUntilText"))
         assertTrue(r.body.contains("exact alarm"))
         assertTrue(r.body.contains("inexact alarm"))
+        assertTrue(r.body.contains("battery unrestricted"))
+        assertTrue(r.body.contains("battery restricted"))
         assertTrue(r.body.contains("Resume schedule"))
         assertTrue(r.body.contains("manual override until"))
         assertTrue(r.body.contains("sighted"))

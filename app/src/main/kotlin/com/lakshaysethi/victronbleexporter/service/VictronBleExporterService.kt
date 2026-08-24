@@ -23,6 +23,7 @@ import com.lakshaysethi.victronbleexporter.charger.ChargerController
 import com.lakshaysethi.victronbleexporter.charger.ChargerDebugLog
 import com.lakshaysethi.victronbleexporter.charger.ChargerSchedule
 import com.lakshaysethi.victronbleexporter.charger.ChargerScheduleAlarm
+import com.lakshaysethi.victronbleexporter.charger.ExporterKeepAliveAlarm
 import com.lakshaysethi.victronbleexporter.data.ChargerScheduleStore
 import com.lakshaysethi.victronbleexporter.data.DeviceRepository
 import com.lakshaysethi.victronbleexporter.diag.AppLog
@@ -93,6 +94,7 @@ class VictronBleExporterService : Service() {
                         ChargerSchedule.nextTransition(minutes, s.enableMinutes, s.disableMinutes),
                     ),
                     exactAlarm = ChargerScheduleAlarm.canExact(this),
+                    batteryIgnored = ExporterKeepAliveAlarm.ignoringBatteryOptimizations(this),
                     live = LiveReadout.fromFreshMetrics(),
                     sighted = SightedDevice.fromStore(),
                     debug = ChargerDebugLog.snapshot().takeLast(ChargerStatusSnapshot.REMOTE_DEBUG_LINES),
@@ -357,6 +359,7 @@ class VictronBleExporterService : Service() {
 
         startChargerScheduleLoop()
         armScheduleAlarm()
+        ExporterKeepAliveAlarm.arm(this)
         startScanWatchdog()
     }
 
@@ -689,6 +692,12 @@ class VictronBleExporterService : Service() {
                     armScheduleAlarm()
                     serviceScope.launch { enforceChargerSchedule() }
                 }
+                ExporterKeepAliveAlarm.ACTION -> {
+                    lastScheduledMode = null
+                    lastScheduledAppliedAt = 0L
+                    restoreSavedTunnel()
+                    serviceScope.launch { enforceChargerSchedule() }
+                }
                 "VOLTAGE_READ" -> {
                     val mac = it.getStringExtra("mac") ?: return@let
                     serviceScope.launch { performVoltageRead(mac) }
@@ -715,6 +724,7 @@ class VictronBleExporterService : Service() {
             restoreSavedTunnel()
         }
         updateNotification("Running")
+        ExporterKeepAliveAlarm.arm(this)
         return START_STICKY
     }
 

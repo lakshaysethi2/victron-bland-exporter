@@ -18,7 +18,7 @@ import java.security.MessageDigest
  *   GET  / or /charger   -> mobile control page (shell; every API call inside
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
- *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status + app version + last GATT voltages + lastBleAdAt + overrideUntilText + exactAlarm); kicks a CHARGER_READ when mode is still unknown
+ *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status + app version + last GATT voltages + lastBleAdAt + overrideUntilText + exactAlarm + batteryIgnored); kicks a CHARGER_READ when mode is still unknown
  *   POST /charger        -> JSON body {"action":"on"|"off"|"read", "mac"?: "AA:BB:..."} flips or reads the charger
  *   POST /charger/schedule -> JSON {enabled, enable, disable, mac?} saves the daily window
  *   POST /charger/key    -> JSON {mac, key} saves an Instant Readout key (never echoed)
@@ -508,6 +508,7 @@ data class ChargerStatusSnapshot(
     val panelVoltage: Double? = null,
     val lastBleAdAt: Long = 0L,
     val exactAlarm: Boolean = false,
+    val batteryIgnored: Boolean = false,
 ) {
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
 
@@ -546,6 +547,7 @@ data class ChargerStatusSnapshot(
         append(",\"panelVoltage\":").append(panelVoltage ?: "null")
         append(",\"lastBleAdAt\":").append(lastBleAdAt)
         append(",\"exactAlarm\":").append(exactAlarm)
+        append(",\"batteryIgnored\":").append(batteryIgnored)
         append(",\"live\":[")
         live.forEachIndexed { i, row ->
             if (i > 0) append(",")
@@ -816,6 +818,7 @@ private val CONTROL_PAGE: String = """
       parts.push("window " + (data.scheduleWantsOn ? "ON" : "OFF") + (data.nextTransition ? " until " + data.nextTransition : ""));
       parts.push(data.exactAlarm ? "exact alarm" : "inexact alarm (may miss 08:30/18:00)");
     }
+    parts.push(data.batteryIgnored ? "battery unrestricted" : "battery restricted (OEM may kill overnight)");
     if (data.overrideUntilText) parts.push("manual override until " + data.overrideUntilText + " (Resume schedule to hand back to the window)");
     if (data.phoneTime) parts.push("phone " + data.phoneTime + (data.phoneZone ? " " + data.phoneZone : ""));
     if (data.tunnelStatus) parts.push("tunnel " + data.tunnelStatus);

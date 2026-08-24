@@ -38,6 +38,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.lakshaysethi.victronbleexporter.charger.ExporterKeepAliveAlarm
 import com.lakshaysethi.victronbleexporter.data.DeviceRepository
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
 import com.lakshaysethi.victronbleexporter.diag.AppLog
@@ -156,6 +157,7 @@ class MainActivity : ComponentActivity() {
 
     private fun stopExporterService() {
         try {
+            ExporterKeepAliveAlarm.cancel(this)
             val intent = Intent(this, VictronBleExporterService::class.java)
             stopService(intent)
             Toast.makeText(this, "Service stopped", Toast.LENGTH_SHORT).show()

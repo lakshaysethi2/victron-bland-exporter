@@ -5,14 +5,15 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import com.lakshaysethi.victronbleexporter.charger.ChargerScheduleAlarm
+import com.lakshaysethi.victronbleexporter.charger.ExporterKeepAliveAlarm
 import com.lakshaysethi.victronbleexporter.service.VictronBleExporterService
 
-/** Exact-alarm callback: bring the exporter back up and apply the daily window. */
+/** Exact-alarm callback: bring the exporter back up (schedule window or keep-alive). */
 class ScheduleAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != ChargerScheduleAlarm.ACTION) return
-        val service = Intent(context, VictronBleExporterService::class.java)
-            .setAction(ChargerScheduleAlarm.ACTION)
+        val action = intent.action ?: return
+        if (action != ChargerScheduleAlarm.ACTION && action != ExporterKeepAliveAlarm.ACTION) return
+        val service = Intent(context, VictronBleExporterService::class.java).setAction(action)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(service)
         } else {
