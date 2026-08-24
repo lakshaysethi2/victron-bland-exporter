@@ -72,6 +72,27 @@ class DeviceRepository(context: Context) {
         null
     }
 
+    fun saveTunnelToken(token: String) {
+        val trimmed = token.trim()
+        try {
+            if (trimmed.isBlank()) {
+                prefs.edit().remove(KEY_TUNNEL_TOKEN).apply()
+            } else {
+                prefs.edit().putString(KEY_TUNNEL_TOKEN, trimmed).apply()
+            }
+            Log.i(tag, "Saved tunnel token")
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to save tunnel token", e)
+        }
+    }
+
+    fun getTunnelToken(): String? = try {
+        prefs.getString(KEY_TUNNEL_TOKEN, null)?.takeIf { it.isNotBlank() }
+    } catch (e: Exception) {
+        Log.w(tag, "getTunnelToken failed", e)
+        null
+    }
+
     fun removeDevice(mac: String) {
         try {
             prefs.edit().remove(mac.uppercase()).apply()
@@ -91,6 +112,9 @@ class DeviceRepository(context: Context) {
     fun hasKey(mac: String): Boolean = !getKey(mac).isNullOrBlank()
 
     companion object {
+        // Reserved key for the cloudflared named-tunnel token (not a MAC, so getAllDevices skips it).
+        private const val KEY_TUNNEL_TOKEN = "__tunnel_token__"
+
         fun normalizeKeyInput(input: String): String {
             return input.trim().lowercase().replace(Regex("[^0-9a-f]"), "")
         }

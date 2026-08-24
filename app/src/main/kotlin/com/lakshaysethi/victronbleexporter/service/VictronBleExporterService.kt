@@ -444,11 +444,12 @@ class VictronBleExporterService : Service() {
                 "START_TUNNEL" -> {
                     val token = it.getStringExtra("tunnel_token")
                     if (!token.isNullOrBlank()) {
+                        persistTunnelToken(token)
                         cloudflaredManager.startNamedTunnel(token) { status ->
                             updateNotification(status)
                         }
                     } else {
-                        // Quick tunnel fallback
+                        // Explicit quick-tunnel from the UI; do not steal a saved named token.
                         cloudflaredManager.startQuickTunnel(5338) { status ->
                             updateNotification(status)
                         }
@@ -497,8 +498,39 @@ class VictronBleExporterService : Service() {
                 }
             }
         }
+        if (intent?.action == null) {
+            // Boot / sticky restart with no command: restore the named tunnel from the persisted token.
+            restoreSavedTunnel()
+        }
         updateNotification("Running")
         return START_STICKY
+    }
+
+    private fun persistTunnelToken(token: String) {
+        try {
+            if (!::deviceRepository.isInitialized) {
+                deviceRepository = DeviceRepository(this)
+            }
+            deviceRepository.saveTunnelToken(token)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to persist tunnel token", e)
+        }
+    }
+
+    /** Starts the named tunnel from the persisted token; returns false when no token is saved. */
+    private fun restoreSavedTunnel(): Boolean {
+        val token = try {
+            if (!::deviceRepository.isInitialized) {
+                deviceRepository = DeviceRepository(this)
+            }
+            deviceRepository.getTunnelToken()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to read persisted tunnel token", e)
+            null
+        }
+        if (token.isNullOrBlank()) return false
+        cloudflaredManager.startNamedTunnel(token) { status -> updateNotification(status) }
+        return true
     }
 
     private fun startBleScan() {

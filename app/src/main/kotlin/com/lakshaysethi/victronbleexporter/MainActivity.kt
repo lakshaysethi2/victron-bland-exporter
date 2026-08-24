@@ -335,6 +335,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startTunnel(token: String) {
+        try {
+            DeviceRepository(this).saveTunnelToken(token)
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Failed to persist tunnel token", e)
+        }
         val intent = Intent(this, VictronBleExporterService::class.java).apply {
             action = "START_TUNNEL"
             putExtra("tunnel_token", token)
@@ -490,6 +495,7 @@ fun VictronBleExporterScreen(
     var macInput by remember { mutableStateOf("") }
     var keyInput by remember { mutableStateOf("") }
     var tunnelToken by remember { mutableStateOf("") }
+    var tunnelTokenLoaded by remember { mutableStateOf(false) }
 
     // Charger control UI state
     var chargerMac by remember { mutableStateOf("") }
@@ -700,6 +706,15 @@ fun VictronBleExporterScreen(
                     } catch (e: Exception) {
                         // ignore
                     }
+                }
+                // Load persisted named-tunnel token once so the field survives restart.
+                if (!tunnelTokenLoaded) {
+                    try {
+                        DeviceRepository(context).getTunnelToken()?.let { saved ->
+                            tunnelToken = saved
+                        }
+                    } catch (_: Exception) { }
+                    tunnelTokenLoaded = true
                 }
                 // Load persisted remote-control settings once
                 if (!remoteSettingsLoaded) {
