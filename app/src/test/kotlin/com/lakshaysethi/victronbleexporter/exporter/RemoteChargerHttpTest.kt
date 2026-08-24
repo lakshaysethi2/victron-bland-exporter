@@ -30,6 +30,17 @@ class RemoteChargerHttpTest {
         }
     }
 
+    private class FakeVoltageSink : VoltageCommandSender {
+        val battery = mutableListOf<Pair<String, Int>>()
+        val charging = mutableListOf<Triple<String, Double?, Double?>>()
+        val reads = mutableListOf<String>()
+        override fun sendBatteryVoltageSetting(mac: String, volts: Int) { battery.add(mac to volts) }
+        override fun sendChargingVoltages(mac: String, absorptionVolts: Double?, floatVolts: Double?) {
+            charging.add(Triple(mac, absorptionVolts, floatVolts))
+        }
+        override fun requestVoltageRead(mac: String) { reads.add(mac) }
+    }
+
     private class Harness(
         var enabled: Boolean = true,
         var secret: String = "correct horse battery staple",
@@ -46,6 +57,7 @@ class RemoteChargerHttpTest {
     ) {
         val sink = FakeSink()
         val scheduleSink = FakeScheduleSink()
+        val voltageSink = FakeVoltageSink()
 
         fun control() = RemoteChargerHttp(
             settingsProvider = { RemoteChargerStore.RemoteChargerSettings(enabled = enabled, authSecret = secret) },
@@ -53,6 +65,7 @@ class RemoteChargerHttpTest {
             macProvider = { mac },
             commandSender = sink,
             scheduleSender = scheduleSink,
+            voltageCommandSender = voltageSink,
         )
     }
 
@@ -74,9 +87,12 @@ class RemoteChargerHttpTest {
         assertEquals(404, c.handle("/charger/status", GET, headers(SECRET), "").statusCode)
         assertEquals(404, c.handle("/charger", POST, headers(SECRET), """{"action":"on"}""").statusCode)
         assertEquals(404, c.handle("/charger/schedule", POST, headers(SECRET), """{"enabled":true,"enable":"08:30","disable":"18:00"}""").statusCode)
+        assertEquals(404, c.handle("/voltage", GET, headers(SECRET), "").statusCode)
+        assertEquals(404, c.handle("/voltage", POST, headers(SECRET), """{"battery_voltage_setting":24}""").statusCode)
         assertEquals(404, c.handle("/charger/status", GET, emptyMap(), "").statusCode)
         assertTrue(h.sink.calls.isEmpty())
         assertTrue(h.scheduleSink.calls.isEmpty())
+        assertTrue(h.voltageSink.battery.isEmpty())
     }
 
     @Test
@@ -205,6 +221,7 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("DISABLE CHARGER"))
         assertTrue(r.body.contains("Save schedule"))
         assertTrue(r.body.contains("/charger/schedule"))
+        assertTrue(r.body.contains("/voltage"))
         assertFalse(r.body.contains(SECRET))
     }
 
@@ -241,6 +258,86 @@ class RemoteChargerHttpTest {
         )
         assertEquals(503, r.statusCode)
         assertTrue(h.scheduleSink.calls.isEmpty())
+    }
+
+    @Test
+    fun `voltage page loads without a secret as a login shell`() {
+        val r = Harness().control().handle(
+            "/voltage", GET,
+            mapOf("accept" to "text/html"),
+            "",
+        )
+        assertEquals(200, r.statusCode)
+        assertTrue(r.mimeType.contains("text/html"))
+        assertTrue(r.body.contains("Voltage Settings"))
+        assertFalse(r.body.contains(SECRET))
+    }
+
+    @Test
+    fun `get voltage json requires the secret`() {
+        val c = Harness().control()
+        assertEquals(401, c.handle("/voltage", GET, emptyMap(), "").statusCode)
+        assertEquals(401, c.handle("/voltage", GET, headers("wrong"), "").statusCode)
+    }
+
+    @Test
+    fun `get voltage json reports settings and requests a read when empty`() {
+        val previous = com.lakshaysethi.victronbleexporter.AppState.voltageSettings
+        com.lakshaysethi.victronbleexporter.AppState.voltageSettings = null
+        try {
+            val h = Harness()
+            val r = h.control().handle("/voltage", GET, headers(SECRET), "")
+            assertEquals(200, r.statusCode)
+            assertTrue(r.body.contains("\"battery_voltage_setting\":null"))
+            assertTrue(r.body.contains("\"absorption_voltage\":null"))
+            assertEquals(listOf("AA:BB:CC:DD:EE:FF"), h.voltageSink.reads)
+        } finally {
+            com.lakshaysethi.victronbleexporter.AppState.voltageSettings = previous
+        }
+    }
+
+    @Test
+    fun `post voltage battery setting is forwarded`() {
+        val h = Harness()
+        val r = h.control().handle(
+            "/voltage", POST, headers(SECRET),
+            """{"battery_voltage_setting":24}""",
+        )
+        assertEquals(202, r.statusCode)
+        assertEquals(listOf("AA:BB:CC:DD:EE:FF" to 24), h.voltageSink.battery)
+        assertTrue(h.voltageSink.charging.isEmpty())
+        assertTrue(h.sink.calls.isEmpty())
+    }
+
+    @Test
+    fun `post voltage charging voltages are forwarded`() {
+        val h = Harness()
+        val r = h.control().handle(
+            "/voltage", POST, headers(SECRET),
+            """{"absorption_voltage":28.8,"float_voltage":27.6}""",
+        )
+        assertEquals(202, r.statusCode)
+        assertEquals(listOf(Triple("AA:BB:CC:DD:EE:FF", 28.8, 27.6)), h.voltageSink.charging)
+        assertTrue(h.voltageSink.battery.isEmpty())
+    }
+
+    @Test
+    fun `post voltage with bad body rejected`() {
+        val h = Harness()
+        val c = h.control()
+        assertEquals(400, c.handle("/voltage", POST, headers(SECRET), "").statusCode)
+        assertEquals(400, c.handle("/voltage", POST, headers(SECRET), """{\"nope\":1}""").statusCode)
+        assertEquals(400, c.handle("/voltage", POST, headers(SECRET), """{\"battery_voltage_setting\":99}""").statusCode)
+        assertTrue(h.voltageSink.battery.isEmpty())
+        assertTrue(h.voltageSink.charging.isEmpty())
+    }
+
+    @Test
+    fun `post voltage without configured charger mac returns 503`() {
+        val h = Harness(mac = null)
+        val r = h.control().handle("/voltage", POST, headers(SECRET), """{"battery_voltage_setting":24}""")
+        assertEquals(503, r.statusCode)
+        assertTrue(h.voltageSink.battery.isEmpty())
     }
 
     // ---- auth primitives ----

@@ -102,8 +102,7 @@ class VictronBleExporterService : Service() {
                     Log.e(TAG, "Remote schedule save could not be sent", e)
                 }
             },
-        ).also { http ->
-            http.attachVoltageSender(object : VoltageCommandSender {
+            voltageCommandSender = object : VoltageCommandSender {
                 override fun sendBatteryVoltageSetting(mac: String, volts: Int) {
                     try {
                         startForegroundService(Intent(this@VictronBleExporterService, VictronBleExporterService::class.java).apply {
@@ -137,8 +136,8 @@ class VictronBleExporterService : Service() {
                         Log.e(TAG, "Remote voltage read failed", e)
                     }
                 }
-            })
-        }
+            },
+        )
     }
 
     // Device encryption keys: MAC -> key (hex) - in-memory cache, persisted via DeviceRepository
@@ -374,16 +373,16 @@ class VictronBleExporterService : Service() {
             if (result.success) {
                 AppState.voltageSettings = result.settings
                 AppState.voltageSettingsUpdatedAt = System.currentTimeMillis()
-                AppState.chargerLastAction = "Voltage: ${'$'}result"
+                AppState.chargerLastAction = "Voltage: $result"
             } else {
-                AppState.chargerLastAction = "Voltage read failed: ${'$'}{result.message}"
+                AppState.chargerLastAction = "Voltage read failed: ${result.message}"
                 AppState.voltageSettingsLastError = result.message
             }
         } catch (e: Exception) {
             Log.w(TAG, "Voltage read failed", e)
-            AppState.chargerLastAction = "Voltage read failed: ${'$'}{e.message}"
+            AppState.chargerLastAction = "Voltage read failed: ${e.message}"
             AppState.voltageSettingsLastError = e.message
-            ChargerDebugLog.append("ERROR: ${'$'}{e.message}")
+            ChargerDebugLog.append("ERROR: ${e.message}")
         } finally {
             AppState.chargerBusy = false
         }
@@ -393,24 +392,24 @@ class VictronBleExporterService : Service() {
         chargerScheduleStore.chargerMac = mac
         AppState.chargerMac = mac
         AppState.chargerBusy = true
-        AppState.chargerLastAction = "Setting battery voltage to ${'$'}volts V…"
+        AppState.chargerLastAction = "Setting battery voltage to $volts V…"
         AppState.voltageSettingsLastError = null
-        ChargerDebugLog.append("Set battery voltage ${'$'}volts V for $mac")
+        ChargerDebugLog.append("Set battery voltage $volts V for $mac")
         try {
             val result = chargerController.setBatteryVoltageSetting(mac, volts)
             if (result.success) {
                 AppState.voltageSettings = result.settings
                 AppState.voltageSettingsUpdatedAt = System.currentTimeMillis()
-                AppState.chargerLastAction = "Battery voltage set to ${'$'}volts V"
+                AppState.chargerLastAction = "Battery voltage set to $volts V"
             } else {
-                AppState.chargerLastAction = "Battery voltage write failed: ${'$'}{result.message}"
+                AppState.chargerLastAction = "Battery voltage write failed: ${result.message}"
                 AppState.voltageSettingsLastError = result.message
             }
         } catch (e: Exception) {
             Log.w(TAG, "Battery voltage set failed", e)
-            AppState.chargerLastAction = "Failed: ${'$'}{e.message}"
+            AppState.chargerLastAction = "Failed: ${e.message}"
             AppState.voltageSettingsLastError = e.message
-            ChargerDebugLog.append("ERROR: ${'$'}{e.message}")
+            ChargerDebugLog.append("ERROR: ${e.message}")
         } finally {
             AppState.chargerBusy = false
         }
@@ -422,22 +421,22 @@ class VictronBleExporterService : Service() {
         AppState.chargerBusy = true
         AppState.chargerLastAction = "Setting charge voltages…"
         AppState.voltageSettingsLastError = null
-        ChargerDebugLog.append("Set charging voltages abs=${'$'}absorptionVolts float=${'$'}floatVolts for $mac")
+        ChargerDebugLog.append("Set charging voltages abs=$absorptionVolts float=$floatVolts for $mac")
         try {
             val result = chargerController.setChargingVoltages(mac, absorptionVolts, floatVolts)
             if (result.success) {
                 AppState.voltageSettings = result.settings
                 AppState.voltageSettingsUpdatedAt = System.currentTimeMillis()
-                AppState.chargerLastAction = "Charge voltages updated: ${'$'}result"
+                AppState.chargerLastAction = "Charge voltages updated: $result"
             } else {
-                AppState.chargerLastAction = "Charge voltage write failed: ${'$'}{result.message}"
+                AppState.chargerLastAction = "Charge voltage write failed: ${result.message}"
                 AppState.voltageSettingsLastError = result.message
             }
         } catch (e: Exception) {
             Log.w(TAG, "Charge voltage set failed", e)
-            AppState.chargerLastAction = "Failed: ${'$'}{e.message}"
+            AppState.chargerLastAction = "Failed: ${e.message}"
             AppState.voltageSettingsLastError = e.message
-            ChargerDebugLog.append("ERROR: ${'$'}{e.message}")
+            ChargerDebugLog.append("ERROR: ${e.message}")
         } finally {
             AppState.chargerBusy = false
         }

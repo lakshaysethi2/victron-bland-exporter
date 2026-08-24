@@ -100,10 +100,12 @@ All writes go over the same BLE GATT service as charger on/off, with a confirmat
 In the app's **Remote Charger Control** section, enable remote control and set a secret (min 8 chars). The app then serves:
 
 - `GET  /charger` — mobile control page (login shell; everything on it requires the secret)
-- `GET  /charger/status` — JSON state (`mode`, `busy`, `lastAction`, …)
+- `GET  /charger/status` — JSON state (`mode`, `busy`, `lastAction`, schedule times, …)
 - `POST /charger` — `{"action":"on"|"off"}` flips the charger
+- `POST /charger/schedule` — `{"enabled":true,"enable":"08:30","disable":"18:00"}` saves the daily window
+- `GET  /voltage` — JSON voltage settings; `POST /voltage` writes battery/absorption/float
 
-Auth: every status/command call must send the secret as an `X-Remote-Secret` (or `Authorization: Bearer`) header. It is compared constant-time and **never logged or placed in a URL**; the page keeps it only in the browser session. When remote control is disabled, all `/charger*` routes answer 404. A remote flip goes through the same `CHARGER_SET` path as a local tap, so it gets the same readback verification and manual-override/schedule semantics.
+Auth: every status/command call must send the secret as an `X-Remote-Secret` (or `Authorization: Bearer`) header. It is compared constant-time and **never logged or placed in a URL**; the page keeps it only in the browser session. When remote control is disabled, `/charger*` and `/voltage` answer 404. A remote flip or voltage write goes through the same service path as a local tap, so it gets the same BLE readback verification.
 
 Pairing: the first connection prompts for a Bluetooth PIN. Use the PIN printed on the product sticker, or `000000` (the common Victron default).
 

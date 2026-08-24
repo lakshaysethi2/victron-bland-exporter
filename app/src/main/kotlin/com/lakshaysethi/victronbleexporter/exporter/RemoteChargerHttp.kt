@@ -40,6 +40,7 @@ class RemoteChargerHttp(
     private val macProvider: () -> String?,
     private val commandSender: ChargerCommandSender,
     private val scheduleSender: ScheduleCommandSender? = null,
+    private val voltageCommandSender: VoltageCommandSender? = null,
 ) {
 
     /**
@@ -48,7 +49,7 @@ class RemoteChargerHttp(
      * (empty for GET). Pure logic — returns an [HttpResult] the server renders.
      */
     fun handle(uri: String, method: String, headers: Map<String, String>, body: String): HttpResult {
-        if (!uri.startsWith("/charger")) {
+        if (!uri.startsWith("/charger") && uri != "/voltage") {
             return notFound()
         }
         val settings = settingsProvider()
@@ -62,12 +63,7 @@ class RemoteChargerHttp(
         if (uri == "/charger" && method == "GET") {
             return HttpResult(200, MIME_HTML, CONTROL_PAGE)
         }
-        if (uri == "/voltage" && method == "GET" && headers.containsKey("accept") && headers["accept"]?.contains("text/html") == true) {
-            // Browser navigating to /voltage without API Accept still gets JSON unless they asked for html
-        }
-        // Serve the voltage HTML shell at GET /voltage when the request looks like a browser navigation
-        // (no X-Remote-Secret yet — same pattern as /charger shell). The JSON API at /voltage still
-        // requires auth; the shell is inert without it. Detect by Accept header containing text/html.
+        // Browser navigation cannot send X-Remote-Secret; serve the inert voltage shell the same way as /charger.
         val wantsHtml = (headers["accept"] ?: "").contains("text/html", ignoreCase = true)
         if (uri == "/voltage" && method == "GET" && wantsHtml && RemoteChargerAuth.extractSecret(headers) == null) {
             return HttpResult(200, MIME_HTML, VOLTAGE_PAGE)
@@ -157,6 +153,9 @@ class RemoteChargerHttp(
     }
 
     private fun handleVoltageGet(): HttpResult {
+        if (AppState.voltageSettings == null) {
+            macProvider()?.takeIf { it.isNotBlank() }?.let { voltageCommandSender?.requestVoltageRead(it) }
+        }
         val vs = AppState.voltageSettings
         val body = buildString {
             append("{")
@@ -186,13 +185,11 @@ class RemoteChargerHttp(
                 "{\"error\":\"body must be JSON with at least one of battery_voltage_setting (12/24/48), absorption_voltage, float_voltage\"}\n",
             )
         }
+        val sender = voltageCommandSender
+            ?: return HttpResult(503, MIME_JSON, "{\"error\":\"voltage control unavailable on this build\"}\n")
         val (battSetting, absVolts, floatVolts) = parsed
-        // Split into one or two service intents (one BLE session per op on the existing controller).
-        if (battSetting != null) voltageCommandSender?.sendBatteryVoltageSetting(mac, battSetting)
-        if (absVolts != null || floatVolts != null) voltageCommandSender?.sendChargingVoltages(mac, absVolts, floatVolts)
-        if (voltageCommandSender == null) {
-            return HttpResult(503, MIME_JSON, "{\"error\":\"voltage control unavailable on this build\"}\n")
-        }
+        if (battSetting != null) sender.sendBatteryVoltageSetting(mac, battSetting)
+        if (absVolts != null || floatVolts != null) sender.sendChargingVoltages(mac, absVolts, floatVolts)
         return HttpResult(202, MIME_JSON, "{\"accepted\":true,\"mac\":\"${RemoteChargerHttpJson.escape(mac)}\"}\n")
     }
 
@@ -211,9 +208,6 @@ class RemoteChargerHttp(
         if (fl != null && (fl < 0 || fl > 80)) return null
         return Triple(batt, abs, fl)
     }
-
-    private var voltageCommandSender: VoltageCommandSender? = null
-    fun attachVoltageSender(sender: VoltageCommandSender) { voltageCommandSender = sender }
 
     private fun notFound() = HttpResult(404, MIME_PLAINTEXT, "Not Found\n")
 
@@ -461,6 +455,7 @@ private val CONTROL_PAGE: String = """
   <div class="row"><input type="text" id="enTime" placeholder="ON 08:30" inputmode="numeric"><input type="text" id="disTime" placeholder="OFF 18:00" inputmode="numeric"></div>
   <button class="btn small" id="btnSched" disabled>Save schedule</button>
   <button class="btn small" id="btnRefresh">Refresh</button>
+  <div class="hint"><a href="/voltage" style="color:#8fa3bf">Voltage settings</a></div>
   <div class="hint">The secret is stored only in this browser session and sent only in a request header &mdash; never in the URL.</div>
 </div>
 <script>

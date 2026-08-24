@@ -34,6 +34,7 @@ class RemoteChargerHttpServerTest {
     private val store = RemoteChargerStore(appContext)
     private val sink = FakeSink()
     private val scheduleSink = FakeScheduleSink()
+    private val voltageSink = FakeVoltageSink()
     private var server: PrometheusExporter? = null
     private var port = -1
 
@@ -51,6 +52,13 @@ class RemoteChargerHttpServerTest {
         }
     }
 
+    private class FakeVoltageSink : VoltageCommandSender {
+        val battery = mutableListOf<Pair<String, Int>>()
+        override fun sendBatteryVoltageSetting(mac: String, volts: Int) { battery.add(mac to volts) }
+        override fun sendChargingVoltages(mac: String, absorptionVolts: Double?, floatVolts: Double?) {}
+        override fun requestVoltageRead(mac: String) {}
+    }
+
     @Before
     fun setUp() {
         store.save(true, "s3cret")
@@ -60,6 +68,7 @@ class RemoteChargerHttpServerTest {
             macProvider = { "AA:BB:CC:DD:EE:FF" },
             commandSender = sink,
             scheduleSender = scheduleSink,
+            voltageCommandSender = voltageSink,
         )
         val exporter = PrometheusExporter(0, control)
         exporter.start(10_000, false)
@@ -154,6 +163,29 @@ class RemoteChargerHttpServerTest {
         assertEquals(202, code)
         assertTrue(body.contains("\"accepted\":true"))
         assertEquals(listOf(listOf(true, "09:15", "16:45", "AA:BB:CC:DD:EE:FF")), scheduleSink.calls)
+        assertTrue(sink.calls.isEmpty())
+    }
+
+    @Test
+    fun `get voltage over loopback is routed and authenticated`() {
+        // HttpURLConnection sends Accept: text/html, matching a browser navigation.
+        val (noSecret, page) = request("GET", "/voltage", secret = null)
+        assertEquals(200, noSecret)
+        assertTrue(page.contains("Voltage Settings"))
+        val (code, body) = request("GET", "/voltage", secret = "s3cret")
+        assertEquals(200, code)
+        assertTrue(body.contains("battery_voltage_setting"))
+    }
+
+    @Test
+    fun `post voltage over loopback reaches the sender`() {
+        val (code, body) = request(
+            "POST", "/voltage", secret = "s3cret",
+            body = """{"battery_voltage_setting":24}""",
+        )
+        assertEquals(202, code)
+        assertTrue(body.contains("\"accepted\":true"))
+        assertEquals(listOf("AA:BB:CC:DD:EE:FF" to 24), voltageSink.battery)
         assertTrue(sink.calls.isEmpty())
     }
 
