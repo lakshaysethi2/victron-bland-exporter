@@ -48,6 +48,11 @@ class RemoteChargerHttpTest {
         override fun saveKey(mac: String, key: String) { calls.add(mac to key) }
     }
 
+    private class FakeReadSink : ChargerReadSender {
+        val calls = mutableListOf<String>()
+        override fun readCharger(mac: String) { calls.add(mac) }
+    }
+
     private class Harness(
         var enabled: Boolean = true,
         var secret: String = "correct horse battery staple",
@@ -66,8 +71,9 @@ class RemoteChargerHttpTest {
         val scheduleSink = FakeScheduleSink()
         val voltageSink = FakeVoltageSink()
         val keySink = FakeKeySink()
+        val readSink = FakeReadSink()
 
-        fun control(withKeySender: Boolean = true) = RemoteChargerHttp(
+        fun control(withKeySender: Boolean = true, withReadSender: Boolean = true) = RemoteChargerHttp(
             settingsProvider = { RemoteChargerStore.RemoteChargerSettings(enabled = enabled, authSecret = secret) },
             statusProvider = { snapshot },
             macProvider = { mac },
@@ -75,6 +81,7 @@ class RemoteChargerHttpTest {
             scheduleSender = scheduleSink,
             voltageCommandSender = voltageSink,
             keySender = if (withKeySender) keySink else null,
+            readSender = if (withReadSender) readSink else null,
         )
     }
 
@@ -99,11 +106,13 @@ class RemoteChargerHttpTest {
         assertEquals(404, c.handle("/voltage", GET, headers(SECRET), "").statusCode)
         assertEquals(404, c.handle("/voltage", POST, headers(SECRET), """{"battery_voltage_setting":24}""").statusCode)
         assertEquals(404, c.handle("/charger/key", POST, headers(SECRET), """{"mac":"AA:BB:CC:DD:EE:FF","key":"0123456789abcdef0123456789abcdef"}""").statusCode)
+        assertEquals(404, c.handle("/charger", POST, headers(SECRET), """{"action":"read"}""").statusCode)
         assertEquals(404, c.handle("/charger/status", GET, emptyMap(), "").statusCode)
         assertTrue(h.sink.calls.isEmpty())
         assertTrue(h.scheduleSink.calls.isEmpty())
         assertTrue(h.voltageSink.battery.isEmpty())
         assertTrue(h.keySink.calls.isEmpty())
+        assertTrue(h.readSink.calls.isEmpty())
     }
 
     @Test
@@ -384,6 +393,38 @@ class RemoteChargerHttpTest {
     }
 
     @Test
+    fun `post read accepted and forwarded without flipping`() {
+        val h = Harness()
+        val r = h.control().handle("/charger", POST, headers(SECRET), """{"action":"read"}""")
+        assertEquals(202, r.statusCode)
+        assertEquals(listOf("AA:BB:CC:DD:EE:FF"), h.readSink.calls)
+        assertTrue(h.sink.calls.isEmpty())
+        assertTrue(r.body.contains("\"accepted\":true"))
+        assertTrue(r.body.contains("\"action\":\"read\""))
+    }
+
+    @Test
+    fun `post read uses body mac over the stored target`() {
+        val h = Harness(mac = "AA:BB:CC:DD:EE:FF")
+        val r = h.control().handle(
+            "/charger", POST, headers(SECRET),
+            """{"action":"read","mac":"11:22:33:44:55:66"}""",
+        )
+        assertEquals(202, r.statusCode)
+        assertEquals(listOf("11:22:33:44:55:66"), h.readSink.calls)
+        assertTrue(h.sink.calls.isEmpty())
+    }
+
+    @Test
+    fun `post read without a sender returns 503`() {
+        val h = Harness()
+        val r = h.control(withReadSender = false).handle("/charger", POST, headers(SECRET), """{"action":"read"}""")
+        assertEquals(503, r.statusCode)
+        assertTrue(h.readSink.calls.isEmpty())
+        assertTrue(h.sink.calls.isEmpty())
+    }
+
+    @Test
     fun `post schedule uses body mac when no charger is stored`() {
         val h = Harness(mac = null)
         val r = h.control().handle(
@@ -420,6 +461,8 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("tunnelUrl"))
         assertTrue(r.body.contains("/charger/key"))
         assertTrue(r.body.contains("Save key"))
+        assertTrue(r.body.contains("Read state"))
+        assertTrue(r.body.contains("send(\"read\")"))
         assertTrue(r.body.contains("sighted"))
         assertTrue(r.body.contains("wrong key"))
         assertFalse(r.body.contains(SECRET))

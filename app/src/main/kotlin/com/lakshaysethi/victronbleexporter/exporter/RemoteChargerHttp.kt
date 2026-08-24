@@ -19,7 +19,7 @@ import java.security.MessageDigest
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
  *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status)
- *   POST /charger        -> JSON body {"action":"on"|"off", "mac"?: "AA:BB:..."} flips the charger
+ *   POST /charger        -> JSON body {"action":"on"|"off"|"read", "mac"?: "AA:BB:..."} flips or reads the charger
  *   POST /charger/schedule -> JSON {enabled, enable, disable, mac?} saves the daily window
  *   POST /charger/key    -> JSON {mac, key} saves an Instant Readout key (never echoed)
  *   GET  /voltage        -> JSON voltage settings (auth required)
@@ -49,6 +49,7 @@ class RemoteChargerHttp(
     private val scheduleSender: ScheduleCommandSender? = null,
     private val voltageCommandSender: VoltageCommandSender? = null,
     private val keySender: KeyCommandSender? = null,
+    private val readSender: ChargerReadSender? = null,
 ) {
 
     /**
@@ -103,10 +104,20 @@ class RemoteChargerHttp(
             return HttpResult(
                 statusCode = 400,
                 mimeType = MIME_JSON,
-                body = "{\"error\":\"body must be JSON: {\\\"action\\\": \\\"on\\\" | \\\"off\\\"}\"}\n",
+                body = "{\"error\":\"body must be JSON: {\\\"action\\\": \\\"on\\\" | \\\"off\\\" | \\\"read\\\"}\"}\n",
             )
         }
         val mac = macFromRequest(body) ?: return missingMac(body)
+        if (action == "read") {
+            val sender = readSender
+                ?: return HttpResult(503, MIME_JSON, "{\"error\":\"charger read unavailable on this build\"}\n")
+            sender.readCharger(mac)
+            return HttpResult(
+                statusCode = 202,
+                mimeType = MIME_JSON,
+                body = "{\"accepted\":true,\"action\":\"read\",\"mac\":\"${RemoteChargerHttpJson.escape(mac)}\"}\n",
+            )
+        }
         val enable = action == "on"
         commandSender.sendChargerCommand(enable, mac)
         return HttpResult(
@@ -256,7 +267,7 @@ class RemoteChargerHttp(
         const val MIME_JSON = "application/json; charset=utf-8"
         const val MIME_PLAINTEXT = "text/plain; charset=utf-8"
 
-        val ACTION_REGEX = Regex("""(?s)"action"\s*:\s*"(on|off)"""", RegexOption.IGNORE_CASE)
+        val ACTION_REGEX = Regex("""(?s)"action"\s*:\s*"(on|off|read)"""", RegexOption.IGNORE_CASE)
         val ENABLED_REGEX = Regex("\"enabled\"\\s*:\\s*(true|false)", RegexOption.IGNORE_CASE)
         val ENABLE_TIME_REGEX = Regex("\"enable\"\\s*:\\s*\"([^\"]+)\"")
         val DISABLE_TIME_REGEX = Regex("\"disable\"\\s*:\\s*\"([^\"]+)\"")
@@ -264,7 +275,7 @@ class RemoteChargerHttp(
         val KEY_FIELD = Regex("\"key\"\\s*:\\s*\"([^\"]+)\"")
         val MAC_SHAPE = Regex("(?i)^([0-9A-F]{2}:){5}[0-9A-F]{2}$")
 
-        /** Tiny JSON field extractor — the API accepts exactly `{"action":"on"|"off"}`. */
+        /** Tiny JSON field extractor — the API accepts `{"action":"on"|"off"|"read"}`. */
         fun parseAction(body: String): String? =
             ACTION_REGEX.find(body.trim())?.groupValues?.get(1)?.lowercase()
     }
@@ -303,6 +314,11 @@ internal object RemoteChargerAuth {
 /** Sends a charger flip command. Production: CHARGER_SET intent to the service. */
 fun interface ChargerCommandSender {
     fun sendChargerCommand(enable: Boolean, mac: String)
+}
+
+/** Reads charger mode over GATT. Production: CHARGER_READ intent to the service. */
+fun interface ChargerReadSender {
+    fun readCharger(mac: String)
 }
 
 /** Saves the daily enable/disable window. Production: CHARGER_SCHEDULE_SAVE intent. */
@@ -627,6 +643,7 @@ private val CONTROL_PAGE: String = """
   <button class="btn small" id="btnUnlock">Unlock</button>
   <button class="btn on" id="btnOn" disabled>ENABLE CHARGER</button>
   <button class="btn off" id="btnOff" disabled>DISABLE CHARGER</button>
+  <button class="btn small" id="btnRead" disabled>Read state</button>
   <div class="sub" style="margin:14px 0 8px">Daily schedule (phone clock below)</div>
   <label class="hint"><input type="checkbox" id="schedOn"> Enforce window</label>
   <div class="row"><input type="text" id="enTime" placeholder="ON 08:30" inputmode="numeric"><input type="text" id="disTime" placeholder="OFF 18:00" inputmode="numeric"></div>
@@ -651,6 +668,7 @@ private val CONTROL_PAGE: String = """
       btnOn = document.getElementById("btnOn"), btnOff = document.getElementById("btnOff"),
       btnRefresh = document.getElementById("btnRefresh"),
       btnUnlock = document.getElementById("btnUnlock"),
+      btnRead = document.getElementById("btnRead"),
       btnSched = document.getElementById("btnSched"),
       btnKey = document.getElementById("btnKey"),
       keyMac = document.getElementById("keyMac"),
@@ -660,7 +678,7 @@ private val CONTROL_PAGE: String = """
       disTime = document.getElementById("disTime"),
       secretInput = document.getElementById("secret");
   function setErr(t) { err.textContent = t || ""; }
-  function setBusy(b) { btnOn.disabled = b; btnOff.disabled = b; btnSched.disabled = b; btnKey.disabled = b; if (b) { dot.className = "dot busy"; } }
+  function setBusy(b) { btnOn.disabled = b; btnOff.disabled = b; btnRead.disabled = b; btnSched.disabled = b; btnKey.disabled = b; if (b) { dot.className = "dot busy"; } }
   function api(path, opts) {
     opts = opts || {};
     opts.headers = Object.assign({ "X-Remote-Secret": secret }, opts.headers || {});
@@ -806,6 +824,7 @@ private val CONTROL_PAGE: String = """
   });
   btnOn.addEventListener("click", function () { send("on"); });
   btnOff.addEventListener("click", function () { send("off"); });
+  btnRead.addEventListener("click", function () { send("read"); });
   btnSched.addEventListener("click", saveSched);
   btnKey.addEventListener("click", saveKey);
   btnRefresh.addEventListener("click", function () { schedFilled = false; loadStatus(); });

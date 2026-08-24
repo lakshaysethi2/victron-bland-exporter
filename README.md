@@ -104,7 +104,7 @@ In the app's **Remote Charger Control** section, enable remote control and set a
 
 - `GET  /charger` — mobile control page (login shell; everything on it requires the secret)
 - `GET  /charger/status` — JSON state (`mode`, schedule times, phone local time/zone, live Instant Readout watts/volts, sighted BLE devices with needs-key / wrong-key, last charger debug lines, …)
-- `POST /charger` — `{"action":"on"|"off", "mac"?: "AA:BB:..."}` flips the charger (body mac, else stored, else first live Instant Readout)
+- `POST /charger` — `{"action":"on"|"off"|"read", "mac"?: "AA:BB:..."}` flips the charger or reads live ON/OFF over GATT (body mac, else stored, else first live Instant Readout)
 - `POST /charger/schedule` — `{"enabled":true,"enable":"08:30","disable":"18:00", "mac"?: "AA:BB:..."}` saves the daily window
 - `POST /charger/key` — `{"mac":"AA:BB:...","key":"<32 hex>"}` saves an Instant Readout key on the phone (never echoed)
 - `GET  /voltage` — JSON voltage settings; `POST /voltage` writes battery/absorption/float

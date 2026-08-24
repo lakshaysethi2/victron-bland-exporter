@@ -28,6 +28,7 @@ import com.lakshaysethi.victronbleexporter.diag.AppLog
 import com.lakshaysethi.victronbleexporter.diag.Diagnostics
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
 import com.lakshaysethi.victronbleexporter.exporter.ChargerCommandSender
+import com.lakshaysethi.victronbleexporter.exporter.ChargerReadSender
 import com.lakshaysethi.victronbleexporter.exporter.ChargerStatusSnapshot
 import com.lakshaysethi.victronbleexporter.exporter.KeyCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.LiveReadout
@@ -166,6 +167,17 @@ class VictronBleExporterService : Service() {
                     Log.i(TAG, "Remote Instant Readout key save for $mac")
                 } catch (e: Exception) {
                     Log.e(TAG, "Remote key save could not be sent", e)
+                }
+            },
+            readSender = ChargerReadSender { mac ->
+                try {
+                    startForegroundService(Intent(this, VictronBleExporterService::class.java).apply {
+                        action = "CHARGER_READ"
+                        putExtra("mac", mac)
+                    })
+                    Log.i(TAG, "Remote charger read for $mac")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Remote charger read could not be sent", e)
                 }
             },
         )
