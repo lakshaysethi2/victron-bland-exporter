@@ -9,11 +9,17 @@ import androidx.security.crypto.MasterKey
 /**
  * Simple encrypted storage for device MAC -> encryption keys.
  * Falls back to plain SharedPreferences if encrypted store fails (some OEMs / emulators).
+ *
+ * The named-tunnel token is also written to device-protected prefs so boot restore
+ * can read it at LOCKED_BOOT_COMPLETED, before credential storage is unlocked.
  */
 class DeviceRepository(context: Context) {
 
     private val tag = "DeviceRepository"
     private var prefs: SharedPreferences
+    private val tokenPrefs: SharedPreferences =
+        context.createDeviceProtectedStorageContext()
+            .getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE)
 
     init {
         prefs = try {
@@ -30,7 +36,14 @@ class DeviceRepository(context: Context) {
             )
         } catch (e: Exception) {
             Log.w(tag, "EncryptedSharedPreferences failed, falling back to plain prefs", e)
-            context.getSharedPreferences("victron_devices_fallback", Context.MODE_PRIVATE)
+            try {
+                context.getSharedPreferences("victron_devices_fallback", Context.MODE_PRIVATE)
+            } catch (e2: Exception) {
+                // Locked boot: credential CE storage is not available yet.
+                Log.w(tag, "Credential prefs unavailable; using device-protected fallback", e2)
+                context.createDeviceProtectedStorageContext()
+                    .getSharedPreferences("victron_devices_fallback", Context.MODE_PRIVATE)
+            }
         }
     }
 
@@ -74,24 +87,37 @@ class DeviceRepository(context: Context) {
 
     fun saveTunnelToken(token: String) {
         val trimmed = token.trim()
+        writeToken(tokenPrefs, trimmed)
         try {
-            if (trimmed.isBlank()) {
-                prefs.edit().remove(KEY_TUNNEL_TOKEN).apply()
-            } else {
-                prefs.edit().putString(KEY_TUNNEL_TOKEN, trimmed).apply()
-            }
-            Log.i(tag, "Saved tunnel token")
+            writeToken(prefs, trimmed)
         } catch (e: Exception) {
-            Log.e(tag, "Failed to save tunnel token", e)
+            Log.e(tag, "Failed to save tunnel token to credential store", e)
+        }
+        Log.i(tag, "Saved tunnel token")
+    }
+
+    fun getTunnelToken(): String? {
+        readToken(tokenPrefs)?.let { return it }
+        val legacy = try {
+            readToken(prefs)
+        } catch (e: Exception) {
+            Log.w(tag, "getTunnelToken credential read failed", e)
+            null
+        }
+        if (legacy != null) writeToken(tokenPrefs, legacy) // migrate onto the boot-safe store
+        return legacy
+    }
+
+    private fun writeToken(store: SharedPreferences, trimmed: String) {
+        if (trimmed.isBlank()) {
+            store.edit().remove(KEY_TUNNEL_TOKEN).apply()
+        } else {
+            store.edit().putString(KEY_TUNNEL_TOKEN, trimmed).apply()
         }
     }
 
-    fun getTunnelToken(): String? = try {
-        prefs.getString(KEY_TUNNEL_TOKEN, null)?.takeIf { it.isNotBlank() }
-    } catch (e: Exception) {
-        Log.w(tag, "getTunnelToken failed", e)
-        null
-    }
+    private fun readToken(store: SharedPreferences): String? =
+        store.getString(KEY_TUNNEL_TOKEN, null)?.takeIf { it.isNotBlank() }
 
     fun removeDevice(mac: String) {
         try {
@@ -107,13 +133,19 @@ class DeviceRepository(context: Context) {
         } catch (e: Exception) {
             Log.e(tag, "clear failed", e)
         }
+        try {
+            tokenPrefs.edit().clear().apply()
+        } catch (e: Exception) {
+            Log.e(tag, "tokenPrefs clear failed", e)
+        }
     }
 
     fun hasKey(mac: String): Boolean = !getKey(mac).isNullOrBlank()
 
     companion object {
         // Reserved key for the cloudflared named-tunnel token (not a MAC, so getAllDevices skips it).
-        private const val KEY_TUNNEL_TOKEN = "__tunnel_token__"
+        internal const val TOKEN_PREFS = "victron_tunnel_token"
+        internal const val KEY_TUNNEL_TOKEN = "__tunnel_token__"
 
         fun normalizeKeyInput(input: String): String {
             return input.trim().lowercase().replace(Regex("[^0-9a-f]"), "")

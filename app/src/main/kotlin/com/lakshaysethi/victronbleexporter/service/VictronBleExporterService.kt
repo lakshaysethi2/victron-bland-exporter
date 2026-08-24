@@ -7,8 +7,10 @@ import android.app.*
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.*
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -160,6 +162,19 @@ class VictronBleExporterService : Service() {
     // BLE scan health: last advertisement or successful startScan. 0 = never started.
     @Volatile private var lastScanResultAt = 0L
 
+    private val unlockReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != Intent.ACTION_USER_UNLOCKED) return
+            try {
+                deviceRepository = DeviceRepository(this@VictronBleExporterService)
+                loadPersistedKeys()
+                Log.i(TAG, "Reloaded keys after user unlock")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to reload keys after unlock", e)
+            }
+        }
+    }
+
     fun addDeviceKey(mac: String, key: String) {
         val normalizedMac = DeviceRepository.normalizeMacInput(mac)
         val cleanKey = DeviceRepository.normalizeKeyInput(key)
@@ -211,6 +226,16 @@ class VictronBleExporterService : Service() {
             loadPersistedKeys()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to init DeviceRepository", e)
+        }
+        try {
+            val filter = IntentFilter(Intent.ACTION_USER_UNLOCKED)
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(unlockReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(unlockReceiver, filter)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to register unlock receiver", e)
         }
 
         try {
@@ -875,6 +900,11 @@ class VictronBleExporterService : Service() {
             chargerController.shutdown()
         } catch (e: Exception) {
             Log.w(TAG, "charger controller shutdown failed", e)
+        }
+        try {
+            unregisterReceiver(unlockReceiver)
+        } catch (e: Exception) {
+            Log.w(TAG, "unlock receiver unregister failed", e)
         }
         serviceScope.cancel()
     }

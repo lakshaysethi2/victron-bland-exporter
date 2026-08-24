@@ -15,6 +15,7 @@ class BackupRulesTest {
         val required = listOf(
             "victron_devices.xml",
             "victron_devices_fallback.xml",
+            "victron_tunnel_token.xml",
             "victron_remote_settings.xml",
             "victron_charger_settings.xml",
             "victron_app_log.xml",

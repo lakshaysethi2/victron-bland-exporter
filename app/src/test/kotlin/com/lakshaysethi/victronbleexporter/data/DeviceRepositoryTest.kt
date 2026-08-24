@@ -36,6 +36,34 @@ class DeviceRepositoryTest {
     }
 
     @Test
+    fun `named tunnel token is written to device-protected prefs`() {
+        repo.saveTunnelToken("boot-safe-token")
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val stored = context.createDeviceProtectedStorageContext()
+            .getSharedPreferences(DeviceRepository.TOKEN_PREFS, Context.MODE_PRIVATE)
+            .getString(DeviceRepository.KEY_TUNNEL_TOKEN, null)
+        assertEquals("boot-safe-token", stored)
+    }
+
+    @Test
+    fun `legacy credential token migrates onto the device-protected store`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        repo.saveTunnelToken("legacy-token")
+        context.createDeviceProtectedStorageContext()
+            .getSharedPreferences(DeviceRepository.TOKEN_PREFS, Context.MODE_PRIVATE)
+            .edit().clear().commit()
+
+        val migrated = DeviceRepository(context).getTunnelToken()
+        assertEquals("legacy-token", migrated)
+        assertEquals(
+            "legacy-token",
+            context.createDeviceProtectedStorageContext()
+                .getSharedPreferences(DeviceRepository.TOKEN_PREFS, Context.MODE_PRIVATE)
+                .getString(DeviceRepository.KEY_TUNNEL_TOKEN, null),
+        )
+    }
+
+    @Test
     fun `blank token clears the saved value and is not a device key`() {
         repo.saveDevice("AA:BB:CC:DD:EE:FF", "0123456789abcdef0123456789abcdef")
         repo.saveTunnelToken("keep-me")

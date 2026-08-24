@@ -8,6 +8,7 @@ class BootReceiverTest {
 
     @Test
     fun `starts exporter after boot, OEM quick-boot, and APK replace`() {
+        assertTrue(shouldStartOn("android.intent.action.LOCKED_BOOT_COMPLETED"))
         assertTrue(shouldStartOn("android.intent.action.BOOT_COMPLETED"))
         assertTrue(shouldStartOn("android.intent.action.MY_PACKAGE_REPLACED"))
         assertTrue(shouldStartOn("android.intent.action.QUICKBOOT_POWERON"))

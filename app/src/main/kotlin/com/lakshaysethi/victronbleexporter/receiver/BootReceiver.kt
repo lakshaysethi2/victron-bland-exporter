@@ -17,8 +17,9 @@ class BootReceiver : BroadcastReceiver() {
     }
 }
 
-/** Boot / OEM quick-boot / APK replace should bring the exporter back up. */
+/** Locked boot / first unlock / OEM quick-boot / APK replace should bring the exporter back up. */
 internal fun shouldStartOn(action: String?): Boolean = when (action) {
+    Intent.ACTION_LOCKED_BOOT_COMPLETED,
     Intent.ACTION_BOOT_COMPLETED,
     Intent.ACTION_MY_PACKAGE_REPLACED,
     "android.intent.action.QUICKBOOT_POWERON",
