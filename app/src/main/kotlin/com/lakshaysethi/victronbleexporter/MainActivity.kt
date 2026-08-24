@@ -732,8 +732,8 @@ fun VictronBleExporterScreen(
 
         while (true) {
             try {
-                // Live parsed devices
-                val all = MetricsStore.getAll()
+                // Live parsed devices (omit Instant Readout older than 90s)
+                val all = MetricsStore.getFresh()
                 deviceCount = all.size
                 liveDevices = all.map { (mac, parsed) -> mac to parsed.data }
 

@@ -72,11 +72,13 @@ class PrometheusExporter(
 
     private fun serveMetrics(): Response {
         val sb = StringBuilder()
+        val now = System.currentTimeMillis()
         val all = MetricsStore.getAll()
+        val fresh = MetricsStore.getFresh(now)
 
-        sb.append("# HELP victron_devices_total Number of Victron devices discovered\n")
+        sb.append("# HELP victron_devices_total Number of Victron devices with a fresh Instant Readout\n")
         sb.append("# TYPE victron_devices_total gauge\n")
-        sb.append("victron_devices_total ${all.size}\n\n")
+        sb.append("victron_devices_total ${fresh.size}\n\n")
 
         // Charger control state (1 = charger enabled, 0 = disabled, -1 = unknown)
         val chargerMode = AppState.chargerMode
@@ -108,6 +110,11 @@ class PrometheusExporter(
         for ((mac, device) in all) {
             val labels = buildLabels(mac, device)
             val data = device.data
+            val live = MetricsStore.isFresh(now, device.lastSeen)
+
+            appendMetric(sb, "victron_up", labels, if (live) 1.0 else 0.0)
+            appendMetric(sb, "victron_last_seen_timestamp", labels, device.lastSeen / 1000.0)
+            if (!live) continue
 
             appendMetric(sb, "victron_battery_voltage_volts", labels, data["battery_voltage"] as? Number)
             appendMetric(sb, "victron_battery_current_amps", labels, data["battery_current"] as? Number)
@@ -115,9 +122,7 @@ class PrometheusExporter(
             appendMetric(sb, "victron_yield_today_wh", labels, data["yield_today_wh"] as? Number)
             appendMetric(sb, "victron_load_current_amps", labels, data["load_current_a"] as? Number)
 
-            // Common
             appendMetric(sb, "victron_rssi_dbm", labels, device.rssi.toDouble())
-            appendMetric(sb, "victron_last_seen_timestamp", labels, System.currentTimeMillis() / 1000.0)
 
             if (data.containsKey("charge_state")) {
                 val stateStr = data["charge_state"] as? String

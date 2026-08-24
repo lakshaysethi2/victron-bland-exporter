@@ -253,7 +253,11 @@ Reload Prometheus (`curl -X POST localhost:9090/-/reload` or restart the contain
 | `victron_soc_percent` | % | State of charge (SmartShunt/battery monitor) |
 | `victron_charge_state` | enum | 0=OFF, 3=BULK, 4=ABSORPTION, 5=FLOAT |
 | `victron_rssi_dbm` | dBm | BLE signal strength to the phone |
-| `victron_devices_total` | count | Number of Victron devices being served |
+| `victron_last_seen_timestamp` | unix s | Time of the last decrypted Instant Readout (not scrape time) |
+| `victron_up` | 0/1 | `1` while that readout is younger than 90s |
+| `victron_devices_total` | count | Devices with a fresh Instant Readout (drops to 0 if BLE is lost) |
+
+Live Instant Readout gauges (voltage, current, watts, yield, SoC, RSSI, charge state) are omitted after 90 seconds without a new advertisement, so Grafana does not keep plotting the last-known watts as if the charger were still talking.
 
 Every device-scoped metric carries `device` (model name), `mac` (device MAC — see the privacy note), and `type` labels.
 
