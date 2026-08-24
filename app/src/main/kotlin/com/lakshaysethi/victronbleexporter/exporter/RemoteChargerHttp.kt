@@ -17,7 +17,7 @@ import java.security.MessageDigest
  *   GET  /charger        -> mobile control page (shell; every API call inside
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
- *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + last charger debug lines)
+ *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + last charger debug lines + tunnel status)
  *   POST /charger        -> JSON body {"action":"on"|"off", "mac"?: "AA:BB:..."} flips the charger
  *   POST /charger/schedule -> JSON {enabled, enable, disable, mac?} saves the daily window
  *   GET  /voltage        -> JSON voltage settings (auth required)
@@ -341,6 +341,8 @@ data class ChargerStatusSnapshot(
     val phoneZone: String = "",
     val scheduleWantsOn: Boolean = false,
     val nextTransition: String = "",
+    val tunnelStatus: String = "",
+    val tunnelUrl: String? = null,
 ) {
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
 
@@ -360,6 +362,10 @@ data class ChargerStatusSnapshot(
         append(",\"phoneZone\":\"${RemoteChargerHttpJson.escape(phoneZone)}\"")
         append(",\"scheduleWantsOn\":").append(scheduleWantsOn)
         append(",\"nextTransition\":\"${RemoteChargerHttpJson.escape(nextTransition)}\"")
+        append(",\"tunnelStatus\":\"${RemoteChargerHttpJson.escape(tunnelStatus)}\"")
+        append(",\"tunnelUrl\":").append(
+            if (tunnelUrl.isNullOrBlank()) "null" else "\"${RemoteChargerHttpJson.escape(tunnelUrl)}\"",
+        )
         append(",\"live\":[")
         live.forEachIndexed { i, row ->
             if (i > 0) append(",")
@@ -388,6 +394,8 @@ data class ChargerStatusSnapshot(
                 stateUpdatedAt = AppState.chargerStateUpdatedAt,
                 phoneTime = clock.first,
                 phoneZone = clock.second,
+                tunnelStatus = AppState.tunnelStatus,
+                tunnelUrl = AppState.tunnelUrl,
             )
         }
     }
@@ -594,6 +602,8 @@ private val CONTROL_PAGE: String = """
       parts.push("window " + (data.scheduleWantsOn ? "ON" : "OFF") + (data.nextTransition ? " until " + data.nextTransition : ""));
     }
     if (data.phoneTime) parts.push("phone " + data.phoneTime + (data.phoneZone ? " " + data.phoneZone : ""));
+    if (data.tunnelStatus) parts.push("tunnel " + data.tunnelStatus);
+    if (data.tunnelUrl) parts.push(data.tunnelUrl);
     if (selectedMac || data.mac) parts.push("target " + (selectedMac || data.mac));
     meta.textContent = parts.join(" \u00b7 ");
     if (!schedFilled) {

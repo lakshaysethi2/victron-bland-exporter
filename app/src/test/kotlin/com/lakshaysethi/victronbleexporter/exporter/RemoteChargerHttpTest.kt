@@ -1,5 +1,6 @@
 package com.lakshaysethi.victronbleexporter.exporter
 
+import com.lakshaysethi.victronbleexporter.AppState
 import com.lakshaysethi.victronbleexporter.charger.ChargerProtocol
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
 import com.lakshaysethi.victronbleexporter.parser.ParsedDevice
@@ -146,6 +147,34 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"phoneZone\":\"\""))
         assertTrue(r.body.contains("\"scheduleWantsOn\":false"))
         assertTrue(r.body.contains("\"nextTransition\":\"\""))
+        assertTrue(r.body.contains("\"tunnelStatus\":\"\""))
+        assertTrue(r.body.contains("\"tunnelUrl\":null"))
+    }
+
+    @Test
+    fun `fromAppState copies live tunnel fields`() {
+        val prevStatus = AppState.tunnelStatus
+        val prevUrl = AppState.tunnelUrl
+        try {
+            AppState.tunnelStatus = "Running"
+            AppState.tunnelUrl = "https://example.trycloudflare.com"
+            val snap = ChargerStatusSnapshot.fromAppState()
+            assertEquals("Running", snap.tunnelStatus)
+            assertEquals("https://example.trycloudflare.com", snap.tunnelUrl)
+        } finally {
+            AppState.tunnelStatus = prevStatus
+            AppState.tunnelUrl = prevUrl
+        }
+    }
+
+    @Test
+    fun `status includes tunnel status and url so LAN can see if the named tunnel is up`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(tunnelStatus = "Named tunnel running", tunnelUrl = "https://mppt.lak.nz")
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"tunnelStatus\":\"Named tunnel running\""))
+        assertTrue(r.body.contains("\"tunnelUrl\":\"https://mppt.lak.nz\""))
     }
 
     @Test
@@ -378,6 +407,8 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("phoneTime"))
         assertTrue(r.body.contains("scheduleWantsOn"))
         assertTrue(r.body.contains("nextTransition"))
+        assertTrue(r.body.contains("tunnelStatus"))
+        assertTrue(r.body.contains("tunnelUrl"))
         assertFalse(r.body.contains(SECRET))
     }
 
