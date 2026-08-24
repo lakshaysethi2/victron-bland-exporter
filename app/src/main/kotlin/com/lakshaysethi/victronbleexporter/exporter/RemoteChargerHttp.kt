@@ -339,6 +339,8 @@ data class ChargerStatusSnapshot(
     val debug: List<String> = emptyList(),
     val phoneTime: String = "",
     val phoneZone: String = "",
+    val scheduleWantsOn: Boolean = false,
+    val nextTransition: String = "",
 ) {
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
 
@@ -356,6 +358,8 @@ data class ChargerStatusSnapshot(
         append(",\"disableTime\":\"${RemoteChargerHttpJson.escape(disableTime)}\"")
         append(",\"phoneTime\":\"${RemoteChargerHttpJson.escape(phoneTime)}\"")
         append(",\"phoneZone\":\"${RemoteChargerHttpJson.escape(phoneZone)}\"")
+        append(",\"scheduleWantsOn\":").append(scheduleWantsOn)
+        append(",\"nextTransition\":\"${RemoteChargerHttpJson.escape(nextTransition)}\"")
         append(",\"live\":[")
         live.forEachIndexed { i, row ->
             if (i > 0) append(",")
@@ -585,7 +589,10 @@ private val CONTROL_PAGE: String = """
     if (data.busy) parts.push("working\u2026");
     if (data.lastAction) parts.push(data.lastAction);
     if (data.lastError) parts.push(data.lastError);
-    if (data.scheduleEnabled) parts.push("schedule " + (data.enableTime || "?") + "-" + (data.disableTime || "?"));
+    if (data.scheduleEnabled) {
+      parts.push("schedule " + (data.enableTime || "?") + "-" + (data.disableTime || "?"));
+      parts.push("window " + (data.scheduleWantsOn ? "ON" : "OFF") + (data.nextTransition ? " until " + data.nextTransition : ""));
+    }
     if (data.phoneTime) parts.push("phone " + data.phoneTime + (data.phoneZone ? " " + data.phoneZone : ""));
     if (selectedMac || data.mac) parts.push("target " + (selectedMac || data.mac));
     meta.textContent = parts.join(" \u00b7 ");

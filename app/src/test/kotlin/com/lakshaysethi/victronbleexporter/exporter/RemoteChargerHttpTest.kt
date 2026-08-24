@@ -144,6 +144,18 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"debug\":[]"))
         assertTrue(r.body.contains("\"phoneTime\":\"\""))
         assertTrue(r.body.contains("\"phoneZone\":\"\""))
+        assertTrue(r.body.contains("\"scheduleWantsOn\":false"))
+        assertTrue(r.body.contains("\"nextTransition\":\"\""))
+    }
+
+    @Test
+    fun `status includes whether the window currently wants on and the next flip`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(scheduleEnabled = true, scheduleWantsOn = true, nextTransition = "18:00")
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"scheduleWantsOn\":true"))
+        assertTrue(r.body.contains("\"nextTransition\":\"18:00\""))
     }
 
     @Test
@@ -364,6 +376,8 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("data-mac"))
         assertTrue(r.body.contains("schedFilled"))
         assertTrue(r.body.contains("phoneTime"))
+        assertTrue(r.body.contains("scheduleWantsOn"))
+        assertTrue(r.body.contains("nextTransition"))
         assertFalse(r.body.contains(SECRET))
     }
 

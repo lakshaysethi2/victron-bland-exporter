@@ -59,6 +59,7 @@ class VictronBleExporterService : Service() {
     private val chargerController: ChargerController by lazy { ChargerController(this) }
     private val chargerScheduleStore: ChargerScheduleStore by lazy { ChargerScheduleStore(this) }
     private var lastScheduledMode: Boolean? = null
+    private var lastScheduledAppliedAt = 0L
     private var scheduleRetryAt = 0L
     private var lastVoltagePollAt = 0L
 
@@ -73,10 +74,15 @@ class VictronBleExporterService : Service() {
             settingsProvider = { RemoteChargerStore(this).load() },
             statusProvider = {
                 val s = chargerScheduleStore.load()
+                val minutes = Calendar.getInstance().let { it.get(Calendar.HOUR_OF_DAY) * 60 + it.get(Calendar.MINUTE) }
                 ChargerStatusSnapshot.fromAppState().copy(
                     scheduleEnabled = s.scheduleEnabled,
                     enableTime = ChargerSchedule.formatMinutes(s.enableMinutes),
                     disableTime = ChargerSchedule.formatMinutes(s.disableMinutes),
+                    scheduleWantsOn = ChargerSchedule.scheduledOn(minutes, s.enableMinutes, s.disableMinutes),
+                    nextTransition = ChargerSchedule.formatMinutes(
+                        ChargerSchedule.nextTransition(minutes, s.enableMinutes, s.disableMinutes),
+                    ),
                     live = LiveReadout.fromFreshMetrics(),
                     debug = ChargerDebugLog.snapshot().takeLast(ChargerStatusSnapshot.REMOTE_DEBUG_LINES),
                 )
@@ -278,32 +284,43 @@ class VictronBleExporterService : Service() {
      */
     private suspend fun enforceChargerSchedule() {
         val settings = chargerScheduleStore.load()
-        if (settings.chargerMac.isBlank()) return
         val now = System.currentTimeMillis()
         if (settings.manualOverrideUntil in 1..now) {
             chargerScheduleStore.clearOverride()
             AppState.chargerOverrideUntil = 0L
             lastScheduledMode = null
+            lastScheduledAppliedAt = 0L
             ChargerDebugLog.append("Manual override ended — schedule resumes")
         }
         if (!settings.scheduleEnabled) return
         if (chargerScheduleStore.manualOverrideUntil > now) return // manual override active
         if (now < scheduleRetryAt) return
 
+        val mac = ExporterKeepAlive.scheduleTargetMac(
+            settings.chargerMac,
+            MetricsStore.getFresh(now).keys.sorted(),
+        ) ?: return
+        if (settings.chargerMac.isBlank()) {
+            chargerScheduleStore.chargerMac = mac
+            AppState.chargerMac = mac
+            ChargerDebugLog.append("Schedule target set from live Instant Readout: $mac")
+        }
+
         val cal = Calendar.getInstance()
         val minutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
         val desiredOn = ChargerSchedule.scheduledOn(minutes, settings.enableMinutes, settings.disableMinutes)
-        if (desiredOn == lastScheduledMode) return
+        if (!ExporterKeepAlive.shouldApplySchedule(desiredOn, lastScheduledMode, lastScheduledAppliedAt, now)) return
 
         ChargerDebugLog.append(
             "Schedule tick: window=${ChargerSchedule.formatMinutes(settings.enableMinutes)}-${ChargerSchedule.formatMinutes(settings.disableMinutes)}" +
                 " -> charger ${if (desiredOn) "ON" else "OFF"}"
         )
-        val result = chargerController.setMode(settings.chargerMac, desiredOn)
+        val result = chargerController.setMode(mac, desiredOn)
         if (result.success) {
             lastScheduledMode = desiredOn
+            lastScheduledAppliedAt = now
             AppState.chargerMode = result.mode
-            AppState.chargerMac = settings.chargerMac
+            AppState.chargerMac = mac
             AppState.chargerStateUpdatedAt = System.currentTimeMillis()
             AppState.chargerLastAction = "Schedule: charger ${if (desiredOn) "ENABLED" else "DISABLED"} (${result.modeText})"
             AppState.chargerLastError = null
@@ -497,6 +514,7 @@ class VictronBleExporterService : Service() {
         AppState.chargerMac = mac
         AppState.chargerOverrideUntil = 0L
         lastScheduledMode = null // force a fresh apply now, not after the 30s loop delay
+        lastScheduledAppliedAt = 0L
         ChargerDebugLog.append(
             "Schedule saved: $mac ${if (enabled) "enabled" else "disabled"} " +
                 "($enableTime → $disableTime). Applies while the exporter notification is showing."
@@ -858,6 +876,7 @@ class VictronBleExporterService : Service() {
 /** Keep-alive / restore policy, kept Android-free so it can be unit-tested on the JVM. */
 internal object ExporterKeepAlive {
     const val SCHEDULE_RETRY_MS = 60_000L
+    const val SCHEDULE_REENFORCE_MS = 600_000L
     const val VOLTAGE_POLL_MS = 60_000L
     const val VOLTAGE_POLL_BACKOFF_MS = 300_000L
     const val VOLTAGE_FRESH_MS = 300_000L
@@ -865,6 +884,20 @@ internal object ExporterKeepAlive {
 
     fun shouldRestoreNamedTunnel(alreadyRunning: Boolean, savedToken: String?): Boolean =
         !alreadyRunning && !savedToken.isNullOrBlank()
+
+    /** Stored charger MAC wins; otherwise the first live Instant Readout. */
+    fun scheduleTargetMac(stored: String?, liveMacs: List<String>): String? {
+        val saved = stored?.trim().orEmpty()
+        if (saved.isNotEmpty()) return saved
+        return liveMacs.firstOrNull { it.isNotBlank() }
+    }
+
+    /** Apply on a window change, or again every 10 minutes so a dropped write is retried. */
+    fun shouldApplySchedule(desiredOn: Boolean, lastAppliedOn: Boolean?, lastAppliedAt: Long, now: Long): Boolean {
+        if (lastAppliedOn != desiredOn) return true
+        if (lastAppliedAt <= 0L) return true
+        return now - lastAppliedAt >= SCHEDULE_REENFORCE_MS
+    }
 
     fun voltagePollDue(now: Long, lastPollAt: Long, lastSuccessAt: Long, lastError: String?): Boolean {
         val interval = if (lastError != null) VOLTAGE_POLL_BACKOFF_MS else VOLTAGE_POLL_MS

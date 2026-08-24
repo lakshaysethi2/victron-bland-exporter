@@ -19,6 +19,25 @@ class ExporterKeepAliveTest {
     @Test
     fun `schedule retry is one minute not ten`() {
         assertEquals(60_000L, ExporterKeepAlive.SCHEDULE_RETRY_MS)
+        assertEquals(600_000L, ExporterKeepAlive.SCHEDULE_REENFORCE_MS)
+    }
+
+    @Test
+    fun `schedule target prefers the stored mac then the first live device`() {
+        assertEquals("AA:BB:CC:DD:EE:FF", ExporterKeepAlive.scheduleTargetMac("AA:BB:CC:DD:EE:FF", listOf("11:22:33:44:55:66")))
+        assertEquals("11:22:33:44:55:66", ExporterKeepAlive.scheduleTargetMac("", listOf("11:22:33:44:55:66")))
+        assertEquals("11:22:33:44:55:66", ExporterKeepAlive.scheduleTargetMac("   ", listOf("", "11:22:33:44:55:66")))
+        assertEquals(null, ExporterKeepAlive.scheduleTargetMac("", emptyList()))
+        assertEquals(null, ExporterKeepAlive.scheduleTargetMac(null, listOf("")))
+    }
+
+    @Test
+    fun `schedule reapplies on window change or after 10 minutes`() {
+        assertTrue(ExporterKeepAlive.shouldApplySchedule(true, null, 0, 1))
+        assertTrue(ExporterKeepAlive.shouldApplySchedule(true, false, 1, 2))
+        assertFalse(ExporterKeepAlive.shouldApplySchedule(true, true, 1, 1 + 599_999))
+        assertTrue(ExporterKeepAlive.shouldApplySchedule(true, true, 1, 1 + 600_000))
+        assertTrue(ExporterKeepAlive.shouldApplySchedule(false, false, 0, 1))
     }
 
     @Test
