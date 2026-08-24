@@ -2,7 +2,6 @@
 
 **Turn an old Android phone into a wireless bridge from your Victron MPPT to Prometheus + Grafana — no port-forwarding required.**
 
-[![CI](https://github.com/lakshaysethi2/victron-bland-exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/lakshaysethi2/victron-bland-exporter/actions/workflows/ci.yml)
 [![GitHub release](https://img.shields.io/github/v/release/lakshaysethi2/victron-bland-exporter)](https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Android%208%2B-3DDC84?logo=android&logoColor=white)](guide.md#install-the-app)
 [![License](https://img.shields.io/github/license/lakshaysethi2/victron-bland-exporter)](LICENSE)
@@ -168,7 +167,7 @@ Core functionality is complete and battle-tested on real hardware: BLE parsing, 
 
 ## Contributing
 
-PRs welcome — see [`guide.md`](guide.md) for the build and the cgo/NDK cloudflared recipe if you touch the tunnel binary. Please run the JVM unit tests (`./gradlew testDebugUnitTest`) — CI runs the same job plus a public-tree hygiene check, uploads a debug APK artifact, and on `main` publishes it to [GitHub Releases](https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest). `TunnelBinaryInspectorTest` guards the bundled binary's linkage. Open issues with the bug template; never paste a tunnel token, Instant Readout key, or remote secret — see [`SECURITY.md`](SECURITY.md).
+PRs welcome — see [`guide.md`](guide.md) for the build and the cgo/NDK cloudflared recipe if you touch the tunnel binary. Please run the JVM unit tests (`./gradlew testDebugUnitTest`) before opening a PR. `TunnelBinaryInspectorTest` guards the bundled binary's linkage. Open issues with the bug template; never paste a tunnel token, Instant Readout key, or remote secret — see [`SECURITY.md`](SECURITY.md).
 
 ## License
 
