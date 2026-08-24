@@ -96,6 +96,8 @@ Your APK lands at:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
+Skip the local build and grab the debug APK from the latest [GitHub Release](https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest) (`victron-ble-exporter.apk`). CI also keeps a copy on the workflow artifact.
+
 Alternatively there's a Docker build path (`make build` / `docker compose run --rm builder`) that uses the `mingc/android-build-box` image — handy if you don't want to install the SDK locally.
 
 ### Option B: Rebuild cloudflared yourself (cgo/NDK)

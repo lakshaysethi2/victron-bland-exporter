@@ -1,5 +1,6 @@
 package com.lakshaysethi.victronbleexporter.diag
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -20,5 +21,13 @@ class UpdateCheckerTest {
     @Test
     fun `older served version is not an update`() {
         assertFalse(UpdateChecker.isNewer(servedVersionCode = 1, currentVersionCode = 2))
+    }
+
+    @Test
+    fun `update check tries the log host then the public github release`() {
+        assertEquals(
+            listOf(UpdateChecker.LATEST_URL, UpdateChecker.GITHUB_LATEST_JSON),
+            UpdateChecker.CANDIDATE_URLS
+        )
     }
 }

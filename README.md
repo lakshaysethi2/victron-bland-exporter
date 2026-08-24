@@ -3,6 +3,7 @@
 **Turn an old Android phone into a wireless bridge from your Victron MPPT to Prometheus + Grafana — no port-forwarding required.**
 
 [![CI](https://github.com/lakshaysethi2/victron-bland-exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/lakshaysethi2/victron-bland-exporter/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/lakshaysethi2/victron-bland-exporter)](https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Android%208%2B-3DDC84?logo=android&logoColor=white)](guide.md#install-the-app)
 [![License](https://img.shields.io/github/license/lakshaysethi2/victron-bland-exporter)](LICENSE)
 [![Language](https://img.shields.io/badge/language-Kotlin-7F52FF?logo=kotlin&logoColor=white)](app/src/main/kotlin/com/lakshaysethi/victronbleexporter)
@@ -46,7 +47,7 @@ Live dashboard on a phone browser:
 
 The full, beginner-friendly walkthrough is in **[`guide.md`](guide.md)** — build the APK, sideload, set up the tunnel, configure Prometheus, and import the Grafana dashboard, end-to-end.
 
-1. **Build & install** — `./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk`, or grab the debug APK from the latest [CI run](https://github.com/lakshaysethi2/victron-bland-exporter/actions/workflows/ci.yml), then sideload on any arm64 Android 8+ phone ([instructions](guide.md#build-the-apk))
+1. **Build & install** — download [victron-ble-exporter.apk](https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/victron-ble-exporter.apk) from the latest [GitHub Release](https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest), or `./gradlew assembleDebug`, then sideload on any arm64 Android 8+ phone ([instructions](guide.md#build-the-apk))
 2. **Add your key** — grab the 32-char Instant Readout key from VictronConnect ([how](guide.md#get-your-victron-encryption-key))
 3. **Start the tunnel** — quick tunnel for testing (`https://your-subdomain.trycloudflare.com`), named tunnel for a stable hostname ([setup](guide.md#set-up-the-tunnel))
 4. **Scrape it** — 5-second HTTPS scrape job in Prometheus ([config](guide.md#configure-prometheus))
@@ -63,7 +64,7 @@ The full, beginner-friendly walkthrough is in **[`guide.md`](guide.md)** — bui
 - 🔋 **Battery / voltage control over BLE** — read and set battery system voltage (register `0xEDEF`, e.g. 12/24/48 V), absorption / float / equalisation voltages (`0xEDF7`/`0xEDF6`/`0xEDF4`) and live charger voltage (`0xEDD5`) over the same GATT service, with confirmation dialogs and metrics
 - 🌐 **Remote charger + voltage control** — flip the charger or set voltages from any browser at `https://mppt.lak.nz/charger` and `https://mppt.lak.nz/voltage` (named tunnel) or `http://<phone-ip>:5338/...` (LAN), protected by a shared secret you set in the app
 - 🖥️ **Importable Grafana dashboard** — [`deploy/grafana-dashboard.json`](deploy/grafana-dashboard.json): solar power, battery voltage/current, **panel voltage**, yield, devices online
-- 📤 **Remote diagnostics + in-app updates** — Send Diagnostics posts the last 500 app/charger log lines to [mppt-logs.lak.nz](https://mppt-logs.lak.nz); Check for Updates reads `/api/latest.json` and offers the hosted APK when `versionCode` is newer
+- 📤 **Remote diagnostics + in-app updates** — Send Diagnostics posts the last 500 app/charger log lines to [mppt-logs.lak.nz](https://mppt-logs.lak.nz); Check for Updates reads `/api/latest.json` and falls back to the public [GitHub Release](https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest) when that host is down
 - 🐞 **Share Debug Logs** — one tap bundles the last 200 cloudflared lines, exit code, network-bind/DNS preflight, and a DNS self-test report, with clipboard fallback — *the* tool for diagnosing tunnel issues
 - 🔍 **DNS Self-Test button** — verifies on-device that the bundled binary is the dynamic cgo build (fails hard if a static binary sneaks back in)
 - 📱 **Easy discovery UX** — auto-scans nearby Victron devices, tap to auto-fill the MAC, paste the key
@@ -160,12 +161,12 @@ Core functionality is complete and battle-tested on real hardware: BLE parsing, 
 
 - More device types (Inverter, DC/DC converters, etc.)
 - Nicer onboarding UI and encrypted key storage
-- F-Droid packaging / GitHub Releases with signed APKs
+- F-Droid packaging / signed release APKs (debug APK already ships on [GitHub Releases](https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest))
 - Test reports from other Victron hardware
 
 ## Contributing
 
-PRs welcome — see [`guide.md`](guide.md) for the build and the cgo/NDK cloudflared recipe if you touch the tunnel binary. Please run the JVM unit tests (`./gradlew testDebugUnitTest`) — CI runs the same job and uploads a debug APK artifact. `TunnelBinaryInspectorTest` guards the bundled binary's linkage. Do not commit tokens or keys; see [`SECURITY.md`](SECURITY.md).
+PRs welcome — see [`guide.md`](guide.md) for the build and the cgo/NDK cloudflared recipe if you touch the tunnel binary. Please run the JVM unit tests (`./gradlew testDebugUnitTest`) — CI runs the same job, uploads a debug APK artifact, and on `main` publishes it to [GitHub Releases](https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest). `TunnelBinaryInspectorTest` guards the bundled binary's linkage. Do not commit tokens or keys; see [`SECURITY.md`](SECURITY.md).
 
 ## License
 

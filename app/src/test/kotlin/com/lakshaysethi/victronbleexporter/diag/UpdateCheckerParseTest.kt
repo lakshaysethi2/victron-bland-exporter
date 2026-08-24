@@ -60,6 +60,31 @@ class UpdateCheckerParseTest {
     }
 
     @Test
+    fun `github release latest json is accepted`() {
+        val release = UpdateChecker.parseLatest(
+            """{"versionCode":2,"versionName":"0.2.0","apkUrl":"https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/victron-ble-exporter.apk","notes":"CI debug APK"}"""
+        )
+        assertNotNull(release)
+        assertEquals(2, release!!.versionCode)
+        assertEquals(
+            "https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/victron-ble-exporter.apk",
+            release.apkUrl
+        )
+    }
+
+    @Test
+    fun `first valid body wins so a dead log host falls through to github`() {
+        val github = """{"versionCode":2,"versionName":"0.2.0","apkUrl":"https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/victron-ble-exporter.apk"}"""
+        val release = UpdateChecker.firstValidRelease(listOf(null, "not json", github))
+        assertNotNull(release)
+        assertEquals(2, release!!.versionCode)
+        assertEquals(
+            "https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/victron-ble-exporter.apk",
+            release.apkUrl
+        )
+    }
+
+    @Test
     fun `malformed json returns null`() {
         assertNull(UpdateChecker.parseLatest("not json"))
         assertNull(UpdateChecker.parseLatest("""{"versionName":"0.2.0"}""")) // versionCode required

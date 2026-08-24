@@ -12,7 +12,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang go build -trimpath -o libcloudflared.so ./cmd/cloudflared` (from a cloudflared checkout at the shipped tag; cloudflared 2026.7.3 needs Go 1.26).
 - `TunnelNetworkPrep.prepare` binds the parent process to the active network and preflights DNS via Android APIs before exec; keep the bind (correct + harmless for the parent) but know it does not cover the child's DNS.
 - Debug APK: `./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk`. SDK via `local.properties` `sdk.dir` (gitignored).
-- Public CI: `.github/workflows/ci.yml` runs `testDebugUnitTest` + `assembleDebug` on `ubuntu-latest` and uploads the debug APK artifact. Do not add a self-hosted workflow on this public repo.
+- Public CI: `.github/workflows/ci.yml` runs `testDebugUnitTest` + `assembleDebug` on `ubuntu-latest`, uploads the debug APK artifact, and on `main` / `workflow_dispatch` publishes it as the rolling `latest` GitHub Release (`victron-ble-exporter.apk` + `latest.json`). Do not add a self-hosted workflow on this public repo.
 - Instant Readout `/metrics` are omitted after 90s without a new advertisement (`MetricsStore.FRESH_MS`); `victron_last_seen_timestamp` is the packet time, not scrape time, and `victron_up` / `victron_devices_total` follow that window so a lost BLE link does not keep last-known watts on the dashboard.
 - SmartShunt fixture `aux_mode` is 3 (`AuxMode.DISABLED` in keshavdv/victron-ble), not 0. Tunnel unit tests are under `tunnel/*Test`.
 - Stale Gradle daemons: if `./gradlew` fails with `NoSuchFileException` referencing a `/tmp/fm-mppt-tunnel-*/gradle-8.7/lib/...` path, a daemon from a previous lane's run is still alive with a deleted temp distribution. Kill it (`pkill -f 'gradle-launcher-8.7'` or the PID from `ps aux | grep GradleDaemon`) and re-run; the real distribution lives under `~/.gradle/wrapper/dists/gradle-8.7-bin/`.
@@ -26,7 +26,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 ## Remote diagnostics + in-app updates
 
-- App-side owner is `diag/` (`AppLog`, `Diagnostics`, `UpdateChecker`). Logs POST to `https://mppt-logs.lak.nz/api/logs`; update check is `GET https://mppt-logs.lak.nz/api/latest.json`. Server lives in the sibling `mppt-log-server` repo, not this one.
+- App-side owner is `diag/` (`AppLog`, `Diagnostics`, `UpdateChecker`). Logs POST to `https://mppt-logs.lak.nz/api/logs`; update check is `GET https://mppt-logs.lak.nz/api/latest.json`, then the public GitHub `releases/latest/download/latest.json` if that host is down. Server lives in the sibling `mppt-log-server` repo, not this one.
 - `ChargerDebugLog` mirrors into `AppLog` so a Send Diagnostics tap includes the BLE exchange. Auto-send is once/hour; the button always sends. Failures stay local.
 - Bump `versionCode` / `versionName` in `app/build.gradle.kts` when cutting an APK the downstairs phone should be offered.
 
