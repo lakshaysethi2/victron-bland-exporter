@@ -214,6 +214,25 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"chargerVoltage\":null"))
         assertTrue(r.body.contains("\"panelVoltage\":null"))
         assertTrue(r.body.contains("\"lastBleAdAt\":0"))
+        assertTrue(r.body.contains("\"overrideUntil\":0"))
+        assertTrue(r.body.contains("\"overrideUntilText\":\"\""))
+    }
+
+    @Test
+    fun `status formats a live manual override in the phone-local clock`() {
+        val cal = java.util.Calendar.getInstance()
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 18)
+        cal.set(java.util.Calendar.MINUTE, 0)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 0)
+        if (cal.timeInMillis <= System.currentTimeMillis()) cal.add(java.util.Calendar.DAY_OF_YEAR, 1)
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(overrideUntil = cal.timeInMillis)
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"overrideUntilText\":\"18:00\""))
+        assertEquals("18:00", h.snapshot.overrideUntilText(cal.timeInMillis - 1))
+        assertEquals("", h.snapshot.overrideUntilText(cal.timeInMillis))
     }
 
     @Test
@@ -627,6 +646,9 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("lastBleAdAt"))
         assertTrue(r.body.contains("Restart BLE scan"))
         assertTrue(r.body.contains("/charger/scan"))
+        assertTrue(r.body.contains("overrideUntilText"))
+        assertTrue(r.body.contains("Resume schedule"))
+        assertTrue(r.body.contains("manual override until"))
         assertTrue(r.body.contains("sighted"))
         assertTrue(r.body.contains("wrong key"))
         assertFalse(r.body.contains(SECRET))

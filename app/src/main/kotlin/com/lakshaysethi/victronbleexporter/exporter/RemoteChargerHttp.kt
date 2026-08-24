@@ -18,7 +18,7 @@ import java.security.MessageDigest
  *   GET  / or /charger   -> mobile control page (shell; every API call inside
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
- *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status + app version + last GATT voltages + lastBleAdAt); kicks a CHARGER_READ when mode is still unknown
+ *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status + app version + last GATT voltages + lastBleAdAt + overrideUntilText); kicks a CHARGER_READ when mode is still unknown
  *   POST /charger        -> JSON body {"action":"on"|"off"|"read", "mac"?: "AA:BB:..."} flips or reads the charger
  *   POST /charger/schedule -> JSON {enabled, enable, disable, mac?} saves the daily window
  *   POST /charger/key    -> JSON {mac, key} saves an Instant Readout key (never echoed)
@@ -510,6 +510,10 @@ data class ChargerStatusSnapshot(
 ) {
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
 
+    /** Phone-local HH:mm while a manual on/off is pausing the daily window; empty otherwise. */
+    fun overrideUntilText(now: Long = System.currentTimeMillis()): String =
+        if (overrideUntil > now) java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(overrideUntil)) else ""
+
     fun toJson(): String = buildString {
         append("{\"mode\":").append(if (mode == null) "null" else "\"${RemoteChargerHttpJson.escape(modeText)}\"")
         append(",\"modeCode\":").append(mode ?: "null")
@@ -518,6 +522,7 @@ data class ChargerStatusSnapshot(
         append(",\"lastAction\":\"${RemoteChargerHttpJson.escape(lastAction)}\"")
         append(",\"lastError\":").append(if (lastError == null) "null" else "\"${RemoteChargerHttpJson.escape(lastError)}\"")
         append(",\"overrideUntil\":").append(overrideUntil)
+        append(",\"overrideUntilText\":\"${RemoteChargerHttpJson.escape(overrideUntilText())}\"")
         append(",\"stateUpdatedAt\":").append(stateUpdatedAt)
         append(",\"scheduleEnabled\":").append(scheduleEnabled)
         append(",\"enableTime\":\"${RemoteChargerHttpJson.escape(enableTime)}\"")
@@ -740,6 +745,7 @@ private val CONTROL_PAGE: String = """
   <label class="hint"><input type="checkbox" id="schedOn"> Enforce window</label>
   <div class="row"><input type="text" id="enTime" placeholder="ON 08:30" inputmode="numeric"><input type="text" id="disTime" placeholder="OFF 18:00" inputmode="numeric"></div>
   <button class="btn small" id="btnSched" disabled>Save schedule</button>
+  <button class="btn small" id="btnResume" disabled>Resume schedule</button>
   <div class="sub" style="margin:14px 0 8px">Instant Readout key (VictronConnect → Product info)</div>
   <input type="text" id="keyMac" placeholder="MAC AA:BB:..." autocapitalize="characters" autocomplete="off" spellcheck="false">
   <input type="password" id="keyHex" placeholder="32-char hex key" autocomplete="off" spellcheck="false">
@@ -772,6 +778,7 @@ private val CONTROL_PAGE: String = """
       btnTunStart = document.getElementById("btnTunStart"),
       btnTunStop = document.getElementById("btnTunStop"),
       btnScan = document.getElementById("btnScan"),
+      btnResume = document.getElementById("btnResume"),
       tunToken = document.getElementById("tunToken"),
       keyMac = document.getElementById("keyMac"),
       keyHex = document.getElementById("keyHex"),
@@ -780,7 +787,7 @@ private val CONTROL_PAGE: String = """
       disTime = document.getElementById("disTime"),
       secretInput = document.getElementById("secret");
   function setErr(t) { err.textContent = t || ""; }
-  function setBusy(b) { btnOn.disabled = b; btnOff.disabled = b; btnRead.disabled = b; btnScan.disabled = b; btnSched.disabled = b; btnKey.disabled = b; btnTunSave.disabled = b; btnTunStart.disabled = b; btnTunStop.disabled = b; if (b) { dot.className = "dot busy"; } }
+  function setBusy(b) { btnOn.disabled = b; btnOff.disabled = b; btnRead.disabled = b; btnScan.disabled = b; btnSched.disabled = b; btnResume.disabled = b; btnKey.disabled = b; btnTunSave.disabled = b; btnTunStart.disabled = b; btnTunStop.disabled = b; if (b) { dot.className = "dot busy"; } }
   function api(path, opts) {
     opts = opts || {};
     opts.headers = Object.assign({ "X-Remote-Secret": secret }, opts.headers || {});
@@ -806,6 +813,7 @@ private val CONTROL_PAGE: String = """
       parts.push("schedule " + (data.enableTime || "?") + "-" + (data.disableTime || "?"));
       parts.push("window " + (data.scheduleWantsOn ? "ON" : "OFF") + (data.nextTransition ? " until " + data.nextTransition : ""));
     }
+    if (data.overrideUntilText) parts.push("manual override until " + data.overrideUntilText + " (Resume schedule to hand back to the window)");
     if (data.phoneTime) parts.push("phone " + data.phoneTime + (data.phoneZone ? " " + data.phoneZone : ""));
     if (data.tunnelStatus) parts.push("tunnel " + data.tunnelStatus);
     if (data.tunnelUrl) parts.push(data.tunnelUrl);
@@ -960,6 +968,7 @@ private val CONTROL_PAGE: String = """
       .catch(function () { setBusy(false); setErr("Request failed."); });
   }
   btnSched.addEventListener("click", saveSched);
+  btnResume.addEventListener("click", saveSched);
   btnKey.addEventListener("click", saveKey);
   btnTunSave.addEventListener("click", function () {
     var t = tunToken.value.trim();

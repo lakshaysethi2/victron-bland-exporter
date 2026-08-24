@@ -103,9 +103,9 @@ All writes go over the same BLE GATT service as charger on/off, with a confirmat
 In the app's **Remote Charger Control** section, enable remote control and set a secret (min 8 chars). The app then serves:
 
 - `GET  /charger` — mobile control page (login shell; everything on it requires the secret)
-- `GET  /charger/status` — JSON state (`mode`, schedule times, phone local time/zone, live Instant Readout watts/volts, sighted BLE devices with needs-key / wrong-key, last charger debug lines, app version, last GATT voltages, `lastBleAdAt`, …); kicks a live ON/OFF read when mode is still unknown after a reboot
+- `GET  /charger/status` — JSON state (`mode`, schedule times, phone local time/zone, live Instant Readout watts/volts, sighted BLE devices with needs-key / wrong-key, last charger debug lines, app version, last GATT voltages, `lastBleAdAt`, `overrideUntilText` when a manual on/off is pausing the window, …); kicks a live ON/OFF read when mode is still unknown after a reboot
 - `POST /charger` — `{"action":"on"|"off"|"read", "mac"?: "AA:BB:..."}` flips the charger or reads live ON/OFF over GATT (body mac, else stored, else first live Instant Readout)
-- `POST /charger/schedule` — `{"enabled":true,"enable":"08:30","disable":"18:00", "mac"?: "AA:BB:..."}` saves the daily window
+- `POST /charger/schedule` — `{"enabled":true,"enable":"08:30","disable":"18:00", "mac"?: "AA:BB:..."}` saves the daily window and clears a manual on/off override so the window runs again
 - `POST /charger/key` — `{"mac":"AA:BB:...","key":"<32 hex>"}` saves an Instant Readout key on the phone (never echoed)
 - `POST /charger/tunnel` — `{"token":"..."}` saves and starts the named Cloudflare tunnel, or `{"action":"start"|"stop"}` uses the token already on the phone (never echoed)
 - `POST /charger/scan` — restarts BLE scanning so a quiet Instant Readout can be poked without opening the phone
