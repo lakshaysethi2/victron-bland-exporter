@@ -68,7 +68,7 @@ The full, beginner-friendly walkthrough is in **[`guide.md`](guide.md)** — bui
 - 🐞 **Share Debug Logs** — one tap bundles the last 200 cloudflared lines, exit code, network-bind/DNS preflight, and a DNS self-test report, with clipboard fallback — *the* tool for diagnosing tunnel issues
 - 🔍 **DNS Self-Test button** — verifies on-device that the bundled binary is the dynamic cgo build (fails hard if a static binary sneaks back in)
 - 📱 **Easy discovery UX** — auto-scans nearby Victron devices, tap to auto-fill the MAC, paste the key
-- 🔋 **Runs unattended** — foreground service, auto-start on boot, battery-optimization handling, multi-device support
+- 🔋 **Runs unattended** — foreground service, auto-start on boot, named-tunnel restore after a cloudflared crash, battery-optimization handling, multi-device support
 - 🌳 **Open source (MIT)** — no cloud dependency for the app itself; quick tunnels need no account at all
 
 ---

@@ -62,6 +62,7 @@ class VictronBleExporterService : Service() {
     private var lastScheduledAppliedAt = 0L
     private var scheduleRetryAt = 0L
     private var lastVoltagePollAt = 0L
+    private var lastTunnelRestoreAt = 0L
 
     /**
      * Remote charger-control HTTP surface. Commands are forwarded to this
@@ -622,9 +623,10 @@ class VictronBleExporterService : Service() {
         }
     }
 
-    /** Starts the named tunnel from the persisted token; no-ops when already running or none saved. */
+    /** Starts the named tunnel from the persisted token; no-ops when already running, user-stopped, or none saved. */
     private fun restoreSavedTunnel(): Boolean {
         val alreadyRunning = ::cloudflaredManager.isInitialized && cloudflaredManager.isRunning()
+        val userStopped = ::cloudflaredManager.isInitialized && cloudflaredManager.wasManuallyStopped()
         val token = try {
             if (!::deviceRepository.isInitialized) {
                 deviceRepository = DeviceRepository(this)
@@ -634,7 +636,13 @@ class VictronBleExporterService : Service() {
             Log.w(TAG, "Failed to read persisted tunnel token", e)
             null
         }
-        if (!ExporterKeepAlive.shouldRestoreNamedTunnel(alreadyRunning, token)) return alreadyRunning
+        val now = System.currentTimeMillis()
+        if (!ExporterKeepAlive.shouldRestoreNamedTunnel(alreadyRunning, token, userStopped, lastTunnelRestoreAt, now)) {
+            return alreadyRunning
+        }
+        lastTunnelRestoreAt = now
+        Log.i(TAG, "Restoring named tunnel from saved token")
+        AppLog.i("Restoring named tunnel from saved token")
         cloudflaredManager.startNamedTunnel(token!!) { status -> updateNotification(status) }
         return true
     }
@@ -649,6 +657,7 @@ class VictronBleExporterService : Service() {
                         AppLog.w("No scan results for ${ExporterKeepAlive.SCAN_RESTART_AFTER_MS}ms — restarting BLE scan")
                         restartScan()
                     }
+                    restoreSavedTunnel()
                 } catch (e: Exception) {
                     Log.w(TAG, "Scan watchdog tick failed", e)
                 }
@@ -881,9 +890,19 @@ internal object ExporterKeepAlive {
     const val VOLTAGE_POLL_BACKOFF_MS = 300_000L
     const val VOLTAGE_FRESH_MS = 300_000L
     const val SCAN_RESTART_AFTER_MS = 180_000L
+    const val TUNNEL_RESTART_AFTER_MS = 60_000L
 
-    fun shouldRestoreNamedTunnel(alreadyRunning: Boolean, savedToken: String?): Boolean =
-        !alreadyRunning && !savedToken.isNullOrBlank()
+    fun shouldRestoreNamedTunnel(
+        alreadyRunning: Boolean,
+        savedToken: String?,
+        userStopped: Boolean = false,
+        lastRestartAt: Long = 0L,
+        now: Long = Long.MAX_VALUE,
+    ): Boolean {
+        if (userStopped || alreadyRunning || savedToken.isNullOrBlank()) return false
+        if (lastRestartAt > 0L && now - lastRestartAt < TUNNEL_RESTART_AFTER_MS) return false
+        return true
+    }
 
     /** Stored charger MAC wins; otherwise the first live Instant Readout. */
     fun scheduleTargetMac(stored: String?, liveMacs: List<String>): String? {

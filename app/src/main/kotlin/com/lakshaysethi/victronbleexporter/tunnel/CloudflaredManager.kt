@@ -541,6 +541,9 @@ class CloudflaredManager(
 
     fun isRunning(): Boolean = process?.isAlive == true
 
+    /** True after Stop until the next Start; a crash leaves this false so the service can restore. */
+    fun wasManuallyStopped(): Boolean = manualStopRequested
+
     // ---- debug log ----
 
     /**

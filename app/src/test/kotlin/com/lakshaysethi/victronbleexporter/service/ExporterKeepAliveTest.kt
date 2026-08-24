@@ -17,6 +17,15 @@ class ExporterKeepAliveTest {
     }
 
     @Test
+    fun `does not restore a user-stopped tunnel but does restart a crash after 60s`() {
+        assertEquals(60_000L, ExporterKeepAlive.TUNNEL_RESTART_AFTER_MS)
+        assertFalse(ExporterKeepAlive.shouldRestoreNamedTunnel(false, "eyJhbGciOi", userStopped = true))
+        assertFalse(ExporterKeepAlive.shouldRestoreNamedTunnel(false, "eyJhbGciOi", lastRestartAt = 1, now = 1 + 59_999))
+        assertTrue(ExporterKeepAlive.shouldRestoreNamedTunnel(false, "eyJhbGciOi", lastRestartAt = 1, now = 1 + 60_000))
+        assertTrue(ExporterKeepAlive.shouldRestoreNamedTunnel(false, "eyJhbGciOi", lastRestartAt = 0, now = 1))
+    }
+
+    @Test
     fun `schedule retry is one minute not ten`() {
         assertEquals(60_000L, ExporterKeepAlive.SCHEDULE_RETRY_MS)
         assertEquals(600_000L, ExporterKeepAlive.SCHEDULE_REENFORCE_MS)
