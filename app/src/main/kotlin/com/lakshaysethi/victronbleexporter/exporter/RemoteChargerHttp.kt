@@ -22,6 +22,7 @@ import java.security.MessageDigest
  *   POST /charger        -> JSON body {"action":"on"|"off"|"read", "mac"?: "AA:BB:..."} flips or reads the charger
  *   POST /charger/schedule -> JSON {enabled, enable, disable, mac?} saves the daily window
  *   POST /charger/key    -> JSON {mac, key} saves an Instant Readout key (never echoed)
+ *   POST /charger/tunnel -> JSON {token} saves + starts the named tunnel, or {action:"start"|"stop"} (token never echoed)
  *   GET  /voltage        -> JSON voltage settings (auth required)
  *   POST /voltage        -> JSON {battery_voltage_setting, absorption_voltage, float_voltage, mac?}
  *                           writes the matching GATT registers (auth required; confirm in UI)
@@ -50,6 +51,7 @@ class RemoteChargerHttp(
     private val voltageCommandSender: VoltageCommandSender? = null,
     private val keySender: KeyCommandSender? = null,
     private val readSender: ChargerReadSender? = null,
+    private val tunnelSender: TunnelCommandSender? = null,
 ) {
 
     /**
@@ -92,6 +94,7 @@ class RemoteChargerHttp(
             uri == "/charger" && method == "POST" -> handleCommand(body)
             uri == "/charger/schedule" && method == "POST" -> handleSchedule(body)
             uri == "/charger/key" && method == "POST" -> handleKey(body)
+            uri == "/charger/tunnel" && method == "POST" -> handleTunnel(body)
             uri == "/voltage" && method == "GET" -> handleVoltageGet()
             uri == "/voltage" && method == "POST" -> handleVoltagePost(body)
             else -> notFound()
@@ -171,6 +174,37 @@ class RemoteChargerHttp(
             202, MIME_JSON,
             "{\"accepted\":true,\"mac\":\"${RemoteChargerHttpJson.escape(mac)}\"}\n",
         )
+    }
+
+    private fun handleTunnel(body: String): HttpResult {
+        val sender = tunnelSender
+            ?: return HttpResult(503, MIME_JSON, "{\"error\":\"tunnel control unavailable on this build\"}\n")
+        val token = TOKEN_FIELD.find(body.trim())?.groupValues?.get(1)?.trim().orEmpty()
+        val action = TUNNEL_ACTION.find(body.trim())?.groupValues?.get(1)?.lowercase()
+        if (token.isNotEmpty()) {
+            if (token.length < 20) {
+                return HttpResult(400, MIME_JSON, "{\"error\":\"token looks too short for a named-tunnel token\"}\n")
+            }
+            sender.start(token)
+            return HttpResult(202, MIME_JSON, "{\"accepted\":true,\"action\":\"start\"}\n")
+        }
+        when (action) {
+            "stop" -> {
+                sender.stop()
+                return HttpResult(202, MIME_JSON, "{\"accepted\":true,\"action\":\"stop\"}\n")
+            }
+            "start" -> {
+                if (!statusProvider().tunnelHasToken) {
+                    return HttpResult(400, MIME_JSON, "{\"error\":\"no named-tunnel token saved — paste one\"}\n")
+                }
+                sender.start(null)
+                return HttpResult(202, MIME_JSON, "{\"accepted\":true,\"action\":\"start\"}\n")
+            }
+            else -> return HttpResult(
+                400, MIME_JSON,
+                "{\"error\":\"body must be JSON: {\\\"token\\\":\\\"...\\\"} or {\\\"action\\\":\\\"start\\\"|\\\"stop\\\"}\"}\n",
+            )
+        }
     }
 
     private data class ScheduleBody(val enabled: Boolean, val enable: String, val disable: String)
@@ -273,6 +307,8 @@ class RemoteChargerHttp(
         val DISABLE_TIME_REGEX = Regex("\"disable\"\\s*:\\s*\"([^\"]+)\"")
         val MAC_FIELD = Regex("\"mac\"\\s*:\\s*\"([^\"]+)\"")
         val KEY_FIELD = Regex("\"key\"\\s*:\\s*\"([^\"]+)\"")
+        val TOKEN_FIELD = Regex("\"token\"\\s*:\\s*\"([^\"]+)\"")
+        val TUNNEL_ACTION = Regex("\"action\"\\s*:\\s*\"(start|stop)\"", RegexOption.IGNORE_CASE)
         val MAC_SHAPE = Regex("(?i)^([0-9A-F]{2}:){5}[0-9A-F]{2}$")
 
         /** Tiny JSON field extractor — the API accepts `{"action":"on"|"off"|"read"}`. */
@@ -336,6 +372,12 @@ interface VoltageCommandSender {
 /** Saves an Instant Readout encryption key. Production: ADD_KEY intent. */
 fun interface KeyCommandSender {
     fun saveKey(mac: String, key: String)
+}
+
+/** Starts or stops the named Cloudflare tunnel. Production: START_TUNNEL / STOP_TUNNEL / START_SAVED_TUNNEL. */
+interface TunnelCommandSender {
+    fun start(token: String?)
+    fun stop()
 }
 
 /** Recently seen BLE advertisement — never includes the encryption key. */
@@ -432,6 +474,7 @@ data class ChargerStatusSnapshot(
     val nextTransition: String = "",
     val tunnelStatus: String = "",
     val tunnelUrl: String? = null,
+    val tunnelHasToken: Boolean = false,
 ) {
     val modeText: String get() = ChargerProtocol.chargerModeText(mode)
 
@@ -452,6 +495,7 @@ data class ChargerStatusSnapshot(
         append(",\"scheduleWantsOn\":").append(scheduleWantsOn)
         append(",\"nextTransition\":\"${RemoteChargerHttpJson.escape(nextTransition)}\"")
         append(",\"tunnelStatus\":\"${RemoteChargerHttpJson.escape(tunnelStatus)}\"")
+        append(",\"tunnelHasToken\":").append(tunnelHasToken)
         append(",\"tunnelUrl\":").append(
             if (tunnelUrl.isNullOrBlank()) "null" else "\"${RemoteChargerHttpJson.escape(tunnelUrl)}\"",
         )
@@ -652,6 +696,11 @@ private val CONTROL_PAGE: String = """
   <input type="text" id="keyMac" placeholder="MAC AA:BB:..." autocapitalize="characters" autocomplete="off" spellcheck="false">
   <input type="password" id="keyHex" placeholder="32-char hex key" autocomplete="off" spellcheck="false">
   <button class="btn small" id="btnKey" disabled>Save key</button>
+  <div class="sub" style="margin:14px 0 8px">Named Cloudflare tunnel (LAN can restore the public bridge)</div>
+  <input type="password" id="tunToken" placeholder="Named-tunnel token" autocomplete="off" spellcheck="false">
+  <button class="btn small" id="btnTunSave" disabled>Save + start named</button>
+  <button class="btn small" id="btnTunStart" disabled>Start saved tunnel</button>
+  <button class="btn small" id="btnTunStop" disabled>Stop tunnel</button>
   <button class="btn small" id="btnRefresh">Refresh</button>
   <div class="hint"><a href="/voltage" style="color:#8fa3bf">Voltage settings</a></div>
   <div class="hint">The secret is stored only in this browser session and sent only in a request header &mdash; never in the URL.</div>
@@ -671,6 +720,10 @@ private val CONTROL_PAGE: String = """
       btnRead = document.getElementById("btnRead"),
       btnSched = document.getElementById("btnSched"),
       btnKey = document.getElementById("btnKey"),
+      btnTunSave = document.getElementById("btnTunSave"),
+      btnTunStart = document.getElementById("btnTunStart"),
+      btnTunStop = document.getElementById("btnTunStop"),
+      tunToken = document.getElementById("tunToken"),
       keyMac = document.getElementById("keyMac"),
       keyHex = document.getElementById("keyHex"),
       schedOn = document.getElementById("schedOn"),
@@ -678,7 +731,7 @@ private val CONTROL_PAGE: String = """
       disTime = document.getElementById("disTime"),
       secretInput = document.getElementById("secret");
   function setErr(t) { err.textContent = t || ""; }
-  function setBusy(b) { btnOn.disabled = b; btnOff.disabled = b; btnRead.disabled = b; btnSched.disabled = b; btnKey.disabled = b; if (b) { dot.className = "dot busy"; } }
+  function setBusy(b) { btnOn.disabled = b; btnOff.disabled = b; btnRead.disabled = b; btnSched.disabled = b; btnKey.disabled = b; btnTunSave.disabled = b; btnTunStart.disabled = b; btnTunStop.disabled = b; if (b) { dot.className = "dot busy"; } }
   function api(path, opts) {
     opts = opts || {};
     opts.headers = Object.assign({ "X-Remote-Secret": secret }, opts.headers || {});
@@ -707,6 +760,7 @@ private val CONTROL_PAGE: String = """
     if (data.phoneTime) parts.push("phone " + data.phoneTime + (data.phoneZone ? " " + data.phoneZone : ""));
     if (data.tunnelStatus) parts.push("tunnel " + data.tunnelStatus);
     if (data.tunnelUrl) parts.push(data.tunnelUrl);
+    if (data.tunnelHasToken) parts.push("token saved");
     if (selectedMac || data.mac) parts.push("target " + (selectedMac || data.mac));
     meta.textContent = parts.join(" \u00b7 ");
     if (!schedFilled) {
@@ -825,8 +879,28 @@ private val CONTROL_PAGE: String = """
   btnOn.addEventListener("click", function () { send("on"); });
   btnOff.addEventListener("click", function () { send("off"); });
   btnRead.addEventListener("click", function () { send("read"); });
+  function sendTunnel(body) {
+    if (!secret) return;
+    setBusy(true); setErr("");
+    api("/charger/tunnel", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) })
+      .then(function (r) { return r.json().then(function (d) { return { r: r, d: d }; }); })
+      .then(function (x) {
+        if (x.r.status === 401) { setBusy(false); return; }
+        if (x.r.ok) { tunToken.value = ""; if (x.d.error) setErr(x.d.error); loadStatus(); }
+        else { setBusy(false); setErr(x.d.error || ("Status " + x.r.status)); }
+      })
+      .catch(function () { setBusy(false); setErr("Request failed."); });
+  }
   btnSched.addEventListener("click", saveSched);
   btnKey.addEventListener("click", saveKey);
+  btnTunSave.addEventListener("click", function () {
+    var t = tunToken.value.trim();
+    if (!t) { setErr("Paste a named-tunnel token"); return; }
+    sendTunnel({ token: t });
+  });
+  btnTunStart.addEventListener("click", function () { sendTunnel({ action: "start" }); });
+  btnTunStop.addEventListener("click", function () { sendTunnel({ action: "stop" }); });
   btnRefresh.addEventListener("click", function () { schedFilled = false; loadStatus(); });
   loadStatus();
   setInterval(loadStatus, 3000);

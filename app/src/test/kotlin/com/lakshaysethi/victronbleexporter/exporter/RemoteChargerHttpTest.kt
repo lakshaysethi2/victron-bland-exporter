@@ -53,6 +53,13 @@ class RemoteChargerHttpTest {
         override fun readCharger(mac: String) { calls.add(mac) }
     }
 
+    private class FakeTunnelSink : TunnelCommandSender {
+        val starts = mutableListOf<String?>()
+        var stops = 0
+        override fun start(token: String?) { starts.add(token) }
+        override fun stop() { stops++ }
+    }
+
     private class Harness(
         var enabled: Boolean = true,
         var secret: String = "correct horse battery staple",
@@ -72,8 +79,13 @@ class RemoteChargerHttpTest {
         val voltageSink = FakeVoltageSink()
         val keySink = FakeKeySink()
         val readSink = FakeReadSink()
+        val tunnelSink = FakeTunnelSink()
 
-        fun control(withKeySender: Boolean = true, withReadSender: Boolean = true) = RemoteChargerHttp(
+        fun control(
+            withKeySender: Boolean = true,
+            withReadSender: Boolean = true,
+            withTunnelSender: Boolean = true,
+        ) = RemoteChargerHttp(
             settingsProvider = { RemoteChargerStore.RemoteChargerSettings(enabled = enabled, authSecret = secret) },
             statusProvider = { snapshot },
             macProvider = { mac },
@@ -82,6 +94,7 @@ class RemoteChargerHttpTest {
             voltageCommandSender = voltageSink,
             keySender = if (withKeySender) keySink else null,
             readSender = if (withReadSender) readSink else null,
+            tunnelSender = if (withTunnelSender) tunnelSink else null,
         )
     }
 
@@ -107,12 +120,14 @@ class RemoteChargerHttpTest {
         assertEquals(404, c.handle("/voltage", POST, headers(SECRET), """{"battery_voltage_setting":24}""").statusCode)
         assertEquals(404, c.handle("/charger/key", POST, headers(SECRET), """{"mac":"AA:BB:CC:DD:EE:FF","key":"0123456789abcdef0123456789abcdef"}""").statusCode)
         assertEquals(404, c.handle("/charger", POST, headers(SECRET), """{"action":"read"}""").statusCode)
+        assertEquals(404, c.handle("/charger/tunnel", POST, headers(SECRET), """{"action":"stop"}""").statusCode)
         assertEquals(404, c.handle("/charger/status", GET, emptyMap(), "").statusCode)
         assertTrue(h.sink.calls.isEmpty())
         assertTrue(h.scheduleSink.calls.isEmpty())
         assertTrue(h.voltageSink.battery.isEmpty())
         assertTrue(h.keySink.calls.isEmpty())
         assertTrue(h.readSink.calls.isEmpty())
+        assertTrue(h.tunnelSink.starts.isEmpty())
     }
 
     @Test
@@ -167,6 +182,7 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"nextTransition\":\"\""))
         assertTrue(r.body.contains("\"tunnelStatus\":\"\""))
         assertTrue(r.body.contains("\"tunnelUrl\":null"))
+        assertTrue(r.body.contains("\"tunnelHasToken\":false"))
     }
 
     @Test
@@ -179,6 +195,7 @@ class RemoteChargerHttpTest {
             val snap = ChargerStatusSnapshot.fromAppState()
             assertEquals("Running", snap.tunnelStatus)
             assertEquals("https://example.trycloudflare.com", snap.tunnelUrl)
+            assertFalse(snap.tunnelHasToken)
         } finally {
             AppState.tunnelStatus = prevStatus
             AppState.tunnelUrl = prevUrl
@@ -463,6 +480,10 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("Save key"))
         assertTrue(r.body.contains("Read state"))
         assertTrue(r.body.contains("send(\"read\")"))
+        assertTrue(r.body.contains("/charger/tunnel"))
+        assertTrue(r.body.contains("Save + start named"))
+        assertTrue(r.body.contains("Start saved tunnel"))
+        assertTrue(r.body.contains("token saved"))
         assertTrue(r.body.contains("sighted"))
         assertTrue(r.body.contains("wrong key"))
         assertFalse(r.body.contains(SECRET))
@@ -691,6 +712,84 @@ class RemoteChargerHttpTest {
         } finally {
             DiscoveredDevicesStore.clear()
         }
+    }
+
+    // ---- named tunnel ----
+
+    private val NAMED_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.remote"
+
+    @Test
+    fun `post tunnel token starts named tunnel and never echoes the token`() {
+        val h = Harness()
+        val r = h.control().handle(
+            "/charger/tunnel", POST, headers(SECRET),
+            """{"token":"$NAMED_TOKEN"}""",
+        )
+        assertEquals(202, r.statusCode)
+        assertEquals(listOf(NAMED_TOKEN), h.tunnelSink.starts)
+        assertEquals(0, h.tunnelSink.stops)
+        assertTrue(r.body.contains("\"action\":\"start\""))
+        assertFalse(r.body.contains(NAMED_TOKEN))
+        assertFalse(r.body.contains("\"token\""))
+    }
+
+    @Test
+    fun `post tunnel start uses the saved token and rejects when none is saved`() {
+        val h = Harness()
+        val missing = h.control().handle("/charger/tunnel", POST, headers(SECRET), """{"action":"start"}""")
+        assertEquals(400, missing.statusCode)
+        assertTrue(h.tunnelSink.starts.isEmpty())
+
+        h.snapshot = h.snapshot.copy(tunnelHasToken = true)
+        val r = h.control().handle("/charger/tunnel", POST, headers(SECRET), """{"action":"start"}""")
+        assertEquals(202, r.statusCode)
+        assertEquals(listOf<String?>(null), h.tunnelSink.starts)
+    }
+
+    @Test
+    fun `post tunnel stop is forwarded`() {
+        val h = Harness()
+        val r = h.control().handle("/charger/tunnel", POST, headers(SECRET), """{"action":"stop"}""")
+        assertEquals(202, r.statusCode)
+        assertEquals(1, h.tunnelSink.stops)
+        assertTrue(h.tunnelSink.starts.isEmpty())
+        assertTrue(r.body.contains("\"action\":\"stop\""))
+    }
+
+    @Test
+    fun `post tunnel short token is rejected`() {
+        val h = Harness()
+        val r = h.control().handle("/charger/tunnel", POST, headers(SECRET), """{"token":"short"}""")
+        assertEquals(400, r.statusCode)
+        assertTrue(h.tunnelSink.starts.isEmpty())
+    }
+
+    @Test
+    fun `post tunnel without sender returns 503`() {
+        val h = Harness()
+        val r = h.control(withTunnelSender = false).handle(
+            "/charger/tunnel", POST, headers(SECRET), """{"action":"stop"}""",
+        )
+        assertEquals(503, r.statusCode)
+        assertEquals(0, h.tunnelSink.stops)
+    }
+
+    @Test
+    fun `post tunnel requires the secret`() {
+        val h = Harness()
+        assertEquals(401, h.control().handle("/charger/tunnel", POST, emptyMap(), """{"action":"stop"}""").statusCode)
+        assertEquals(0, h.tunnelSink.stops)
+    }
+
+    @Test
+    fun `status reports whether a named-tunnel token is saved without echoing it`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(tunnelHasToken = true, tunnelStatus = "Stopped")
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"tunnelHasToken\":true"))
+        assertFalse(r.body.contains(NAMED_TOKEN))
+        assertFalse(r.body.contains("\"token\""))
     }
 
     // ---- auth primitives ----

@@ -39,6 +39,7 @@ import com.lakshaysethi.victronbleexporter.exporter.VoltageCommandSender
 import com.lakshaysethi.victronbleexporter.exporter.MetricsStore
 import com.lakshaysethi.victronbleexporter.exporter.PrometheusExporter
 import com.lakshaysethi.victronbleexporter.exporter.RemoteChargerHttp
+import com.lakshaysethi.victronbleexporter.exporter.TunnelCommandSender
 import com.lakshaysethi.victronbleexporter.parser.VictronParser
 import com.lakshaysethi.victronbleexporter.tunnel.CloudflaredManager
 import kotlinx.coroutines.*
@@ -92,6 +93,7 @@ class VictronBleExporterService : Service() {
                     live = LiveReadout.fromFreshMetrics(),
                     sighted = SightedDevice.fromStore(),
                     debug = ChargerDebugLog.snapshot().takeLast(ChargerStatusSnapshot.REMOTE_DEBUG_LINES),
+                    tunnelHasToken = savedTunnelToken() != null,
                 )
             },
             macProvider = { AppState.chargerMac ?: chargerScheduleStore.load().chargerMac.ifBlank { null } },
@@ -178,6 +180,33 @@ class VictronBleExporterService : Service() {
                     Log.i(TAG, "Remote charger read for $mac")
                 } catch (e: Exception) {
                     Log.e(TAG, "Remote charger read could not be sent", e)
+                }
+            },
+            tunnelSender = object : TunnelCommandSender {
+                override fun start(token: String?) {
+                    try {
+                        startForegroundService(Intent(this@VictronBleExporterService, VictronBleExporterService::class.java).apply {
+                            if (token.isNullOrBlank()) {
+                                action = "START_SAVED_TUNNEL"
+                            } else {
+                                action = "START_TUNNEL"
+                                putExtra("tunnel_token", token)
+                            }
+                        })
+                        Log.i(TAG, "Remote named-tunnel start")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Remote named-tunnel start could not be sent", e)
+                    }
+                }
+                override fun stop() {
+                    try {
+                        startForegroundService(Intent(this@VictronBleExporterService, VictronBleExporterService::class.java).apply {
+                            action = "STOP_TUNNEL"
+                        })
+                        Log.i(TAG, "Remote named-tunnel stop")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Remote named-tunnel stop could not be sent", e)
+                    }
                 }
             },
         )
@@ -604,6 +633,7 @@ class VictronBleExporterService : Service() {
                     }
                 }
                 "STOP_TUNNEL" -> cloudflaredManager.stop()
+                "START_SAVED_TUNNEL" -> startSavedTunnelNow()
                 "ADD_KEY" -> {
                     val mac = it.getStringExtra("mac") ?: return@let
                     val key = it.getStringExtra("key") ?: return@let
@@ -673,6 +703,29 @@ class VictronBleExporterService : Service() {
         } catch (e: Exception) {
             Log.w(TAG, "Failed to persist tunnel token", e)
         }
+    }
+
+    private fun savedTunnelToken(): String? = try {
+        if (!::deviceRepository.isInitialized) {
+            deviceRepository = DeviceRepository(this)
+        }
+        deviceRepository.getTunnelToken()
+    } catch (e: Exception) {
+        Log.w(TAG, "Failed to read persisted tunnel token", e)
+        null
+    }
+
+    /** Explicit start from the saved token — ignores a previous user Stop. */
+    private fun startSavedTunnelNow() {
+        val token = savedTunnelToken()
+        if (token.isNullOrBlank()) {
+            Log.w(TAG, "Remote named-tunnel start skipped — no token saved")
+            return
+        }
+        lastTunnelRestoreAt = System.currentTimeMillis()
+        Log.i(TAG, "Starting named tunnel from saved token")
+        AppLog.i("Starting named tunnel from saved token")
+        cloudflaredManager.startNamedTunnel(token) { status -> updateNotification(status) }
     }
 
     /** Starts the named tunnel from the persisted token; no-ops when already running, user-stopped, or none saved. */

@@ -17,7 +17,7 @@ private const val DEFAULT_PORT = 5338
  */
 class PrometheusExporter(
     private val port: Int = DEFAULT_PORT,
-    /** Optional remote charger-control surface (GET /charger, /charger/status, POST /charger, GET/POST /voltage). */
+    /** Optional remote charger-control surface (GET /charger, /charger/status, POST /charger, /charger/tunnel, GET/POST /voltage). */
     private val remoteChargerControl: RemoteChargerHttp? = null,
 ) : NanoHTTPD(port) {
 
