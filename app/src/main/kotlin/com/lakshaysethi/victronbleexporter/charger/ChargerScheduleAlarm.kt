@@ -17,12 +17,21 @@ object ChargerScheduleAlarm {
     private const val REQ = 4308
     private const val TAG = "ChargerScheduleAlarm"
 
+    fun canExact(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+        return try {
+            (context.getSystemService(Context.ALARM_SERVICE) as AlarmManager).canScheduleExactAlarms()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun arm(context: Context, enableMinutes: Int, disableMinutes: Int, now: Long = System.currentTimeMillis()): Long {
         val at = ChargerSchedule.nextTransitionEpoch(now, enableMinutes, disableMinutes)
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val alarm = pending(context)
         try {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || am.canScheduleExactAlarms()) {
+            if (canExact(context)) {
                 am.setAlarmClock(AlarmManager.AlarmClockInfo(at, showIntent(context)), alarm)
             } else {
                 am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, alarm)

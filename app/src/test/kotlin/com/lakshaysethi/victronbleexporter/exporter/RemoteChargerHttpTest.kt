@@ -214,6 +214,7 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"chargerVoltage\":null"))
         assertTrue(r.body.contains("\"panelVoltage\":null"))
         assertTrue(r.body.contains("\"lastBleAdAt\":0"))
+        assertTrue(r.body.contains("\"exactAlarm\":false"))
         assertTrue(r.body.contains("\"overrideUntil\":0"))
         assertTrue(r.body.contains("\"overrideUntilText\":\"\""))
     }
@@ -275,6 +276,7 @@ class RemoteChargerHttpTest {
             assertNull(snap.panelVoltage)
             assertEquals("", snap.appVersion)
             assertEquals(0, snap.versionCode)
+            assertFalse(snap.exactAlarm)
             assertEquals(1_700_000_000_000L, snap.lastBleAdAt)
         } finally {
             AppState.tunnelStatus = prevStatus
@@ -323,6 +325,15 @@ class RemoteChargerHttpTest {
         assertEquals(200, r.statusCode)
         assertTrue(r.body.contains("\"scheduleWantsOn\":true"))
         assertTrue(r.body.contains("\"nextTransition\":\"18:00\""))
+    }
+
+    @Test
+    fun `status includes whether the daily alarm is exact`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(scheduleEnabled = true, exactAlarm = true)
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"exactAlarm\":true"))
     }
 
     @Test
@@ -647,6 +658,8 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("Restart BLE scan"))
         assertTrue(r.body.contains("/charger/scan"))
         assertTrue(r.body.contains("overrideUntilText"))
+        assertTrue(r.body.contains("exact alarm"))
+        assertTrue(r.body.contains("inexact alarm"))
         assertTrue(r.body.contains("Resume schedule"))
         assertTrue(r.body.contains("manual override until"))
         assertTrue(r.body.contains("sighted"))

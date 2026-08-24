@@ -92,6 +92,7 @@ class VictronBleExporterService : Service() {
                     nextTransition = ChargerSchedule.formatMinutes(
                         ChargerSchedule.nextTransition(minutes, s.enableMinutes, s.disableMinutes),
                     ),
+                    exactAlarm = ChargerScheduleAlarm.canExact(this),
                     live = LiveReadout.fromFreshMetrics(),
                     sighted = SightedDevice.fromStore(),
                     debug = ChargerDebugLog.snapshot().takeLast(ChargerStatusSnapshot.REMOTE_DEBUG_LINES),

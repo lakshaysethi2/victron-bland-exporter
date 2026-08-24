@@ -11,8 +11,8 @@ android {
         applicationId = "com.lakshaysethi.victronbleexporter"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.2.14"
+        versionCode = 17
+        versionName = "0.2.15"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
