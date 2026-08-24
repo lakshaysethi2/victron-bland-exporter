@@ -95,6 +95,47 @@ class ChargerScheduleTest {
     }
 
     @Test
+    fun `nextTransitionEpoch is the next boundary on the phone clock`() {
+        val zone = TimeZone.getTimeZone("Pacific/Auckland")
+        val cal = Calendar.getInstance(zone)
+        cal.set(2026, Calendar.AUGUST, 24, 10, 0, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        val now = cal.timeInMillis
+        val enable = 8 * 60 + 30
+        val disable = 18 * 60
+
+        cal.set(Calendar.HOUR_OF_DAY, 18)
+        cal.set(Calendar.MINUTE, 0)
+        assertEquals(cal.timeInMillis, ChargerSchedule.nextTransitionEpoch(now, enable, disable, zone))
+
+        cal.set(Calendar.HOUR_OF_DAY, 19)
+        val evening = cal.timeInMillis
+        cal.add(Calendar.DAY_OF_YEAR, 1)
+        cal.set(Calendar.HOUR_OF_DAY, 8)
+        cal.set(Calendar.MINUTE, 30)
+        assertEquals(cal.timeInMillis, ChargerSchedule.nextTransitionEpoch(evening, enable, disable, zone))
+    }
+
+    @Test
+    fun `epochAtMinutesOfDay wraps to tomorrow after that minute`() {
+        val zone = TimeZone.getTimeZone("UTC")
+        val cal = Calendar.getInstance(zone)
+        cal.set(2026, Calendar.JANUARY, 1, 18, 0, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        val at1800 = cal.timeInMillis
+        cal.add(Calendar.DAY_OF_YEAR, 1)
+        cal.set(Calendar.HOUR_OF_DAY, 8)
+        cal.set(Calendar.MINUTE, 30)
+        assertEquals(cal.timeInMillis, ChargerSchedule.epochAtMinutesOfDay(at1800, 8 * 60 + 30, zone))
+        // exactly on the minute is already passed (strictly after)
+        cal.set(2026, Calendar.JANUARY, 1, 8, 30, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        val at0830 = cal.timeInMillis
+        cal.add(Calendar.DAY_OF_YEAR, 1)
+        assertEquals(cal.timeInMillis, ChargerSchedule.epochAtMinutesOfDay(at0830, 8 * 60 + 30, zone))
+    }
+
+    @Test
     fun `formatMinutes wraps and zero-pads`() {
         assertEquals("08:30", ChargerSchedule.formatMinutes(8 * 60 + 30))
         assertEquals("00:00", ChargerSchedule.formatMinutes(0))

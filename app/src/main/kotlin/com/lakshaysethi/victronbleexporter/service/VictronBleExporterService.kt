@@ -22,6 +22,7 @@ import com.lakshaysethi.victronbleexporter.R
 import com.lakshaysethi.victronbleexporter.charger.ChargerController
 import com.lakshaysethi.victronbleexporter.charger.ChargerDebugLog
 import com.lakshaysethi.victronbleexporter.charger.ChargerSchedule
+import com.lakshaysethi.victronbleexporter.charger.ChargerScheduleAlarm
 import com.lakshaysethi.victronbleexporter.data.ChargerScheduleStore
 import com.lakshaysethi.victronbleexporter.data.DeviceRepository
 import com.lakshaysethi.victronbleexporter.diag.AppLog
@@ -354,6 +355,7 @@ class VictronBleExporterService : Service() {
         }
 
         startChargerScheduleLoop()
+        armScheduleAlarm()
         startScanWatchdog()
     }
 
@@ -614,19 +616,29 @@ class VictronBleExporterService : Service() {
             "Schedule saved: $mac ${if (enabled) "enabled" else "disabled"} " +
                 "($enableTime → $disableTime). Applies while the exporter notification is showing."
         )
+        armScheduleAlarm()
         serviceScope.launch { enforceChargerSchedule() }
     }
 
-    private fun nextTransitionEpoch(nextMinutesOfDay: Int): Long {
-        val cal = Calendar.getInstance()
-        val nowMinutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
-        if (nextMinutesOfDay <= nowMinutes) cal.add(Calendar.DAY_OF_YEAR, 1)
-        cal.set(Calendar.HOUR_OF_DAY, nextMinutesOfDay / 60)
-        cal.set(Calendar.MINUTE, nextMinutesOfDay % 60)
-        cal.set(Calendar.SECOND, 0)
-        cal.set(Calendar.MILLISECOND, 0)
-        return cal.timeInMillis
+    private fun armScheduleAlarm() {
+        val s = chargerScheduleStore.load()
+        if (!s.scheduleEnabled) {
+            ChargerScheduleAlarm.cancel(this)
+            return
+        }
+        val at = ChargerScheduleAlarm.arm(this, s.enableMinutes, s.disableMinutes)
+        val next = ChargerSchedule.nextTransition(
+            Calendar.getInstance().let { it.get(Calendar.HOUR_OF_DAY) * 60 + it.get(Calendar.MINUTE) },
+            s.enableMinutes,
+            s.disableMinutes,
+        )
+        ChargerDebugLog.append(
+            "Schedule alarm armed for ${ChargerSchedule.formatMinutes(next)} (epoch $at)"
+        )
     }
+
+    private fun nextTransitionEpoch(nextMinutesOfDay: Int): Long =
+        ChargerSchedule.epochAtMinutesOfDay(System.currentTimeMillis(), nextMinutesOfDay)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         intent?.let {
@@ -668,6 +680,13 @@ class VictronBleExporterService : Service() {
                     val enableTime = it.getStringExtra("enable_time") ?: ChargerSchedule.DEFAULT_ENABLE
                     val disableTime = it.getStringExtra("disable_time") ?: ChargerSchedule.DEFAULT_DISABLE
                     saveChargerSchedule(mac, enabled, enableTime, disableTime)
+                }
+                ChargerScheduleAlarm.ACTION -> {
+                    lastScheduledMode = null
+                    lastScheduledAppliedAt = 0L
+                    restoreSavedTunnel()
+                    armScheduleAlarm()
+                    serviceScope.launch { enforceChargerSchedule() }
                 }
                 "VOLTAGE_READ" -> {
                     val mac = it.getStringExtra("mac") ?: return@let

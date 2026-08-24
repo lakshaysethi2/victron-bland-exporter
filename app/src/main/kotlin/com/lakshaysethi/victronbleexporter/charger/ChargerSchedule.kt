@@ -1,6 +1,7 @@
 package com.lakshaysethi.victronbleexporter.charger
 
 import java.util.Calendar
+import java.util.TimeZone
 
 /**
  * Pure charger-schedule logic: a daily enable/disable window, expressed in
@@ -63,5 +64,39 @@ object ChargerSchedule {
     fun phoneClock(now: Calendar = Calendar.getInstance()): Pair<String, String> {
         val minutes = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
         return formatMinutes(minutes) to now.timeZone.id
+    }
+
+    /** Epoch millis of [minutesOfDay] today, or tomorrow if that minute has already passed. */
+    fun epochAtMinutesOfDay(
+        nowMillis: Long,
+        minutesOfDay: Int,
+        zone: TimeZone = TimeZone.getDefault(),
+    ): Long {
+        val cal = Calendar.getInstance(zone)
+        cal.timeInMillis = nowMillis
+        val nowMinutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+        if (minutesOfDay <= nowMinutes) cal.add(Calendar.DAY_OF_YEAR, 1)
+        cal.set(Calendar.HOUR_OF_DAY, minutesOfDay / 60)
+        cal.set(Calendar.MINUTE, minutesOfDay % 60)
+        cal.set(Calendar.SECOND, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        return cal.timeInMillis
+    }
+
+    /** Epoch millis of the next enable/disable boundary after [nowMillis]. */
+    fun nextTransitionEpoch(
+        nowMillis: Long,
+        enableMinutes: Int,
+        disableMinutes: Int,
+        zone: TimeZone = TimeZone.getDefault(),
+    ): Long {
+        val cal = Calendar.getInstance(zone)
+        cal.timeInMillis = nowMillis
+        val nowMinutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+        return epochAtMinutesOfDay(
+            nowMillis,
+            nextTransition(nowMinutes, enableMinutes, disableMinutes),
+            zone,
+        )
     }
 }
