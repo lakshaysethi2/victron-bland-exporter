@@ -19,8 +19,8 @@ import kotlin.concurrent.thread
 /**
  * End-to-end against a local mock HTTP server: verifies the diagnostics sender
  * POSTs a JSON body with device info + entries to the logs endpoint and treats a
- * 201 as success. (Tests stay server-independent; the live mppt-logs.lak.nz
- * endpoints are verified manually.)
+ * 201 as success. (Tests stay server-independent; a live log host is
+ * verified manually.)
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34])

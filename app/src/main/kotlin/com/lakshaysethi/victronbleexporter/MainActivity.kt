@@ -1452,7 +1452,7 @@ fun VictronBleExporterScreen(
         // ===== REMOTE CHARGER CONTROL (HTTP + Cloudflare tunnel) =====
         Text("Remote Charger Control", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Text(
-            "Flip the charger from any browser via the named tunnel: https://mppt.lak.nz/charger. " +
+            "Flip the charger from any browser via the named tunnel hostname (/charger) or LAN http://<phone-ip>:5338/charger. " +
                 "Every request must carry the secret below — never share it or put it in a URL.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1567,7 +1567,7 @@ fun VictronBleExporterScreen(
 
         Text("Diagnostics & Updates", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Text(
-            "Sends the last ${AppLog.MAX_ENTRIES} app/charger log entries plus device info to mppt-logs.lak.nz. " +
+            "Sends the last ${AppLog.MAX_ENTRIES} app/charger log entries plus device info to the configured log host. " +
                 "Auto-sends on app start and after significant errors (max once/hour).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant

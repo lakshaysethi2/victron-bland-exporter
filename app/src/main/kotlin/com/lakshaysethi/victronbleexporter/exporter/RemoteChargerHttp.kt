@@ -12,7 +12,7 @@ import java.security.MessageDigest
 /**
  * HTTP surface for REMOTE charger control, served by [PrometheusExporter]
  * under `/charger*` and reachable from any browser through the Cloudflare
- * named tunnel (`https://mppt.lak.nz/` or `/charger`).
+ * named tunnel hostname or `/charger`.
  *
  * Routes:
  *   GET  / or /charger   -> mobile control page (shell; every API call inside
@@ -73,7 +73,7 @@ class RemoteChargerHttp(
         // attach custom headers to a top-level navigation, so the page itself is
         // served without the secret. Everything functional on the page — status
         // and commands — still requires the secret below.
-        // GET / is the named-host landing (mppt.lak.nz) — same shell as /charger.
+        // GET / is the named-host landing — same shell as /charger.
         if ((uri == "/" || uri == "/charger") && method == "GET") {
             return HttpResult(200, MIME_HTML, CONTROL_PAGE)
         }

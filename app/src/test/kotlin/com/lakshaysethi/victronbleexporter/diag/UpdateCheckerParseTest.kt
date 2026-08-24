@@ -23,12 +23,12 @@ class UpdateCheckerParseTest {
     @Test
     fun `parses a valid latest json`() {
         val release = UpdateChecker.parseLatest(
-            """{"versionCode":2,"versionName":"0.2.0","apkUrl":"https://mppt-logs.lak.nz/apk/latest.apk","notes":"fixed charger enable"}"""
+            """{"versionCode":2,"versionName":"0.2.0","apkUrl":"https://logs.example.com/apk/latest.apk","notes":"fixed charger enable"}"""
         )
         assertNotNull(release)
         assertEquals(2, release!!.versionCode)
         assertEquals("0.2.0", release.versionName)
-        assertEquals("https://mppt-logs.lak.nz/apk/latest.apk", release.apkUrl)
+        assertEquals("https://logs.example.com/apk/latest.apk", release.apkUrl)
         assertEquals("fixed charger enable", release.notes)
     }
 
@@ -47,7 +47,7 @@ class UpdateCheckerParseTest {
             """{"versionCode":2,"versionName":"0.2.0","apkUrl":"/apk/latest.apk"}"""
         )
         assertNotNull(release)
-        assertEquals("https://mppt-logs.lak.nz/apk/latest.apk", release!!.apkUrl)
+        assertEquals(UpdateChecker.resolveApkUrl("/apk/latest.apk"), release!!.apkUrl)
     }
 
     @Test
@@ -86,7 +86,7 @@ class UpdateCheckerParseTest {
 
     @Test
     fun `stale log host loses to a newer github release`() {
-        val staleLog = """{"versionCode":1,"versionName":"0.1.0","apkUrl":"https://mppt-logs.lak.nz/apk/latest.apk"}"""
+        val staleLog = """{"versionCode":1,"versionName":"0.1.0","apkUrl":"https://logs.example.com/apk/latest.apk"}"""
         val github = """{"versionCode":2,"versionName":"0.2.0","apkUrl":"https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/victron-ble-exporter.apk"}"""
         val release = UpdateChecker.newestRelease(listOf(staleLog, github))
         assertNotNull(release)
@@ -99,12 +99,12 @@ class UpdateCheckerParseTest {
 
     @Test
     fun `newer log host wins over an older github release`() {
-        val log = """{"versionCode":3,"versionName":"0.3.0","apkUrl":"https://mppt-logs.lak.nz/apk/latest.apk"}"""
+        val log = """{"versionCode":3,"versionName":"0.3.0","apkUrl":"https://logs.example.com/apk/latest.apk"}"""
         val github = """{"versionCode":2,"versionName":"0.2.0","apkUrl":"https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/victron-ble-exporter.apk"}"""
         val release = UpdateChecker.newestRelease(listOf(log, github))
         assertNotNull(release)
         assertEquals(3, release!!.versionCode)
-        assertEquals("https://mppt-logs.lak.nz/apk/latest.apk", release.apkUrl)
+        assertEquals("https://logs.example.com/apk/latest.apk", release.apkUrl)
     }
 
     @Test

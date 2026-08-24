@@ -312,11 +312,11 @@ class RemoteChargerHttpTest {
     @Test
     fun `status includes tunnel status and url so LAN can see if the named tunnel is up`() {
         val h = Harness()
-        h.snapshot = h.snapshot.copy(tunnelStatus = "Named tunnel running", tunnelUrl = "https://mppt.lak.nz")
+        h.snapshot = h.snapshot.copy(tunnelStatus = "Named tunnel running", tunnelUrl = "https://tunnel.example.com")
         val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
         assertEquals(200, r.statusCode)
         assertTrue(r.body.contains("\"tunnelStatus\":\"Named tunnel running\""))
-        assertTrue(r.body.contains("\"tunnelUrl\":\"https://mppt.lak.nz\""))
+        assertTrue(r.body.contains("\"tunnelUrl\":\"https://tunnel.example.com\""))
     }
 
     @Test

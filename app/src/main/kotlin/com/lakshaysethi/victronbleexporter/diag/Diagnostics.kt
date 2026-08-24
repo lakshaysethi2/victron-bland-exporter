@@ -23,7 +23,7 @@ import java.util.UUID
  * Remote diagnostics: collects the app log buffer + device info and POSTs it to
  * the mppt-log-server. Never blocks the UI thread (all work on an IO scope).
  *
- * Server contract (verified live at https://mppt-logs.lak.nz):
+ * Server contract (optional private log host from BuildConfig.LOG_SERVER_BASE):
  *   POST /api/logs with {"device_id", "app_version", "entries": [{"ts", "level", "msg"]}
  *   where ts is a STRING (ISO-8601 works) and level is one of "info" | "warn" | "error"
  *   (uppercase/other levels are rejected with 422) -> 201 {"ok": true}.
@@ -34,7 +34,11 @@ import java.util.UUID
  */
 object Diagnostics {
 
-    const val LOGS_URL = "https://mppt-logs.lak.nz/api/logs"
+    val LOGS_URL: String
+        get() {
+            val base = BuildConfig.LOG_SERVER_BASE.trim().trimEnd('/')
+            return if (base.isBlank()) "" else "$base/api/logs"
+        }
     const val AUTO_SEND_INTERVAL_MS = 60 * 60 * 1000L // once per hour
 
     private const val PREFS_NAME = "victron_diagnostics"
@@ -147,6 +151,9 @@ object Diagnostics {
     /** Send the buffered logs now (no rate limit). Never throws. */
     suspend fun sendLogs(context: Context, url: String = LOGS_URL): Result<String> = withContext(Dispatchers.IO) {
         try {
+            if (url.isBlank()) {
+                return@withContext Result.failure(IllegalStateException("log server not configured"))
+            }
             val info = deviceInfo(context)
             val payload = buildPayload(
                 deviceId = info.deviceId,

@@ -1,5 +1,6 @@
 package com.lakshaysethi.victronbleexporter.diag
 
+import com.lakshaysethi.victronbleexporter.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.cancellation.CancellationException
@@ -8,27 +9,33 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * In-app update check. Asks both the mppt-log-server and the public GitHub
- * Release that CI publishes on main, then keeps the higher versionCode:
- *   GET https://mppt-logs.lak.nz/api/latest.json
+ * In-app update check. Asks an optional private log host (BuildConfig.LOG_SERVER_BASE,
+ * set from gitignored local.properties) and the public GitHub Release that CI
+ * publishes on main, then keeps the higher versionCode:
+ *   GET <log-host>/api/latest.json   (omitted when LOG_SERVER_BASE is blank)
  *   GET https://github.com/.../releases/latest/download/latest.json
  *     -> {"versionCode", "versionName", "apkUrl", "notes"}
  *
- * A stale-but-up log host (VERSION still 0.1.0) must not hide a newer GitHub
- * APK. Ties keep the log-host body (it is listed first).
+ * A stale-but-up log host must not hide a newer GitHub APK. Ties keep the
+ * log-host body (it is listed first when present).
  *
  * The versionCode comparison ([isNewer]) is a pure function so the decision is
  * unit-testable on the JVM.
  */
 object UpdateChecker {
 
-    private const val BASE_URL = "https://mppt-logs.lak.nz"
+    private val BASE_URL = BuildConfig.LOG_SERVER_BASE.trim().trimEnd('/')
 
-    const val LATEST_URL = "$BASE_URL/api/latest.json"
+    val LATEST_URL: String
+        get() = if (BASE_URL.isBlank()) "" else "$BASE_URL/api/latest.json"
     const val GITHUB_LATEST_JSON =
         "https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/latest.json"
-    const val DEFAULT_APK_URL = "$BASE_URL/apk/latest.apk"
-    val CANDIDATE_URLS = listOf(LATEST_URL, GITHUB_LATEST_JSON)
+    const val GITHUB_APK_URL =
+        "https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest/download/victron-ble-exporter.apk"
+    val DEFAULT_APK_URL: String
+        get() = if (BASE_URL.isBlank()) GITHUB_APK_URL else "$BASE_URL/apk/latest.apk"
+    val CANDIDATE_URLS: List<String>
+        get() = listOfNotNull(LATEST_URL.takeIf { it.isNotEmpty() }, GITHUB_LATEST_JSON)
 
     data class LatestRelease(
         val versionCode: Int,
@@ -48,6 +55,7 @@ object UpdateChecker {
     fun resolveApkUrl(apkUrl: String): String = when {
         apkUrl.isBlank() -> DEFAULT_APK_URL
         apkUrl.startsWith("http://") || apkUrl.startsWith("https://") -> apkUrl
+        BASE_URL.isBlank() -> DEFAULT_APK_URL
         else -> "$BASE_URL/${apkUrl.trimStart('/')}"
     }
 

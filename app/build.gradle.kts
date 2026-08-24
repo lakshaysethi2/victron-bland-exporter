@@ -3,6 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+import java.util.Properties
+
 android {
     namespace = "com.lakshaysethi.victronbleexporter"
     compileSdk = 35
@@ -18,6 +20,16 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+        val localProperties = Properties()
+        rootProject.file("local.properties").takeIf { it.exists() }?.reader()?.use {
+            localProperties.load(it)
+        }
+        val logServerBase = (localProperties.getProperty("logServerBaseUrl") ?: "")
+            .trim()
+            .trimEnd('/')
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+        buildConfigField("String", "LOG_SERVER_BASE", "\"$logServerBase\"")
     }
 
     buildTypes {
