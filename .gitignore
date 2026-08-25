@@ -35,6 +35,7 @@ cloudflared-token.txt
 
 linux/**/__pycache__/
 linux/**/*.pyc
+linux/secrets.env
 phone.png
 
 # Misc

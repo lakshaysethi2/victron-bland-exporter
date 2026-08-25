@@ -1,89 +1,66 @@
 # Linux MPPT BLE control
 
-Host service for the downstairs laptop sitting next to the SmartSolar.
-It uses BlueZ (via [bleak](https://github.com/hbldh/bleak)), not Android GATT.
+Host service for a Linux box sitting next to a Victron SmartSolar.
+It uses BlueZ (via [bleak](https://github.com/hbldh/bleak)).
 
-**Not Docker.** BLE on Linux is the host BlueZ daemon + D-Bus. A container
-needs `--network host`, `/var/run/dbus`, and usually `--privileged`. That is
-more fragile than a venv + systemd unit on the machine that already has
-`hci0`.
+**Not Docker.** BLE on Linux is the host BlueZ daemon + D-Bus.
+
+Do **not** put site hostnames, tunnel tokens, remote secrets, Bluetooth PINs, or device MACs in git. Those live in `~/.config/mppt/` (see `secrets.env.example`).
 
 ## Why this exists
 
-The Android app still owns Instant Readout + tunnel. Charger *writes* on this
-MPPT are picky: `fa80ff` on `306b0002` and the long `06008218…` handshake make
-the unit drop the link (GATT 19). BlueZ is a second stack to prove whether
-register `0x0200` on/off works at all.
+Instant Readout advertisements are read-only. Charger on/off is a GATT write to register `0x0200` on service `306b0001-…`. Some extra handshake frames (`fa80ff` on `306b0002`, long `06008218…` blobs) make this MPPT drop the link.
 
-VictronConnect on the phone will steal the GATT session. Force-stop it before
-using this.
+VictronConnect will steal the only GATT session. Close it before using this.
 
-## Install on the laptop
+Pairing: the device PIN is on the sticker (not `000000` on every unit). Bond with BlueZ once, then writes work.
+
+## Install
 
 ```bash
 sudo apt-get install -y python3-venv python3-pip bluez
 python3 -m venv ~/.venv/mppt-ble
 ~/.venv/mppt-ble/bin/pip install -r requirements.txt
 sudo usermod -aG bluetooth "$USER"   # then log out/in
+mkdir -p ~/.config/mppt
+cp secrets.env.example ~/.config/mppt/secrets.env
+chmod 600 ~/.config/mppt/secrets.env
+# edit MAC, remote secret, optional public hostname
 ```
 
-Scan / on / off (MAC of the captain MPPT):
+Scan / on / off (MAC from `MPPT_MAC` or `--mac`):
 
 ```bash
+set -a && source ~/.config/mppt/secrets.env && set +a
 ~/.venv/mppt-ble/bin/python -m mppt_ble scan
-~/.venv/mppt-ble/bin/python -m mppt_ble read --mac DC:AD:B0:54:DB:4E
-~/.venv/mppt-ble/bin/python -m mppt_ble off --mac DC:AD:B0:54:DB:4E
-~/.venv/mppt-ble/bin/python -m mppt_ble on --mac DC:AD:B0:54:DB:4E
+~/.venv/mppt-ble/bin/python -m mppt_ble read --mac "$MPPT_MAC"
+~/.venv/mppt-ble/bin/python -m mppt_ble off --mac "$MPPT_MAC"
+~/.venv/mppt-ble/bin/python -m mppt_ble on --mac "$MPPT_MAC"
 ```
 
-HTTP on port 5340 (same JSON shape as the phone `/charger` commands):
+HTTP (default bind `127.0.0.1:5338`; put a tunnel in front if you want the internet):
 
 ```bash
-~/.venv/mppt-ble/bin/python -m mppt_ble serve --mac DC:AD:B0:54:DB:4E --bind 0.0.0.0:5340
-curl -sS -X POST http://127.0.0.1:5340/charger -d '{"action":"off"}'
+set -a && source ~/.config/mppt/secrets.env && set +a
+~/.venv/mppt-ble/bin/python -m mppt_ble serve --bind 127.0.0.1:5338
+curl -sS -H "X-Remote-Secret: $MPPT_REMOTE_SECRET" \
+  -X POST http://127.0.0.1:5338/charger -d '{"action":"off"}'
 ```
 
-systemd user unit: copy `mppt-ble.service` to `~/.config/systemd/user/`,
-`systemctl --user daemon-reload && systemctl --user enable --now mppt-ble`.
+`MPPT_REMOTE_SECRET` is required for `serve`. Instant Readout keys go in `~/.config/mppt/devices.json` (`{"mac":"…","keys":{"AA:BB:…":"32hex"}}`).
 
-## Deploy on a new laptop (GitHub)
+systemd user units: copy `mppt-ble.service` (and optionally `cloudflared-mppt.service`) to `~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl --user enable --now mppt-ble`.
 
-The downstairs machine can die. Clone the repo, install BlueZ, run the same
-commands. Do not bake LAN URLs or secrets into git.
+Named tunnel: point Cloudflare ingress at `http://127.0.0.1:5338`, put the token in the file named by `CLOUDFLARED_TOKEN_FILE`. Do not put the token in the unit file.
 
-```bash
-git clone https://github.com/lakshaysethi2/victron-bland-exporter.git
-cd victron-bland-exporter/linux
-sudo apt-get install -y python3-venv python3-pip bluez
-python3 -m venv ~/.venv/mppt-ble
-~/.venv/mppt-ble/bin/pip install -r requirements.txt
-~/.venv/mppt-ble/bin/python -m mppt_ble scan
-```
+## Cloud-reset (optional)
 
-Point `--metrics` at whichever phone is exporting Instant Readout on the LAN.
-
-## Cloud-reset (power-station MPPT wake-up)
-
-The Victron feeds a power station that has its own MPPT. After clouds, that
-station often stays at a low charge rate until the Victron is toggled off then
-on (a few seconds only — never leave it off in the sun).
-
-The loop reads `victron_solar_power_watts` from the phone exporter, tracks the
-recent peak, and if live watts stay below `drop_fraction * peak` for `--hold`
-seconds it pulses OFF `--off-seconds` then ON, then waits `--cooldown`.
+If another MPPT (e.g. a power station) stays lazy after clouds, pulse this Victron off then on. Always re-enables. Never leave it off.
 
 ```bash
-# watch only, no BLE writes
+set -a && source ~/.config/mppt/secrets.env && set +a
 ~/.venv/mppt-ble/bin/python -m mppt_ble.yield_reset \
-  --mac DC:AD:B0:54:DB:4E \
-  --metrics http://192.168.10.12:5338/metrics \
+  --mac "$MPPT_MAC" \
+  --metrics "$MPPT_METRICS_URL" \
   --dry-run
-
-# live (4s off, 12min cooldown)
-~/.venv/mppt-ble/bin/python -m mppt_ble.yield_reset \
-  --mac DC:AD:B0:54:DB:4E \
-  --metrics http://192.168.10.12:5338/metrics
 ```
-
-Do not start this until Instant Readout is flowing (`victron_devices_total` > 0)
-and VictronConnect is closed.

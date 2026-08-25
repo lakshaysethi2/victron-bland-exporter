@@ -94,3 +94,11 @@ def mode_text(mode: int | None) -> str:
     if mode in (MODE_OFF, MODE_OFF_LEGACY):
         return "OFF"
     return "Unknown"
+
+
+def mode_matches(mode: int | None, on: bool) -> bool:
+    if mode == MODE_ON:
+        return on
+    if mode in (MODE_OFF, MODE_OFF_LEGACY):
+        return not on
+    return False

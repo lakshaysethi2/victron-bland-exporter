@@ -1,0 +1,15 @@
+[Unit]
+Description=Named Cloudflare tunnel for the MPPT HTTP origin
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/mppt/secrets.env
+# Token file path is private; set CLOUDFLARED_TOKEN_FILE in secrets.env
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate --edge-ip-version 4 --protocol http2 tunnel run --token-file ${CLOUDFLARED_TOKEN_FILE}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

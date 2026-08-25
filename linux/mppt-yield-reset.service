@@ -5,7 +5,8 @@ After=bluetooth.target network.target
 [Service]
 Type=simple
 WorkingDirectory=%h/mppt-ble
-ExecStart=%h/.venv/mppt-ble/bin/python -m mppt_ble.yield_reset --mac DC:AD:B0:54:DB:4E --metrics http://192.168.10.12:5338/metrics --off-seconds 4 --cooldown 720
+EnvironmentFile=%h/.config/mppt/secrets.env
+ExecStart=%h/.venv/mppt-ble/bin/python -m mppt_ble.yield_reset --mac ${MPPT_MAC} --metrics ${MPPT_METRICS_URL}
 Restart=on-failure
 RestartSec=10
 
