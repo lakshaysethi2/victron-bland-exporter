@@ -241,6 +241,21 @@ The live settings this template is based on:
 | `metrics_path` | `/metrics` |
 | scrape interval | `5s` (the MPPT broadcasts ~1×/s; 5s keeps the charts smooth without hammering the tunnel) |
 
+If the Linux exporter is also running `node_exporter` on localhost (see `linux/node-exporter.service`), scrape host metrics through the same tunnel:
+
+```yaml
+  - job_name: 'mppt-laptop'
+    scheme: https
+    metrics_path: '/node/metrics'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['victron.yourdomain.com']
+        labels:
+          box: 'mppt-laptop'
+```
+
+`GET /node/metrics` is a proxy to `127.0.0.1:9100`; it is not Instant Readout data.
+
 Reload Prometheus (`curl -X POST localhost:9090/-/reload` or restart the container) and check **Status → Targets** — the `victron-mppt` target should be `UP`.
 
 ### Available metrics
@@ -282,13 +297,15 @@ Click **Save & test** — it should report success.
 3. **Upload dashboard JSON file** (or paste the JSON) → **Load**.
 4. When prompted, select your **Prometheus** datasource for the `DS_PROMETHEUS` variable → **Import**.
 
-That's it. The **Solar — Victron MPPT** dashboard appears with five panels:
+That's it. The **Solar — Victron MPPT** dashboard appears with Instant Readout panels plus a downstairs-host row when `job="mppt-laptop"` is scraping:
 
 - **Yield today** (stat, Wh)
 - **Solar power** (time series, W)
 - **Battery voltage** (time series, V)
 - **Battery current** (time series, A)
+- **Panel voltage** (time series, V)
 - **Devices online** (stat, count)
+- **Laptop CPU / temp / RAM / uptime** (`node_exporter` via `/node/metrics`)
 
 It auto-refreshes every 10 seconds and defaults to the last 6 hours. If you have multiple Victron devices, the `{{device}}` legend keeps their series separate automatically.
 
