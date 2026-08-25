@@ -69,6 +69,17 @@ class ChargerProtocolTest {
     }
 
     @Test
+    fun `split notification is completed on the next packet`() {
+        val first = "080319020041".hexToByteArray()
+        val (partial, leftover) = ChargerProtocol.parseRegisterStream(first)
+        assertTrue(partial.isEmpty())
+        assertEquals(6, leftover.size)
+        val (full, rest) = ChargerProtocol.parseRegisterStream(leftover + "04".hexToByteArray())
+        assertEquals(4, ChargerProtocol.chargerModeOf(full))
+        assertEquals(0, rest.size)
+    }
+
+    @Test
     fun `parses multiple frames packed in one notification`() {
         // Two frames concatenated: device mode (off) + battery voltage
         val data = "08031902004104" + "080319ed8d423505"
@@ -86,12 +97,9 @@ class ChargerProtocolTest {
     @Test
     fun `init sequence contains expected bootstrap frames`() {
         val flat = ChargerProtocol.INIT_SEQUENCE.map { it.second.toHex() }
-        assertTrue(flat.contains("fa80ff"))
-        assertTrue(flat.contains("f980"))
         assertTrue(flat.contains("01"))
         assertTrue(flat.contains("0300"))
-        assertTrue(flat.contains("060082189342102703010303"))
-        assertTrue(flat.contains("f941"))
+        assertFalse(flat.contains("fa80ff"))
     }
 
     @Test
@@ -147,6 +155,15 @@ class ChargerProtocolTest {
         assertFalse(ChargerProtocol.gattWriteAccepted(false, 0))
         assertFalse(ChargerProtocol.gattWriteAccepted(true, 133))
         assertFalse(ChargerProtocol.gattWriteAccepted(true, 1))
+    }
+
+    @Test
+    fun `control char props 22 uses WRITE_NO_RESPONSE`() {
+        // READ (2) | WRITE_NO_RESPONSE (4) | NOTIFY (16) — real HQ2531JADNZ 306b0002
+        assertEquals(ChargerProtocol.WRITE_TYPE_NO_RESPONSE, ChargerProtocol.writeTypeForProperties(22))
+        assertEquals(ChargerProtocol.WRITE_TYPE_DEFAULT, ChargerProtocol.writeTypeForProperties(8))
+        assertEquals(ChargerProtocol.WRITE_TYPE_DEFAULT, ChargerProtocol.writeTypeForProperties(12))
+        assertEquals(ChargerProtocol.WRITE_TYPE_DEFAULT, ChargerProtocol.writeTypeForProperties(26))
     }
 
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }

@@ -18,7 +18,7 @@ import java.security.MessageDigest
  *   GET  / or /charger   -> mobile control page (shell; every API call inside
  *                           it requires the secret — the page shows nothing and
  *                           does nothing without it)
- *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status + app version + last GATT voltages + lastBleAdAt + overrideUntilText + exactAlarm + batteryIgnored); kicks a CHARGER_READ when mode is still unknown
+ *   GET  /charger/status -> JSON status snapshot (charger + daily schedule + phone clock + live Instant Readout + sighted BLE devices + last charger debug lines + tunnel status + app version + last GATT voltages + lastBleAdAt + overrideUntilText + exactAlarm + batteryIgnored). Does not start a GATT session — the control page polls this every 3s.
  *   POST /charger        -> JSON body {"action":"on"|"off"|"read", "mac"?: "AA:BB:..."} flips or reads the charger
  *   POST /charger/schedule -> JSON {enabled, enable, disable, mac?} saves the daily window
  *   POST /charger/key    -> JSON {mac, key} saves an Instant Readout key (never echoed)
@@ -104,12 +104,9 @@ class RemoteChargerHttp(
         }
     }
 
-    /** Snapshot first; if the phone just rebooted, kick one GATT read so the page is not stuck on Unknown. */
+    /** Snapshot only. Polling this must not open GATT — that raced manual on/off and the daily window. */
     private fun handleStatusGet(): HttpResult {
         val snap = statusProvider()
-        if (snap.mode == null && !snap.busy) {
-            macFromRequest("")?.let { readSender?.readCharger(it) }
-        }
         return HttpResult(200, MIME_JSON, snap.toJson() + "\n")
     }
 
@@ -238,9 +235,6 @@ class RemoteChargerHttp(
     }
 
     private fun handleVoltageGet(): HttpResult {
-        if (AppState.voltageSettings == null) {
-            macFromRequest("")?.let { voltageCommandSender?.requestVoltageRead(it) }
-        }
         val vs = AppState.voltageSettings
         val body = buildString {
             append("{")

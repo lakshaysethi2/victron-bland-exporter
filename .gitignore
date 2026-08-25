@@ -33,6 +33,10 @@ cloudflared-token.txt
 # Local orchestrator / agent run state
 .gnhf/
 
+linux/**/__pycache__/
+linux/**/*.pyc
+phone.png
+
 # Misc
 .DS_Store
 *.swp

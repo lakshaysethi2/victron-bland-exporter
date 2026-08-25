@@ -448,7 +448,7 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"mode\":null"))
         assertTrue(r.body.contains("\"mac\":null"))
         assertTrue(r.body.contains("\"lastError\":\"boom\""))
-        assertEquals(listOf("AA:BB:CC:DD:EE:FF"), h.readSink.calls)
+        assertTrue(h.readSink.calls.isEmpty())
     }
 
     // ---- commands ----
@@ -568,13 +568,13 @@ class RemoteChargerHttpTest {
     }
 
     @Test
-    fun `status get kicks a charger read when mode is still unknown`() {
+    fun `status get does not kick a charger read when mode is still unknown`() {
         val h = Harness()
         h.snapshot = h.snapshot.copy(mode = null, busy = false)
         val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
         assertEquals(200, r.statusCode)
         assertTrue(r.body.contains("\"mode\":null"))
-        assertEquals(listOf("AA:BB:CC:DD:EE:FF"), h.readSink.calls)
+        assertTrue(h.readSink.calls.isEmpty())
         assertTrue(h.sink.calls.isEmpty())
     }
 
@@ -609,7 +609,7 @@ class RemoteChargerHttpTest {
             ),
         )
         h.control().handle("/charger/status", GET, headers(SECRET), "")
-        assertEquals(listOf("11:22:33:44:55:66"), h.readSink.calls)
+        assertTrue(h.readSink.calls.isEmpty())
     }
 
     @Test
@@ -736,7 +736,7 @@ class RemoteChargerHttpTest {
     }
 
     @Test
-    fun `get voltage json reports settings and requests a read when empty`() {
+    fun `get voltage json reports settings and does not request a read when empty`() {
         val previous = com.lakshaysethi.victronbleexporter.AppState.voltageSettings
         com.lakshaysethi.victronbleexporter.AppState.voltageSettings = null
         try {
@@ -746,7 +746,7 @@ class RemoteChargerHttpTest {
             assertTrue(r.body.contains("\"battery_voltage_setting\":null"))
             assertTrue(r.body.contains("\"absorption_voltage\":null"))
             assertTrue(r.body.contains("\"panel_voltage\":null"))
-            assertEquals(listOf("AA:BB:CC:DD:EE:FF"), h.voltageSink.reads)
+            assertTrue(h.voltageSink.reads.isEmpty())
         } finally {
             com.lakshaysethi.victronbleexporter.AppState.voltageSettings = previous
         }

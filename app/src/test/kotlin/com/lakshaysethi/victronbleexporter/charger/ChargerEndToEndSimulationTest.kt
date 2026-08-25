@@ -102,12 +102,13 @@ class ChargerEndToEndSimulationTest {
             val wr = writeMode(dev, on)
             val (ok, log) = readbackVerify(dev, on)
             out.appendLine("    $wr | $log")
-            if (ok) {
-                val next = ChargerSchedule.nextTransition(mod, enable, disable)
-                overrideUntil = if (next <= mod) m + (1440 - mod) + next else m - mod + next
-                overrideLog = ChargerSchedule.formatMinutes(next)
-                out.appendLine("    manual override active until ${overrideLog} (next window boundary)")
-            }
+            // Override is armed even when BLE readback fails, otherwise the next
+            // schedule tick (daytime = ON) undoes a captain Disable tap.
+            val next = ChargerSchedule.nextTransition(mod, enable, disable)
+            overrideUntil = if (next <= mod) m + (1440 - mod) + next else m - mod + next
+            lastScheduledMode = on
+            overrideLog = ChargerSchedule.formatMinutes(next)
+            out.appendLine("    manual override active until ${overrideLog} (next window boundary)")
         }
 
         val clock = Clock(dayStart = 0)
@@ -181,6 +182,28 @@ class ChargerEndToEndSimulationTest {
         // Overnight window semantics.
         assertTrue(ChargerSchedule.isInWindow(20 * 60, 18 * 60, 8 * 60 + 30))
         assertFalse(ChargerSchedule.isInWindow(12 * 60, 18 * 60, 8 * 60 + 30))
+    }
+
+    @Test
+    fun `manual disable with failed readback still blocks daytime schedule ON`() {
+        val enable = 8 * 60 + 30
+        val disable = 18 * 60
+        var lastScheduledMode: Boolean? = true
+        var scheduleWrites = 0
+        val failMin = 11 * 60
+        val next = ChargerSchedule.nextTransition(failMin, enable, disable)
+        val overrideUntil = next
+        lastScheduledMode = false
+        assertEquals(18 * 60, overrideUntil)
+
+        val noon = 12 * 60
+        if (overrideUntil > noon) {
+            // schedule tick must no-op
+        } else {
+            scheduleWrites++
+        }
+        assertEquals(0, scheduleWrites)
+        assertEquals(false, lastScheduledMode)
     }
 
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }

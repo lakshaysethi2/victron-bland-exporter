@@ -72,6 +72,7 @@ class VictronBleExporterService : Service() {
     private var scheduleRetryAt = 0L
     private var lastVoltagePollAt = 0L
     private var lastTunnelRestoreAt = 0L
+    @Volatile private var gattOwnsRadio = false
 
     /**
      * Remote charger-control HTTP surface. Commands are forwarded to this
@@ -395,6 +396,7 @@ class VictronBleExporterService : Service() {
         }
         if (!settings.scheduleEnabled) return
         if (chargerScheduleStore.manualOverrideUntil > now) return // manual override active
+        if (AppState.chargerBusy) return
         if (now < scheduleRetryAt) return
 
         val mac = ExporterKeepAlive.scheduleTargetMac(
@@ -416,7 +418,7 @@ class VictronBleExporterService : Service() {
             "Schedule tick: window=${ChargerSchedule.formatMinutes(settings.enableMinutes)}-${ChargerSchedule.formatMinutes(settings.disableMinutes)}" +
                 " -> charger ${if (desiredOn) "ON" else "OFF"}"
         )
-        val result = chargerController.setMode(mac, desiredOn)
+        val result = withScanPausedForGatt { chargerController.setMode(mac, desiredOn) }
         if (result.success) {
             lastScheduledMode = desiredOn
             lastScheduledAppliedAt = now
@@ -442,20 +444,15 @@ class VictronBleExporterService : Service() {
         AppState.chargerLastAction = if (enable) "Enabling charger…" else "Disabling charger…"
         AppState.chargerLastError = null
         ChargerDebugLog.append("Manual ${if (enable) "ENABLE" else "DISABLE"} requested for $mac")
+        // Pause the daily window immediately so a failed/slow GATT write cannot be
+        // overwritten by the next schedule tick (which wants ON during the day).
+        armManualOverride(store, enable)
         try {
-            val result = chargerController.setMode(mac, enable)
+            val result = withScanPausedForGatt { chargerController.setMode(mac, enable) }
             AppState.chargerMode = result.mode
             AppState.chargerStateUpdatedAt = System.currentTimeMillis()
             if (result.success) {
-                // Manual override: pause the schedule until the next window boundary.
-                val cal = Calendar.getInstance()
-                val minutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
-                val next = ChargerSchedule.nextTransition(minutes, store.load().enableMinutes, store.load().disableMinutes)
-                val until = nextTransitionEpoch(next)
-                store.manualOverrideUntil = until
-                AppState.chargerOverrideUntil = until
                 AppState.chargerLastAction = "Charger ${if (enable) "ENABLED" else "DISABLED"} (${result.modeText})"
-                ChargerDebugLog.append("Manual override active until ${ChargerSchedule.formatMinutes(next)}")
             } else {
                 AppState.chargerLastAction = "Failed: ${result.message}"
                 AppState.chargerLastError = result.message
@@ -483,7 +480,7 @@ class VictronBleExporterService : Service() {
         AppState.chargerLastError = null
         ChargerDebugLog.append("Manual state read requested for $mac")
         try {
-            val result = chargerController.readMode(mac)
+            val result = withScanPausedForGatt { chargerController.readMode(mac) }
             AppState.chargerMode = result.mode
             AppState.chargerStateUpdatedAt = System.currentTimeMillis()
             AppState.chargerLastAction = if (result.success) "Read: ${result.modeText}" else "Read failed: ${result.message}"
@@ -509,6 +506,7 @@ class VictronBleExporterService : Service() {
     /** Background GATT read of voltage settings + panel voltage; skips when a user op is in flight. */
     private suspend fun maybeRefreshVoltageSettings() {
         if (AppState.chargerBusy) return
+        if (AppState.chargerOverrideUntil > System.currentTimeMillis()) return
         val mac = chargerScheduleStore.load().chargerMac.ifBlank { return }
         val now = System.currentTimeMillis()
         if (!ExporterKeepAlive.voltagePollDue(
@@ -518,7 +516,7 @@ class VictronBleExporterService : Service() {
                 AppState.voltageSettingsLastError,
             )
         ) return
-        val result = chargerController.tryReadVoltageSettings(mac) ?: return
+        val result = withScanPausedForGatt { chargerController.tryReadVoltageSettings(mac) } ?: return
         lastVoltagePollAt = System.currentTimeMillis()
         if (result.success) {
             AppState.voltageSettings = result.settings
@@ -537,7 +535,7 @@ class VictronBleExporterService : Service() {
         AppState.voltageSettingsLastError = null
         ChargerDebugLog.append("Voltage settings read requested for $mac")
         try {
-            val result = chargerController.readVoltageSettings(mac)
+            val result = withScanPausedForGatt { chargerController.readVoltageSettings(mac) }
             if (result.success) {
                 AppState.voltageSettings = result.settings
                 AppState.voltageSettingsUpdatedAt = System.currentTimeMillis()
@@ -564,7 +562,7 @@ class VictronBleExporterService : Service() {
         AppState.voltageSettingsLastError = null
         ChargerDebugLog.append("Set battery voltage $volts V for $mac")
         try {
-            val result = chargerController.setBatteryVoltageSetting(mac, volts)
+            val result = withScanPausedForGatt { chargerController.setBatteryVoltageSetting(mac, volts) }
             if (result.success) {
                 AppState.voltageSettings = result.settings
                 AppState.voltageSettingsUpdatedAt = System.currentTimeMillis()
@@ -591,7 +589,7 @@ class VictronBleExporterService : Service() {
         AppState.voltageSettingsLastError = null
         ChargerDebugLog.append("Set charging voltages abs=$absorptionVolts float=$floatVolts for $mac")
         try {
-            val result = chargerController.setChargingVoltages(mac, absorptionVolts, floatVolts)
+            val result = withScanPausedForGatt { chargerController.setChargingVoltages(mac, absorptionVolts, floatVolts) }
             if (result.success) {
                 AppState.voltageSettings = result.settings
                 AppState.voltageSettingsUpdatedAt = System.currentTimeMillis()
@@ -643,6 +641,20 @@ class VictronBleExporterService : Service() {
 
     private fun nextTransitionEpoch(nextMinutesOfDay: Int): Long =
         ChargerSchedule.epochAtMinutesOfDay(System.currentTimeMillis(), nextMinutesOfDay)
+
+    /** Hold the daily window until the next 08:30/18:00-style boundary so a tap (or remote POST) is not undone by the next keep-alive tick. */
+    private fun armManualOverride(store: ChargerScheduleStore, enable: Boolean) {
+        val loaded = store.load()
+        val cal = Calendar.getInstance()
+        val minutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+        val next = ChargerSchedule.nextTransition(minutes, loaded.enableMinutes, loaded.disableMinutes)
+        val until = nextTransitionEpoch(next)
+        store.manualOverrideUntil = until
+        AppState.chargerOverrideUntil = until
+        lastScheduledMode = enable
+        lastScheduledAppliedAt = System.currentTimeMillis()
+        ChargerDebugLog.append("Manual override active until ${ChargerSchedule.formatMinutes(next)} (schedule will not flip charger before then)")
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         intent?.let {
@@ -797,11 +809,29 @@ class VictronBleExporterService : Service() {
     }
 
     /** Restarts the BLE scan if Android dropped it without onScanFailed. */
+    /**
+     * Instant Readout scan and VictronConnect GATT share the same radio.
+     * Holding the scan open while connecting produces GATT 133 / 12s timeouts
+     * and "write not accepted" on the control characteristic.
+     */
+    private suspend fun <T> withScanPausedForGatt(block: suspend () -> T): T {
+        gattOwnsRadio = true
+        try {
+            stopBleScan()
+            delay(1_200)
+            return block()
+        } finally {
+            delay(1_000)
+            gattOwnsRadio = false
+            startBleScan()
+        }
+    }
+
     private fun startScanWatchdog() {
         serviceScope.launch {
             while (isActive) {
                 try {
-                    if (ExporterKeepAlive.shouldRestartScan(lastScanResultAt, System.currentTimeMillis())) {
+                    if (!gattOwnsRadio && ExporterKeepAlive.shouldRestartScan(lastScanResultAt, System.currentTimeMillis())) {
                         Log.w(TAG, "No scan results for ${ExporterKeepAlive.SCAN_RESTART_AFTER_MS}ms — restarting BLE scan")
                         AppLog.w("No scan results for ${ExporterKeepAlive.SCAN_RESTART_AFTER_MS}ms — restarting BLE scan")
                         restartScan()
@@ -816,6 +846,10 @@ class VictronBleExporterService : Service() {
     }
 
     private fun restartScan() {
+        if (gattOwnsRadio) {
+            Log.i(TAG, "Scan restart skipped — GATT session in flight")
+            return
+        }
         try {
             stopBleScan()
         } catch (e: Exception) {
@@ -825,6 +859,10 @@ class VictronBleExporterService : Service() {
     }
 
     private fun startBleScan() {
+        if (gattOwnsRadio) {
+            Log.i(TAG, "BLE scan deferred — GATT session owns the radio")
+            return
+        }
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val adapter = bluetoothManager.adapter
         if (adapter == null || !adapter.isEnabled) {

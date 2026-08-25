@@ -67,17 +67,9 @@ object ChargerProtocol {
      * register commands.
      */
     val INIT_SEQUENCE: List<Pair<String, ByteArray>> = listOf(
-        CONTROL_UUID to hex("fa80ff"),
-        CONTROL_UUID to hex("f980"),
+        // 306b0002 (fa80ff) and the 06008218… blob make this SmartSolar drop GATT 19.
         SINGLE_UUID to hex("01"),
         SINGLE_UUID to hex("0300"),
-        SINGLE_UUID to hex("060082189342102703010303"),
-        BULK_UUID to hex("05008119ec0f05008119ec0e05008119010c0500"),
-        SINGLE_UUID to hex("81189005008119ec3f05008119ec12"),
-        SINGLE_UUID to hex("19ecdc05038119eceb05038119eced"),
-        CONTROL_UUID to hex("f941"),
-        SINGLE_UUID to hex("0600821893421027"),
-        CONTROL_UUID to hex("f941"),
     )
 
     /** Shorter handshake used to start a control session. */
@@ -95,6 +87,13 @@ object ChargerProtocol {
     /** Build a register read frame: 05 03 81 19 <reg hi> <reg lo>. */
     fun makeReadFrame(registerId: Int): ByteArray = byteArrayOf(
         0x05, 0x03, 0x81.toByte(), 0x19,
+        ((registerId shr 8) and 0xFF).toByte(),
+        (registerId and 0xFF).toByte(),
+    )
+
+    /** Alternate read used by some VictronConnect captures (0x82 vs 0x81). */
+    fun makeReadFrame82(registerId: Int): ByteArray = byteArrayOf(
+        0x05, 0x03, 0x82.toByte(), 0x19,
         ((registerId shr 8) and 0xFF).toByte(),
         (registerId and 0xFF).toByte(),
     )
@@ -160,28 +159,37 @@ object ChargerProtocol {
      * Length byte: 0x40..0x4F = that many value bytes; 0x50 = 16; 0x58 = extended
      * (next byte is the length). Multiple frames can be packed into one packet.
      */
-    fun parseRegisterValues(data: ByteArray): Map<Int, ByteArray> {
+    fun parseRegisterValues(data: ByteArray): Map<Int, ByteArray> = parseRegisterStream(data).first
+
+    /**
+     * Same as [parseRegisterValues] but returns unconsumed tail bytes so split
+     * notifications (Victron often splits 08… frames across packets) can be
+     * stitched on the next notify.
+     */
+    fun parseRegisterStream(data: ByteArray): Pair<Map<Int, ByteArray>, ByteArray> {
         val result = LinkedHashMap<Int, ByteArray>()
         var pos = 0
         while (pos + 6 <= data.size) {
-            val start = indexOfFrame(data, pos) ?: break
+            val start = indexOfFrame(data, pos) ?: return result to ByteArray(0)
             val category = data[start + 3].toInt() and 0xFF
             val command = data[start + 4].toInt() and 0xFF
             val lengthType = data[start + 5].toInt() and 0xFF
             val (length, valueStart) = when {
                 lengthType == 0x58 -> {
-                    if (start + 7 > data.size) return result
+                    if (start + 7 > data.size) return result to data.copyOfRange(start, data.size)
                     data[start + 6].toInt() and 0xFF to start + 7
                 }
                 lengthType == 0x50 -> 16 to start + 6
                 else -> (lengthType and 0x0F) to start + 6
             }
-            if (length <= 0 || valueStart + length > data.size) return result
+            if (length <= 0 || valueStart + length > data.size) {
+                return result to data.copyOfRange(start, data.size)
+            }
             val registerId = (category shl 8) or command
             result[registerId] = data.copyOfRange(valueStart, valueStart + length)
             pos = valueStart + length
         }
-        return result
+        return result to ByteArray(0)
     }
 
     /** Device-mode value from parsed registers (null if not reported). */
@@ -194,6 +202,30 @@ object ChargerProtocol {
 
     /** Stack queued the write and the device acknowledged GATT_SUCCESS (0). Status 133 is a failure now that writes are acknowledged. */
     fun gattWriteAccepted(queued: Boolean, status: Int): Boolean = queued && status == 0
+
+    /** BluetoothGattCharacteristic.PROPERTY_WRITE */
+    const val PROPERTY_WRITE = 0x08
+
+    /** BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE */
+    const val PROPERTY_WRITE_NO_RESPONSE = 0x04
+
+    /** BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT (acknowledged). */
+    const val WRITE_TYPE_DEFAULT = 2
+
+    /** BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE. */
+    const val WRITE_TYPE_NO_RESPONSE = 1
+
+    /**
+     * Victron's control char (306b0002) is often props=22: READ | WRITE_NO_RESPONSE | NOTIFY
+     * with no PROPERTY_WRITE. WRITE_TYPE_DEFAULT is refused immediately by the stack.
+     * Prefer acknowledged writes when the char advertises them; otherwise no-response.
+     */
+    fun writeTypeForProperties(properties: Int): Int =
+        when {
+            properties and PROPERTY_WRITE != 0 -> WRITE_TYPE_DEFAULT
+            properties and PROPERTY_WRITE_NO_RESPONSE != 0 -> WRITE_TYPE_NO_RESPONSE
+            else -> WRITE_TYPE_DEFAULT
+        }
 
     /** True when [mode] satisfies a request to set the charger to [on] (1 = on, 0/4 = off). */
     fun modeMatchesRequest(mode: Int?, on: Boolean): Boolean = when (mode) {
