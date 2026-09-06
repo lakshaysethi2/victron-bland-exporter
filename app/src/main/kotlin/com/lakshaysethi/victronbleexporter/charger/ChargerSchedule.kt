@@ -9,8 +9,8 @@ import java.util.TimeZone
  * tested on the JVM.
  *
  * Semantics:
- *  - enable 08:30 / disable 18:00 -> charger ON while the clock is inside
- *    [08:30, 18:00).
+ *  - enable 07:45 / disable 18:00 -> charger ON while the clock is inside
+ *    [07:45, 18:00).
  *  - enable 18:00 / disable 08:30 -> overnight window (enable > disable),
  *    charger ON from 18:00 until 08:30 the next morning.
  *  - enable == disable -> treated as a 24 h window (charger always ON) so a
@@ -18,7 +18,7 @@ import java.util.TimeZone
  */
 object ChargerSchedule {
 
-    const val DEFAULT_ENABLE = "08:30"
+    const val DEFAULT_ENABLE = "07:45"
     const val DEFAULT_DISABLE = "18:00"
 
     /** "HH:mm" -> minutes since midnight; null when malformed. */
