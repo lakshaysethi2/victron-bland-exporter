@@ -747,7 +747,7 @@ private val CONTROL_PAGE: String = """
   <button class="btn small" id="btnScan" disabled>Restart BLE scan</button>
   <div class="sub" style="margin:14px 0 8px">Daily schedule (phone clock below)</div>
   <label class="hint"><input type="checkbox" id="schedOn"> Enforce window</label>
-  <div class="row"><input type="text" id="enTime" placeholder="ON 08:30" inputmode="numeric"><input type="text" id="disTime" placeholder="OFF 18:00" inputmode="numeric"></div>
+  <div class="row"><input type="text" id="enTime" placeholder="ON 07:45" inputmode="numeric"><input type="text" id="disTime" placeholder="OFF 18:00" inputmode="numeric"></div>
   <button class="btn small" id="btnSched" disabled>Save schedule</button>
   <button class="btn small" id="btnResume" disabled>Resume schedule</button>
   <div class="sub" style="margin:14px 0 8px">Instant Readout key (VictronConnect → Product info)</div>
@@ -816,7 +816,7 @@ private val CONTROL_PAGE: String = """
     if (data.scheduleEnabled) {
       parts.push("schedule " + (data.enableTime || "?") + "-" + (data.disableTime || "?"));
       parts.push("window " + (data.scheduleWantsOn ? "ON" : "OFF") + (data.nextTransition ? " until " + data.nextTransition : ""));
-      parts.push(data.exactAlarm ? "exact alarm" : "inexact alarm (may miss 08:30/18:00)");
+      parts.push(data.exactAlarm ? "exact alarm" : "inexact alarm (may miss 07:45/18:00)");
     }
     parts.push(data.batteryIgnored ? "battery unrestricted" : "battery restricted (OEM may kill overnight)");
     if (data.overrideUntilText) parts.push("manual override until " + data.overrideUntilText + " (Resume schedule to hand back to the window)");

@@ -14,10 +14,10 @@ class ChargerScheduleStore(context: Context) {
     private val prefs: SharedPreferences = bootSafePrefs(context, PREFS)
 
     var scheduleEnabled: Boolean
-        get() = prefs.getBoolean(KEY_SCHEDULE_ENABLED, false)
+        get() = prefs.getBoolean(KEY_SCHEDULE_ENABLED, true)
         set(value) = prefs.edit().putBoolean(KEY_SCHEDULE_ENABLED, value).apply()
 
-    /** "HH:mm" strings; defaults 08:30 / 18:00. */
+    /** "HH:mm" strings; defaults 07:45 / 18:00 (Pacific/Auckland phone clock). */
     var enableTime: String
         get() = prefs.getString(KEY_ENABLE_TIME, ChargerSchedule.DEFAULT_ENABLE) ?: ChargerSchedule.DEFAULT_ENABLE
         set(value) = prefs.edit().putString(KEY_ENABLE_TIME, value).apply()
@@ -40,13 +40,19 @@ class ChargerScheduleStore(context: Context) {
         prefs.edit().remove(KEY_OVERRIDE_UNTIL).apply()
     }
 
-    fun load(): ChargerSettings = ChargerSettings(
-        scheduleEnabled = scheduleEnabled,
-        enableMinutes = ChargerSchedule.parseMinutes(enableTime) ?: 8 * 60 + 30,
-        disableMinutes = ChargerSchedule.parseMinutes(disableTime) ?: 18 * 60,
-        chargerMac = chargerMac,
-        manualOverrideUntil = manualOverrideUntil,
-    )
+    fun load(): ChargerSettings {
+        // Issue #22: former factory default 08:30 -> 07:45 NZ morning ON.
+        if (prefs.getString(KEY_ENABLE_TIME, null) == LEGACY_DEFAULT_ENABLE) {
+            prefs.edit().putString(KEY_ENABLE_TIME, ChargerSchedule.DEFAULT_ENABLE).apply()
+        }
+        return ChargerSettings(
+            scheduleEnabled = scheduleEnabled,
+            enableMinutes = ChargerSchedule.parseMinutes(enableTime) ?: 7 * 60 + 45,
+            disableMinutes = ChargerSchedule.parseMinutes(disableTime) ?: 18 * 60,
+            chargerMac = chargerMac,
+            manualOverrideUntil = manualOverrideUntil,
+        )
+    }
 
     /** Persist schedule + MAC and clear any pending manual override. */
     fun save(scheduleEnabled: Boolean, enableTime: String, disableTime: String, chargerMac: String) {
@@ -74,5 +80,6 @@ class ChargerScheduleStore(context: Context) {
         const val KEY_DISABLE_TIME = "disable_time"
         const val KEY_CHARGER_MAC = "charger_mac"
         const val KEY_OVERRIDE_UNTIL = "manual_override_until"
+        const val LEGACY_DEFAULT_ENABLE = "08:30"
     }
 }

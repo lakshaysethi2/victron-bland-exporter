@@ -11,8 +11,8 @@ import org.junit.Test
 class ChargerScheduleTest {
 
     @Test
-    fun `defaults are 08-30 and 18-00`() {
-        assertEquals(8 * 60 + 30, ChargerSchedule.parseMinutes(ChargerSchedule.DEFAULT_ENABLE))
+    fun `defaults are 07-45 and 18-00`() {
+        assertEquals(7 * 60 + 45, ChargerSchedule.parseMinutes(ChargerSchedule.DEFAULT_ENABLE))
         assertEquals(18 * 60, ChargerSchedule.parseMinutes(ChargerSchedule.DEFAULT_DISABLE))
     }
 

@@ -11,7 +11,7 @@ import org.junit.Test
  * exact control flow of VictronBleExporterService.enforceChargerSchedule() /
  * performChargerSet() over a simulated 2+ day timeline:
  *
- *   - schedule tick every minute (window default 08:30 -> 18:00),
+ *   - schedule tick every minute (window default 07:45 -> 18:00),
  *   - manual Enable/Disable pauses the schedule until the next window boundary,
  *   - schedule resumes at the boundary (lastScheduledMode reset — the edfb7ef fix),
  *   - BLE write frames generated for the real device, device echo parsed,
@@ -113,8 +113,8 @@ class ChargerEndToEndSimulationTest {
         val clock = Clock(dayStart = 0)
         // ---- Day 1 ----
         out.appendLine("=== Day 1 (schedule enabled, default window) ===")
-        for (m in 6 * 60 until 8 * 60 + 30 step 30) scheduleTick(m, clock) // early morning: OFF
-        scheduleTick(8 * 60 + 30, clock) // 08:30 -> ON
+        for (m in 6 * 60 until 7 * 60 + 45 step 30) scheduleTick(m, clock) // early morning: OFF
+        scheduleTick(7 * 60 + 45, clock) // 07:45 -> ON
         scheduleTick(9 * 60, clock)      // mid-morning: no change
         out.appendLine("    ${gaugeLine()}   <- Prometheus /metrics while charger on")
         manualSet(10 * 60, clock, on = false) // captain disables at 10:00
@@ -126,11 +126,11 @@ class ChargerEndToEndSimulationTest {
         out.appendLine()
         // ---- Day 2 ----
         out.appendLine("=== Day 2 ===")
-        scheduleTick(8 * 60 + 30 + 1440, clock) // 08:30 -> ON again
+        scheduleTick(7 * 60 + 45 + 1440, clock) // 07:45 -> ON again
         manualSet(19 * 60 + 1440, clock, on = true) // captain re-enables in the evening
         scheduleTick(20 * 60 + 1440, clock)
-        out.appendLine("    (20:00 no schedule write — override active until 08:30)")
-        scheduleTick(8 * 60 + 30 + 2880, clock) // day 3 08:30: override ended, schedule resumes -> ON
+        out.appendLine("    (20:00 no schedule write — override active until 07:45)")
+        scheduleTick(7 * 60 + 45 + 2880, clock) // day 3 07:45: override ended, schedule resumes -> ON
         val finalDeviceMode = dev.mode
         out.appendLine()
         // ---- Readback mismatch path (the edfb7ef stale-readback fix) ----
@@ -156,20 +156,20 @@ class ChargerEndToEndSimulationTest {
 
         // ---- Assertions: the end-user behavior actually holds ----
         // Default window boundaries.
-        assertEquals(8 * 60 + 30, enable)
+        assertEquals(7 * 60 + 45, enable)
         assertEquals(18 * 60, disable)
         // Schedule applied the expected states at the expected boundaries.
-        assertTrue(transcript.contains("t=08:30 schedule tick: window=08:30-18:00 -> charger ON"))
-        assertTrue(transcript.contains("t=18:00 schedule tick: window=08:30-18:00 -> charger OFF"))
+        assertTrue(transcript.contains("t=07:45 schedule tick: window=07:45-18:00 -> charger ON"))
+        assertTrue(transcript.contains("t=18:00 schedule tick: window=07:45-18:00 -> charger OFF"))
         // Manual override paused the schedule and resumed exactly at the boundary.
         assertTrue(transcript.contains("manual override active until 18:00 (next window boundary)"))
         assertTrue(transcript.contains("t=18:00 schedule tick: manual override ended — schedule resumes"))
         assertTrue(transcript.contains("(12:00 no schedule write — override active)"))
-        // The day-2 manual enable override ran through the overnight boundary and resumed at 08:30.
-        assertTrue(transcript.contains("manual override active until 08:30 (next window boundary)"))
-        assertTrue(transcript.contains("t=08:30 schedule tick: manual override ended — schedule resumes"))
+        // The day-2 manual enable override ran through the overnight boundary and resumed at 07:45.
+        assertTrue(transcript.contains("manual override active until 07:45 (next window boundary)"))
+        assertTrue(transcript.contains("t=07:45 schedule tick: manual override ended — schedule resumes"))
         // Every scheduled/manual write was followed by a matching readback, and the final
-        // device state is ON (day-3 08:30 schedule apply).
+        // device state is ON (day-3 07:45 schedule apply).
         assertTrue(transcript.contains("readback verified: device mode = ON (mode=1) matches requested ON"))
         assertEquals(ChargerProtocol.MODE_CHARGER_ON, finalDeviceMode)
         // Readback-mismatch path is reported as a failure.

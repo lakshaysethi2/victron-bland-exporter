@@ -579,8 +579,8 @@ fun VictronBleExporterScreen(
     var chargerLastAction by remember { mutableStateOf(AppState.chargerLastAction) }
     var chargerLastError by remember { mutableStateOf(AppState.chargerLastError) }
     var chargerOverrideUntil by remember { mutableLongStateOf(AppState.chargerOverrideUntil) }
-    var scheduleEnabled by remember { mutableStateOf(false) }
-    var enableTime by remember { mutableStateOf("08:30") }
+    var scheduleEnabled by remember { mutableStateOf(true) }
+    var enableTime by remember { mutableStateOf("07:45") }
     var disableTime by remember { mutableStateOf("18:00") }
     var scheduleLoaded by remember { mutableStateOf(false) }
 

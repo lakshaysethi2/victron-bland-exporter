@@ -195,7 +195,7 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("\"busy\":false"))
         assertTrue(r.body.contains("\"lastAction\":\"Charger ENABLED (ON)\""))
         assertTrue(r.body.contains("\"scheduleEnabled\":false"))
-        assertTrue(r.body.contains("\"enableTime\":\"08:30\""))
+        assertTrue(r.body.contains("\"enableTime\":\"07:45\""))
         assertTrue(r.body.contains("\"disableTime\":\"18:00\""))
         assertTrue(r.body.contains("\"live\":[]"))
         assertTrue(r.body.contains("\"debug\":[]"))
