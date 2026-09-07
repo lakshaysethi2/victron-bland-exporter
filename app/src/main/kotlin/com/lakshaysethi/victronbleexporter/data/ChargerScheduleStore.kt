@@ -42,8 +42,18 @@ class ChargerScheduleStore(context: Context) {
 
     fun load(): ChargerSettings {
         // Issue #22: former factory default 08:30 -> 07:45 NZ morning ON.
+        // Pre-#23 builds persisted schedule_enabled=false (the old unchecked
+        // UI default) whenever charger settings were saved to configure the
+        // MAC — so a window still sitting at the legacy 08:30 default must
+        // also be ENABLED here, or 07:45 still never fires after updating.
+        // A user who deliberately disabled the window but left 08:30 is
+        // re-enabled too; that matches issue #22's intent for this
+        // single-deployment app (toggle it back off in the UI if unwanted).
         if (prefs.getString(KEY_ENABLE_TIME, null) == LEGACY_DEFAULT_ENABLE) {
-            prefs.edit().putString(KEY_ENABLE_TIME, ChargerSchedule.DEFAULT_ENABLE).apply()
+            prefs.edit()
+                .putString(KEY_ENABLE_TIME, ChargerSchedule.DEFAULT_ENABLE)
+                .putBoolean(KEY_SCHEDULE_ENABLED, true)
+                .apply()
         }
         return ChargerSettings(
             scheduleEnabled = scheduleEnabled,
