@@ -13,6 +13,7 @@ from mppt_ble.yield_reset import (
     is_daytime,
     load_policy,
     local_mpp_stuck,
+    pulse_why,
     should_pulse,
     voltage_delta,
 )
@@ -138,6 +139,15 @@ class YieldResetTest(unittest.TestCase):
         t0 = noon()
         self.assertFalse(local_mpp_stuck(180, 150.0, 54.0, p))
         self.assertFalse(should_pulse(st, t0 + 30, 180, p, panel_v=150.0, battery_v=54.0))
+
+    def test_pulse_why_explains_skip_and_ready(self):
+        p = ResetPolicy()
+        t0 = noon()
+        self.assertEqual("ready", pulse_why(180, 150.0, 40.0, p, t0, 0))
+        self.assertIn("already high", pulse_why(1200, 150.0, 40.0, p, t0, 0))
+        self.assertIn("waiting", pulse_why(180, None, 40.0, p, t0, 0))
+        self.assertIn("below", pulse_why(180, 90.0, 40.0, p, t0, 0))
+        self.assertIn("cooldown", pulse_why(180, 150.0, 40.0, p, t0, t0 - 10))
 
     def test_load_config_json(self):
         raw = {

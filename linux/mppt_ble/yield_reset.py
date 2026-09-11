@@ -154,6 +154,36 @@ def voltage_delta(panel_v: float | None, battery_v: float | None) -> float | Non
     return panel_v - battery_v
 
 
+def pulse_why(
+    watts: float | None,
+    panel_v: float | None,
+    battery_v: float | None,
+    policy: ResetPolicy,
+    ts: float,
+    last_pulse_at: float,
+) -> str:
+    """Short reason the watchdog will or will not pulse. For the /charger page."""
+    if not is_daytime(ts, policy):
+        return "night"
+    if last_pulse_at and ts - last_pulse_at < policy.cooldown_s:
+        left = int(policy.cooldown_s - (ts - last_pulse_at))
+        return f"cooldown {left}s"
+    if panel_v is None:
+        return "waiting for panel voltage"
+    if panel_v < policy.local_mpp_panel_min_v:
+        return f"panel {panel_v:.0f}V below {policy.local_mpp_panel_min_v:.0f}V"
+    if battery_v is not None and battery_v > policy.local_mpp_battery_max_v:
+        return f"output {battery_v:.0f}V already high"
+    delta = voltage_delta(panel_v, battery_v)
+    if delta is not None and delta < policy.local_mpp_min_delta_v:
+        return f"gap {delta:.0f}V below {policy.local_mpp_min_delta_v:.0f}V"
+    if watts is None:
+        return "no watts yet"
+    if watts >= policy.local_mpp_max_w:
+        return f"{watts:.0f}W already high"
+    return "ready"
+
+
 def local_mpp_stuck(
     watts: float,
     panel_v: float | None,

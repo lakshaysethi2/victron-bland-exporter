@@ -18,6 +18,7 @@ from .yield_reset import (
     ingest,
     load_policy,
     local_mpp_stuck,
+    pulse_why,
     should_pulse,
     voltage_delta,
 )
@@ -97,6 +98,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
 
     lock = asyncio.Lock()
     last: dict = {"mac": mac, "host": "linux"}
+    pulse_log: list[dict] = []
     live: dict[str, dict] = {}
     scan_paused = asyncio.Event()
     scan_idle = asyncio.Event()
@@ -174,6 +176,15 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             finally:
                 scan_paused.clear()
         last.update({"action": "restart", "message": r.message, "success": r.success})
+        pulse_log.append(
+            {
+                "at": time.time(),
+                "reason": reason,
+                "success": r.success,
+                "message": r.message,
+            }
+        )
+        del pulse_log[:-12]
         return r
 
     async def watchdog() -> None:
@@ -261,7 +272,11 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             raise web.HTTPUnauthorized(text='{"error":"unauthorized"}', content_type="application/json")
 
     async def handle_page(_request: web.Request) -> web.Response:
-        return web.Response(text=page_html, content_type="text/html")
+        return web.Response(
+            text=page_html,
+            content_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def handle_status(request: web.Request) -> web.Response:
         await require(request)
@@ -272,6 +287,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                 {
                     "solarPowerW": row.get("solar_power_w"),
                     "batteryVoltage": row.get("battery_voltage"),
+                    "batteryCurrent": row.get("battery_current"),
                     "chargeState": row.get("charge_state"),
                     "lastBleAdAt": int(row["last_seen"] * 1000),
                 }
@@ -303,6 +319,21 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             snap["lastPulseAt"] = None
         snap["busy"] = lock.locked()
         snap["host"] = "linux"
+        snap["pulseWhy"] = pulse_why(
+            watts, panel_v, battery_v, policy, now, reset_state.last_pulse_at
+        )
+        hold_left = 0
+        if reset_state.local_mpp_since and snap["pulseCandidate"]:
+            hold_left = int(policy.local_mpp_hold_s - (now - reset_state.local_mpp_since))
+            if hold_left < 0:
+                hold_left = 0
+        snap["holdRemainingS"] = hold_left
+        snap["pulses"] = list(pulse_log)
+        snap["thresholds"] = {
+            "panelMinV": policy.local_mpp_panel_min_v,
+            "minDeltaV": policy.local_mpp_min_delta_v,
+            "maxW": policy.local_mpp_max_w,
+        }
         return web.json_response(snap)
 
     async def handle_charger(request: web.Request) -> web.Response:
