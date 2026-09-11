@@ -14,6 +14,7 @@ from mppt_ble.yield_reset import (
     load_policy,
     local_mpp_stuck,
     should_pulse,
+    voltage_delta,
 )
 
 
@@ -97,8 +98,24 @@ class YieldResetTest(unittest.TestCase):
         p = ResetPolicy()
         st = ResetState()
         t0 = noon()
-        self.assertFalse(local_mpp_stuck(783, 139.0, 40.0, p))
-        self.assertFalse(should_pulse(st, t0 + 30, 783, p, panel_v=139.0, battery_v=40.0))
+        self.assertFalse(local_mpp_stuck(1200, 139.0, 40.0, p))
+        self.assertFalse(should_pulse(st, t0 + 40, 1200, p, panel_v=139.0, battery_v=40.0))
+
+    def test_cascade_high_delta_low_enough_watts_pulses(self):
+        p = ResetPolicy()
+        st = ResetState()
+        t0 = noon()
+        self.assertAlmostEqual(101.3, voltage_delta(131.41, 30.11), delta=0.01)
+        self.assertTrue(local_mpp_stuck(721, 131.41, 30.11, p))
+        self.assertFalse(should_pulse(st, t0, 721, p, panel_v=131.41, battery_v=30.11))
+        self.assertTrue(should_pulse(st, t0 + 30, 721, p, panel_v=131.41, battery_v=30.11))
+
+    def test_small_delta_does_not_pulse(self):
+        p = ResetPolicy(local_mpp_hold_s=1)
+        st = ResetState()
+        t0 = noon()
+        self.assertFalse(local_mpp_stuck(200, 125.0, 60.0, p))
+        self.assertFalse(should_pulse(st, t0 + 40, 200, p, panel_v=125.0, battery_v=60.0))
 
     def test_local_mpp_skips_low_panel_voltage(self):
         p = ResetPolicy(local_mpp_hold_s=1)

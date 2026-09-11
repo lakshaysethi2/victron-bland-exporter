@@ -54,6 +54,8 @@ curl -sS -H "X-Remote-Secret: $MPPT_REMOTE_SECRET" \
 
 Handshake on this SmartSolar: `01` / `0300` / `f980` / `060082189342102703010303` (VictronConnect stream-enable). That last frame is what switches the radio to type-03 `08 03 19` value notifies, including `0xEDBB`. Without the trailing `03010303`, GET returns `09 00 19 ed bb 01` (unknown id, not volts). Do not send `fa80ff` or `f941` after the blob — those drop this unit.
 
+This Victron feeds a downstream MPPT, not the cells. The watchdog pulses when panel voltage is high, `Vpv − Vout` is large, and watts are still low, so the chain restarts MPP tracking after clouds. Tune `linux/yield_config.json`.
+
 systemd user units: copy `mppt-ble.service` (and optionally `cloudflared-mppt.service`) to `~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl --user enable --now mppt-ble`.
 
 Named tunnel: point Cloudflare ingress at `http://127.0.0.1:5338`, put the token in the file named by `CLOUDFLARED_TOKEN_FILE`. Do not put the token in the unit file.

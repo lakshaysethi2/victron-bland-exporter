@@ -13,7 +13,14 @@ from . import client, protocol as P
 from .metrics import panel_sample, render_metrics
 from .node_metrics import fetch_node_metrics, node_exporter_url
 from .restart import pulse
-from .yield_reset import ResetState, ingest, load_policy, local_mpp_stuck, should_pulse
+from .yield_reset import (
+    ResetState,
+    ingest,
+    load_policy,
+    local_mpp_stuck,
+    should_pulse,
+    voltage_delta,
+)
 
 log = logging.getLogger("mppt_ble")
 
@@ -186,13 +193,18 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             battery_v = row.get("battery_voltage")
             if not isinstance(battery_v, (int, float)):
                 battery_v = None
-            if local_mpp_stuck(float(watts), panel_v, battery_v, policy):
+            candidate = local_mpp_stuck(float(watts), panel_v, battery_v, policy)
+            if ts - reset_state.last_status_log_at >= 30:
+                delta = voltage_delta(panel_v, battery_v)
                 log.info(
-                    "local-mpp candidate pv=%s bat=%s watts=%.0f",
+                    "pv=%s out=%s dV=%s watts=%.0f candidate=%s",
                     f"{panel_v:.1f}V" if panel_v is not None else "?",
                     f"{battery_v:.1f}V" if battery_v is not None else "?",
+                    f"{delta:.0f}V" if delta is not None else "?",
                     watts,
+                    candidate,
                 )
+                reset_state.last_status_log_at = ts
             if not should_pulse(
                 reset_state, ts, float(watts), policy, panel_v=panel_v, battery_v=battery_v
             ):
@@ -264,8 +276,24 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                     "lastBleAdAt": int(row["last_seen"] * 1000),
                 }
             )
-        sample = panel_sample(panel, time.time())
-        snap["panelVoltage"] = sample[1] if sample else None
+        now = time.time()
+        sample = panel_sample(panel, now)
+        panel_v = sample[1] if sample else None
+        battery_v = snap.get("batteryVoltage")
+        if not isinstance(battery_v, (int, float)):
+            battery_v = None
+        watts = snap.get("solarPowerW")
+        if not isinstance(watts, (int, float)):
+            watts = None
+        snap["panelVoltage"] = panel_v
+        snap["outputVoltage"] = battery_v
+        snap["deltaVoltage"] = voltage_delta(panel_v, battery_v)
+        snap["pulseCandidate"] = (
+            local_mpp_stuck(float(watts), panel_v, battery_v, policy)
+            if watts is not None
+            else False
+        )
+        snap["lastPulseReason"] = reset_state.pulse_reason or None
         return web.json_response(snap)
 
     async def handle_charger(request: web.Request) -> web.Response:

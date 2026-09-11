@@ -43,11 +43,13 @@ class ResetPolicy:
     shade_end: int = 15 * 60 + 30
     shade_floor_w: float = 500.0
     shade_hold_s: float = 120.0
-    # High Vpv + low watts while the battery still wants charge = stuck local MPP / near Voc.
-    local_mpp_panel_min_v: float = 130.0
-    local_mpp_battery_max_v: float = 48.0
-    local_mpp_max_w: float = 400.0
-    local_mpp_hold_s: float = 20.0
+    # Cascade: panels → this Victron → downstream MPPT → cells.
+    # High Vpv vs Victron output + low watts = sitting near Voc; pulse restarts the chain.
+    local_mpp_panel_min_v: float = 120.0
+    local_mpp_min_delta_v: float = 80.0
+    local_mpp_battery_max_v: float = 52.0
+    local_mpp_max_w: float = 800.0
+    local_mpp_hold_s: float = 30.0
     # False = only pulse from panel-voltage conditions (no watt-drop / shade-floor pulses).
     watt_only_pulses: bool = False
 
@@ -64,6 +66,7 @@ class ResetState:
     expected_w: float = 0.0
     local_mpp_since: float | None = None
     pulse_reason: str = ""
+    last_status_log_at: float = 0.0
 
 
 def load_policy(path: str | None) -> ResetPolicy:
@@ -89,6 +92,7 @@ def load_policy(path: str | None) -> ResetPolicy:
     if "daytime_end_hour" in data:
         p.daytime_end = int(data["daytime_end_hour"]) * 60
     p.local_mpp_panel_min_v = float(data.get("local_mpp_panel_min_v", p.local_mpp_panel_min_v))
+    p.local_mpp_min_delta_v = float(data.get("local_mpp_min_delta_v", p.local_mpp_min_delta_v))
     p.local_mpp_battery_max_v = float(data.get("local_mpp_battery_max_v", p.local_mpp_battery_max_v))
     p.local_mpp_max_w = float(data.get("local_mpp_max_w", p.local_mpp_max_w))
     p.local_mpp_hold_s = float(data.get("local_mpp_hold_s", p.local_mpp_hold_s))
@@ -144,16 +148,25 @@ def ingest(state: ResetState, ts: float, watts: float, policy: ResetPolicy) -> R
     return state
 
 
+def voltage_delta(panel_v: float | None, battery_v: float | None) -> float | None:
+    if panel_v is None or battery_v is None:
+        return None
+    return panel_v - battery_v
+
+
 def local_mpp_stuck(
     watts: float,
     panel_v: float | None,
     battery_v: float | None,
     policy: ResetPolicy,
 ) -> bool:
-    """True when Vpv is near Voc, battery still wants charge, and watts are too low."""
+    """Victron sitting near Voc: high Vpv, large Vpv−Vout, watts not high enough."""
     if panel_v is None or panel_v < policy.local_mpp_panel_min_v:
         return False
     if battery_v is not None and battery_v > policy.local_mpp_battery_max_v:
+        return False
+    delta = voltage_delta(panel_v, battery_v)
+    if delta is not None and delta < policy.local_mpp_min_delta_v:
         return False
     return watts < policy.local_mpp_max_w
 
@@ -180,7 +193,9 @@ def should_pulse(
             return False
         if ts - state.local_mpp_since >= policy.local_mpp_hold_s:
             bat = f"{battery_v:.1f}V" if isinstance(battery_v, (int, float)) else "?"
-            state.pulse_reason = f"local-mpp pv={panel_v:.1f}V bat={bat} watts={watts:.0f}"
+            delta = voltage_delta(panel_v, battery_v)
+            dtxt = f" dV={delta:.0f}V" if delta is not None else ""
+            state.pulse_reason = f"local-mpp pv={panel_v:.1f}V out={bat}{dtxt} watts={watts:.0f}"
             return True
     else:
         state.local_mpp_since = None
