@@ -164,18 +164,12 @@ def fetch_watts(metrics_url: str, timeout: float = 5.0) -> float | None:
 
 
 async def pulse(mac: str, off_s: float) -> str:
-    from . import client
+    """Same guarantee as serve: OFF then always attempt ON."""
+    from .restart import pulse as restart_pulse
 
-    off = await client.set_mode(mac, False)
+    off, on = await restart_pulse(mac, off_s)
     log.info("OFF: %s", off.message)
-    await asyncio.sleep(off_s)
-    on = await client.set_mode(mac, True)
     log.info("ON: %s", on.message)
-    if not on.success:
-        await asyncio.sleep(1.0)
-        on2 = await client.set_mode(mac, True)
-        log.info("ON retry: %s", on2.message)
-        return f"off={off.success} on={on2.success} {on2.message}"
     return f"off={off.success} on={on.success} {on.message}"
 
 
@@ -200,8 +194,13 @@ async def loop(args: argparse.Namespace) -> None:
         log.info("watts=%.0f peak=%.0f expected=%.0f regime=%s", watts, state.peak_w, state.expected_w, state.regime)
         if should_pulse(state, ts, watts, policy):
             log.warning("stuck low watts=%.0f — OFF %.1fs then ON", watts, policy.off_s)
-            msg = "dry-run skip" if args.dry_run else await pulse(args.mac, policy.off_s)
-            state.last_pulse_at = time.time()
+            if args.dry_run:
+                msg = "dry-run skip"
+                state.last_pulse_at = time.time()
+            else:
+                msg = await pulse(args.mac, policy.off_s)
+                if "on=True" in msg:
+                    state.last_pulse_at = time.time()
             state.below_since = None
             state.last_action = msg
             log.info("pulse done: %s", msg)
