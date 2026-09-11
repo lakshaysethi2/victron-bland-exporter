@@ -31,5 +31,6 @@
   "local_mpp_panel_min_v": 130,
   "local_mpp_battery_max_v": 48,
   "local_mpp_max_w": 400,
-  "local_mpp_hold_s": 20
+  "local_mpp_hold_s": 20,
+  "watt_only_pulses": false
 }
