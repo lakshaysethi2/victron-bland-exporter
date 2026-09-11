@@ -23,7 +23,7 @@
   "stuck_fraction_of_peak": 0.55,
   "hold_s": 50,
   "off_s": 4,
-  "cooldown_s": 600,
+  "cooldown_s": 300,
   "min_peak_w": 120,
   "peak_window_s": 1200,
   "daytime_start_hour": 7,

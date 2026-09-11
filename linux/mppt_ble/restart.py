@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 
-COOLDOWN_S = 600.0
+COOLDOWN_S = 300.0
 OFF_S = 4.0
 
 _last = 0.0
