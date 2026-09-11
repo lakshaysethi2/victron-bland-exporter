@@ -1,4 +1,4 @@
-"""Pulse the Victron off/on when local watts look stuck. Does not talk to Grafana."""
+"""Pulse the Victron off/on when local watts look stuck. Dashboards are display-only."""
 
 from __future__ import annotations
 
@@ -134,8 +134,11 @@ def should_pulse(state: ResetState, ts: float, watts: float, policy: ResetPolicy
         return False
     if ts - state.last_pulse_at < policy.cooldown_s:
         return False
-    # Same window as the house 500 W midday expectation. Local clock.
-    if in_shade_window(ts, policy) and watts < policy.shade_floor_w:
+    if (
+        in_shade_window(ts, policy)
+        and watts < policy.shade_floor_w
+        and state.peak_w > policy.shade_floor_w
+    ):
         if state.below_since is None:
             state.below_since = ts
             return False
@@ -184,12 +187,7 @@ async def loop(args: argparse.Namespace) -> None:
     policy.off_s = args.off_seconds if args.off_seconds is not None else policy.off_s
     policy.cooldown_s = args.cooldown if args.cooldown is not None else policy.cooldown_s
     state = ResetState()
-    log.info(
-        "yield-reset mac=%s metrics=%s off=%.1fs (no Grafana)",
-        args.mac,
-        args.metrics,
-        policy.off_s,
-    )
+    log.info("yield-reset mac=%s metrics=%s off=%.1fs", args.mac, args.metrics, policy.off_s)
     while True:
         ts = time.time()
         try:
@@ -215,7 +213,7 @@ async def loop(args: argparse.Namespace) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     here = Path(__file__).resolve().parent.parent / "yield_config.json"
-    p = argparse.ArgumentParser(description="Pulse Victron when local watts look stuck. No Grafana.")
+    p = argparse.ArgumentParser(description="Pulse Victron when local watts look stuck.")
     p.add_argument("--mac", required=True)
     p.add_argument("--metrics", default="http://127.0.0.1:5338/metrics")
     p.add_argument("--config", default=str(here) if here.is_file() else "")
