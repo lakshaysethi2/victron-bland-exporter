@@ -1,6 +1,7 @@
 import unittest
 
 from mppt_ble.protocol import (
+    PANEL_POLL_S,
     REG_PANEL_VOLTAGE,
     make_read,
     panel_payload_ok,
@@ -10,6 +11,9 @@ from mppt_ble.protocol import (
 
 
 class PanelVoltageProtocolTest(unittest.TestCase):
+    def test_poll_at_least_every_10s(self):
+        self.assertLessEqual(PANEL_POLL_S, 10.0)
+
     def test_read_frame_matches_victron_hex(self):
         self.assertEqual(0xEDBB, REG_PANEL_VOLTAGE)
         self.assertEqual(bytes.fromhex("05038119edbb"), make_read(REG_PANEL_VOLTAGE))
