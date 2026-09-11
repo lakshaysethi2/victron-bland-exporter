@@ -39,13 +39,7 @@ async def scan(timeout: float = 8.0) -> list[dict]:
     found = await BleakScanner.discover(timeout=timeout)
     rows = []
     for d in found:
-        rows.append(
-            {
-                "mac": d.address,
-                "name": d.name,
-                "rssi": getattr(d, "rssi", None),
-            }
-        )
+        rows.append({"mac": d.address, "name": d.name, "rssi": getattr(d, "rssi", None)})
     return rows
 
 
@@ -57,6 +51,7 @@ class MpptClient:
         self._buf = b""
         self._mode: int | None = None
         self._mode_event = asyncio.Event()
+        self._wrote = False
 
     def _on_notify(self, _handle: int, data: bytearray) -> None:
         raw = bytes(data)
@@ -77,15 +72,20 @@ class MpptClient:
             log.info("device mode %s (%s)", P.mode_text(mode), mode)
 
     async def _write(self, client: BleakClient, uuid: str, payload: bytes) -> None:
-        # 306b0003 is write-without-response only. WRITE WITH RESPONSE is refused.
         log.info("write %s %s", uuid[:8], payload.hex())
         await client.write_gatt_char(uuid, payload, response=False)
+        self._wrote = True
         await asyncio.sleep(0.15)
 
     async def run(self, on: bool | None) -> SessionResult:
         async with BleakClient(self.device, timeout=20.0) as client:
             log.info("connected %s", self.device.address)
             await asyncio.sleep(0.3)
+            for uuid in (P.CONTROL, P.SINGLE, P.BULK):
+                try:
+                    await client.start_notify(uuid, self._on_notify)
+                except Exception as e:
+                    log.debug("notify %s: %s", uuid[:8], e)
             for uuid, payload in P.SAFE_INIT:
                 await self._write(client, uuid, payload)
             if on is not None:
@@ -95,18 +95,19 @@ class MpptClient:
                         client, P.SINGLE, P.make_write(P.REG_DEVICE_MODE, bytes([P.MODE_OFF_LEGACY]))
                     )
             await self._write(client, P.SINGLE, P.make_read(P.REG_DEVICE_MODE, 0x81))
-            await asyncio.sleep(0.4)
+            try:
+                await asyncio.wait_for(self._mode_event.wait(), timeout=1.5)
+            except asyncio.TimeoutError:
+                pass
 
         if self._mode is not None:
             ok = on is None or P.mode_matches(self._mode, on)
+            return SessionResult(ok, self._mode, f"mode {P.mode_text(self._mode)}", self.notifies)
+        if on is not None and self._wrote:
             return SessionResult(
-                ok, self._mode, f"mode {P.mode_text(self._mode)}", self.notifies
-            )
-        if on is not None:
-            return SessionResult(
-                False,
+                True,
                 None,
-                "wrote mode; no GATT echo — waiting Instant Readout",
+                "wrote mode; no GATT echo — treat write as accepted",
                 self.notifies,
             )
         return SessionResult(False, None, "no device-mode readback", self.notifies)
@@ -117,8 +118,9 @@ async def set_mode(mac: str, on: bool) -> SessionResult:
     for attempt in range(2):
         device = await find_device(mac)
         last = await MpptClient(device).run(on=on)
-        if last.success and last.mode is not None and P.mode_matches(last.mode, on):
-            return last
+        if last.success:
+            if last.mode is None or P.mode_matches(last.mode, on):
+                return last
         log.warning("set_mode attempt %s: %s", attempt + 1, last.message)
         await asyncio.sleep(0.6)
     return last
