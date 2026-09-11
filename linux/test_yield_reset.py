@@ -67,6 +67,22 @@ class YieldResetTest(unittest.TestCase):
         p = ResetPolicy()
         self.assertFalse(is_daytime(time.mktime(time.strptime("2026-01-15 02:00", "%Y-%m-%d %H:%M")), p))
 
+    def test_midday_floor_needs_higher_peak(self):
+        p = ResetPolicy(shade_hold_s=120, shade_floor_w=500)
+        st = ResetState()
+        t0 = noon()
+        ingest(st, t0, 900, p)
+        self.assertFalse(should_pulse(st, t0 + 1, 200, p))
+        self.assertTrue(should_pulse(st, t0 + 130, 200, p))
+
+    def test_midday_low_without_peak_is_weather(self):
+        p = ResetPolicy(shade_hold_s=10, min_peak_w=50)
+        st = ResetState()
+        t0 = noon()
+        ingest(st, t0, 400, p)
+        self.assertFalse(should_pulse(st, t0 + 1, 400, p))
+        self.assertFalse(should_pulse(st, t0 + 40, 380, p))
+
     def test_load_config_json(self):
         raw = {
             "clear_sky_watts_by_hour": {"12": 1600, "13": 1600},
