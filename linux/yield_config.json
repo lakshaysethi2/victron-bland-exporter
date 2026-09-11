@@ -1,0 +1,31 @@
+{
+  "comment": "Clear-sky envelope by local hour. Partly cloudy is a fraction of this; overcast uses recent peak only.",
+  "clear_sky_watts_by_hour": {
+    "6": 50,
+    "7": 200,
+    "8": 500,
+    "9": 800,
+    "10": 1100,
+    "11": 1400,
+    "12": 1600,
+    "13": 1600,
+    "14": 1450,
+    "15": 1200,
+    "16": 850,
+    "17": 450,
+    "18": 120,
+    "19": 30
+  },
+  "partly_cloudy_factor": 0.6,
+  "overcast_factor": 0.35,
+  "bright_if_peak_vs_clear_at_least": 0.75,
+  "partly_if_peak_vs_clear_at_least": 0.45,
+  "stuck_fraction_of_peak": 0.55,
+  "hold_s": 50,
+  "off_s": 4,
+  "cooldown_s": 720,
+  "min_peak_w": 120,
+  "peak_window_s": 1200,
+  "daytime_start_hour": 7,
+  "daytime_end_hour": 18
+}
