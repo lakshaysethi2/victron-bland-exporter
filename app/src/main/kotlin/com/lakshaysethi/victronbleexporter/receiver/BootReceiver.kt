@@ -3,11 +3,13 @@ package com.lakshaysethi.victronbleexporter.receiver
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.lakshaysethi.victronbleexporter.charger.ChargerRestartAlarm
 import com.lakshaysethi.victronbleexporter.service.VictronBleExporterService
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (!shouldStartOn(intent.action)) return
+        ChargerRestartAlarm.armOff(context)
         val serviceIntent = Intent(context, VictronBleExporterService::class.java)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             context.startForegroundService(serviceIntent)
