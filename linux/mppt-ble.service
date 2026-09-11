@@ -1,0 +1,14 @@
+[Unit]
+Description=Victron SmartSolar BLE charger control (BlueZ)
+After=bluetooth.target network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/mppt-ble
+EnvironmentFile=%h/.config/mppt/secrets.env
+ExecStart=%h/.venv/mppt-ble/bin/python -m mppt_ble serve --bind 127.0.0.1:5338
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
