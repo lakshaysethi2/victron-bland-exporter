@@ -294,6 +294,15 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             else False
         )
         snap["lastPulseReason"] = reset_state.pulse_reason or None
+        if reset_state.last_pulse_at:
+            remain = policy.cooldown_s - (now - reset_state.last_pulse_at)
+            snap["cooldownRemainingS"] = int(remain) if remain > 0 else 0
+            snap["lastPulseAt"] = int(reset_state.last_pulse_at)
+        else:
+            snap["cooldownRemainingS"] = 0
+            snap["lastPulseAt"] = None
+        snap["busy"] = lock.locked()
+        snap["host"] = "linux"
         return web.json_response(snap)
 
     async def handle_charger(request: web.Request) -> web.Response:
