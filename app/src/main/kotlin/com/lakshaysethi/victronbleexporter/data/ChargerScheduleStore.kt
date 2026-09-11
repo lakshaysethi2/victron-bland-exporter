@@ -36,19 +36,20 @@ class ChargerScheduleStore(context: Context) {
         get() = prefs.getLong(KEY_OVERRIDE_UNTIL, 0L)
         set(value) = prefs.edit().putLong(KEY_OVERRIDE_UNTIL, value).apply()
 
+    /** Issue #31: off→on every 30 minutes while the daily window wants ON. */
+    var restartEvery30m: Boolean
+        get() = prefs.getBoolean(KEY_RESTART_30M, true)
+        set(value) = prefs.edit().putBoolean(KEY_RESTART_30M, value).apply()
+
+    var lastRestartAt: Long
+        get() = prefs.getLong(KEY_LAST_RESTART_AT, 0L)
+        set(value) = prefs.edit().putLong(KEY_LAST_RESTART_AT, value).apply()
+
     fun clearOverride() {
         prefs.edit().remove(KEY_OVERRIDE_UNTIL).apply()
     }
 
     fun load(): ChargerSettings {
-        // Issue #22: former factory default 08:30 -> 07:45 NZ morning ON.
-        // Pre-#23 builds persisted schedule_enabled=false (the old unchecked
-        // UI default) whenever charger settings were saved to configure the
-        // MAC — so a window still sitting at the legacy 08:30 default must
-        // also be ENABLED here, or 07:45 still never fires after updating.
-        // A user who deliberately disabled the window but left 08:30 is
-        // re-enabled too; that matches issue #22's intent for this
-        // single-deployment app (toggle it back off in the UI if unwanted).
         if (prefs.getString(KEY_ENABLE_TIME, null) == LEGACY_DEFAULT_ENABLE) {
             prefs.edit()
                 .putString(KEY_ENABLE_TIME, ChargerSchedule.DEFAULT_ENABLE)
@@ -90,6 +91,8 @@ class ChargerScheduleStore(context: Context) {
         const val KEY_DISABLE_TIME = "disable_time"
         const val KEY_CHARGER_MAC = "charger_mac"
         const val KEY_OVERRIDE_UNTIL = "manual_override_until"
+        const val KEY_RESTART_30M = "restart_every_30m"
+        const val KEY_LAST_RESTART_AT = "last_restart_at"
         const val LEGACY_DEFAULT_ENABLE = "08:30"
     }
 }
