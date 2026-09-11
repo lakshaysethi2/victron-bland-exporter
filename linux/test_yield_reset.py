@@ -147,7 +147,8 @@ class YieldResetTest(unittest.TestCase):
         self.assertIn("already high", pulse_why(1200, 150.0, 40.0, p, t0, 0))
         self.assertIn("waiting", pulse_why(180, None, 40.0, p, t0, 0))
         self.assertIn("below", pulse_why(180, 90.0, 40.0, p, t0, 0))
-        self.assertIn("cooldown", pulse_why(180, 150.0, 40.0, p, t0, t0 - 10))
+        self.assertEqual("ready", pulse_why(180, 150.0, 40.0, p, t0, t0 - 10))
+        self.assertIn("already high", pulse_why(1716, 147.7, 40.0, p, t0, t0 - 10))
 
     def test_load_config_json(self):
         raw = {
