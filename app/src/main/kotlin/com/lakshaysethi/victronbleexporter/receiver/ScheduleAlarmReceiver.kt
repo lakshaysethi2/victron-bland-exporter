@@ -17,7 +17,10 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val action = intent.action ?: return
         when (action) {
-            ChargerScheduleAlarm.ACTION, ExporterKeepAliveAlarm.ACTION -> startExporter(context, action)
+            ChargerScheduleAlarm.ACTION, ExporterKeepAliveAlarm.ACTION -> {
+                ChargerRestartAlarm.armOff(context)
+                startExporter(context, action)
+            }
             ChargerRestartAlarm.ACTION_OFF -> handleRestartOff(context)
             ChargerRestartAlarm.ACTION_ON -> handleRestartOn(context)
         }
