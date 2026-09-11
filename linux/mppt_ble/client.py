@@ -128,6 +128,13 @@ class MpptClient:
                 return
             await asyncio.sleep(0.05)
 
+    async def _wait_panel(self, timeout_s: float) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if P.panel_payload_ok(self.regs.get(P.REG_PANEL_VOLTAGE)):
+                return
+            await asyncio.sleep(0.05)
+
     async def read_regs(self, registers: list[int]) -> RegisterRead:
         wanted = set(registers)
         async with BleakClient(self.device, timeout=20.0) as client:
@@ -144,10 +151,14 @@ class MpptClient:
                 await self._write(client, P.CONTROL, P.F980)
             except Exception as e:
                 log.debug("f980: %s", e)
+            if P.REG_PANEL_VOLTAGE in wanted:
+                await self._write(client, P.SINGLE, P.STREAM_ENABLE)
             for reg in registers:
-                kind = 0x00 if reg == P.REG_PANEL_VOLTAGE else 0x03
-                await self._write(client, P.SINGLE, P.make_read(reg, 0x81, kind=kind))
-            await self._wait_regs(wanted, 2.0)
+                await self._write(client, P.SINGLE, P.make_read(reg, 0x81, kind=0x03))
+            if P.REG_PANEL_VOLTAGE in wanted:
+                await self._wait_panel(2.5)
+            else:
+                await self._wait_regs(wanted, 2.0)
             if P.REG_PANEL_VOLTAGE in wanted and not P.panel_payload_ok(
                 self.regs.get(P.REG_PANEL_VOLTAGE)
             ):

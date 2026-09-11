@@ -23,6 +23,15 @@ class PanelVoltageProtocolTest(unittest.TestCase):
         self.assertAlmostEqual(222.00, panel_voltage_of(parsed[0xEDBB]), delta=0.001)
         self.assertTrue(panel_payload_ok(parsed[0xEDBB]))
 
+    def test_live_hq2531_118v(self):
+        parsed, leftover = parse_register_stream(bytes.fromhex("080319edbb422f2e"))
+        self.assertEqual(b"", leftover)
+        self.assertAlmostEqual(118.23, panel_voltage_of(parsed[0xEDBB]), delta=0.001)
+
+    def test_ack_does_not_clobber_value(self):
+        parsed, _ = parse_register_stream(bytes.fromhex("080319edbb422f2e090019edbb01"))
+        self.assertAlmostEqual(118.23, panel_voltage_of(parsed[0xEDBB]), delta=0.001)
+
     def test_type00_value_frame(self):
         parsed, leftover = parse_register_stream(bytes.fromhex("080019edbb42b856"))
         self.assertEqual(b"", leftover)

@@ -52,7 +52,7 @@ curl -sS -H "X-Remote-Secret: $MPPT_REMOTE_SECRET" \
 
 `serve` polls PV panel voltage over GATT register `0xEDBB` (~60s; 5 min backoff after a failed read) and exposes `victron_panel_voltage_volts` only when a 2-byte value arrives. Instant Readout does not carry panel voltage. Night-time `0xFFFF` or a value older than 5 minutes is omitted.
 
-This SmartSolar (HQ2531JADNZ) ACKs type-00 reads (`05 00 81 19 ed bb` → `09 00 19 ed bb 01`) after `f980`. That ACK is not a voltage. The 2-byte `08 … 19 ed bb 42 <le16>` frame used on other units has not shown up on the handshake that stays connected (`fa80ff` / `f941` after `06008218` drop the link). The poller keeps trying; the gauge stays omitted until a real 2-byte payload arrives.
+Handshake on this SmartSolar: `01` / `0300` / `f980` / `060082189342102703010303` (VictronConnect stream-enable). That last frame is what switches the radio to type-03 `08 03 19` value notifies, including `0xEDBB`. Without the trailing `03010303`, GET returns `09 00 19 ed bb 01` (unknown id, not volts). Do not send `fa80ff` or `f941` after the blob — those drop this unit.
 
 systemd user units: copy `mppt-ble.service` (and optionally `cloudflared-mppt.service`) to `~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl --user enable --now mppt-ble`.
 

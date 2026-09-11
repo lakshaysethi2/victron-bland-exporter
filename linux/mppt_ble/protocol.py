@@ -24,8 +24,12 @@ SAFE_INIT = [
     (SINGLE, bytes.fromhex("01")),
     (SINGLE, bytes.fromhex("0300")),
 ]
-# Wakes type-00 register ACKs (09 00 19 …) without fa80ff.
+# Wakes the session without fa80ff.
 F980 = bytes.fromhex("f980")
+# VictronConnect stream-enable. Without the trailing 03010303, 0xEDBB GET returns
+# 09 00 19 edbb 01 (unknown id). With it, 08 03 19 value frames stream. Do not
+# follow with f941 — that combination drops this unit.
+STREAM_ENABLE = bytes.fromhex("060082189342102703010303")
 
 
 def hex_bytes(data: bytes) -> str:
@@ -84,7 +88,9 @@ def parse_register_stream(data: bytes) -> tuple[dict[int, bytes], bytes]:
             if start + 6 > len(data):
                 return result, data[start:]
             reg = (data[start + 3] << 8) | data[start + 4]
-            result[reg] = bytes([data[start + 5]])
+            # 1-byte 09 ACK (unknown-id / not-supported) must not clobber a 2-byte value.
+            if not panel_payload_ok(result.get(reg)):
+                result[reg] = bytes([data[start + 5]])
             pos = start + 6
             continue
         length_type = data[start + 5]
