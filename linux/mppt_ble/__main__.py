@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import client, protocol as P
 from .metrics import render_metrics
+from .node_metrics import fetch_node_metrics, node_exporter_url
 from .restart import pulse
 from .yield_reset import ResetState, ingest, load_policy, should_pulse
 
@@ -74,6 +75,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     if not expected:
         print("MPPT_REMOTE_SECRET is empty — refusing to serve", file=sys.stderr)
         return 2
+    node_url = node_exporter_url()
 
     lock = asyncio.Lock()
     last: dict = {"mac": mac, "host": "linux"}
@@ -235,13 +237,25 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         fresh = [r for r in live.values() if (now - float(r["last_seen"])) * 1000 <= FRESH_MS]
         return web.Response(text=render_metrics(fresh), content_type="text/plain; version=0.0.4")
 
+    async def handle_node_metrics(_request: web.Request) -> web.Response:
+        try:
+            status, body, ctype = fetch_node_metrics(node_url)
+        except Exception as e:
+            log.warning("node-exporter proxy: %s", e)
+            return web.Response(text="Bad Gateway\n", status=502, content_type="text/plain")
+        return web.Response(text=body, status=status, content_type=ctype)
+
     app = web.Application()
     app.router.add_get("/", handle_page)
     app.router.add_get("/charger", handle_page)
     app.router.add_get("/charger/status", handle_status)
     app.router.add_post("/charger", handle_charger)
     app.router.add_get("/metrics", handle_metrics)
-    print(f"listening on http://{host}:{port}/ watchdog=on keys={len(keys)}", flush=True)
+    app.router.add_get("/node/metrics", handle_node_metrics)
+    print(
+        f"listening on http://{host}:{port}/ watchdog=on node={\"on\" if node_url else \"off\"} keys={len(keys)}",
+        flush=True,
+    )
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, host, port).start()
