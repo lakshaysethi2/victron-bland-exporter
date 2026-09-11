@@ -15,7 +15,7 @@ MODE_OFF_LEGACY = 0x00
 # VE.Direct HEX: PV input voltage. Instant Readout does not carry this.
 REG_PANEL_VOLTAGE = 0xEDBB
 PANEL_NA = 0xFFFF
-PANEL_POLL_S = 60.0
+PANEL_POLL_S = 30.0
 PANEL_POLL_BACKOFF_S = 300.0
 PANEL_FRESH_S = 300.0
 
