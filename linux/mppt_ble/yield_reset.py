@@ -15,6 +15,8 @@ from urllib.request import urlopen
 log = logging.getLogger("mppt_yield")
 
 POWER_RE = re.compile(r"^victron_solar_power_watts(?:\{[^}]*\})?\s+([0-9.]+)\s*$", re.M)
+PANEL_RE = re.compile(r"^victron_panel_voltage_volts(?:\{[^}]*\})?\s+([0-9.]+)\s*$", re.M)
+BATT_RE = re.compile(r"^victron_battery_voltage_volts(?:\{[^}]*\})?\s+([0-9.]+)\s*$", re.M)
 
 DEFAULT_CLEAR = {
     6: 50, 7: 200, 8: 500, 9: 800, 10: 1100, 11: 1400,
@@ -41,6 +43,11 @@ class ResetPolicy:
     shade_end: int = 15 * 60 + 30
     shade_floor_w: float = 500.0
     shade_hold_s: float = 120.0
+    # High Vpv + low watts while the battery still wants charge = stuck local MPP / near Voc.
+    local_mpp_panel_min_v: float = 130.0
+    local_mpp_battery_max_v: float = 48.0
+    local_mpp_max_w: float = 400.0
+    local_mpp_hold_s: float = 20.0
 
 
 @dataclass
@@ -53,6 +60,8 @@ class ResetState:
     last_action: str = "idle"
     regime: str = "unknown"
     expected_w: float = 0.0
+    local_mpp_since: float | None = None
+    pulse_reason: str = ""
 
 
 def load_policy(path: str | None) -> ResetPolicy:
@@ -77,6 +86,10 @@ def load_policy(path: str | None) -> ResetPolicy:
         p.daytime_start = int(data["daytime_start_hour"]) * 60
     if "daytime_end_hour" in data:
         p.daytime_end = int(data["daytime_end_hour"]) * 60
+    p.local_mpp_panel_min_v = float(data.get("local_mpp_panel_min_v", p.local_mpp_panel_min_v))
+    p.local_mpp_battery_max_v = float(data.get("local_mpp_battery_max_v", p.local_mpp_battery_max_v))
+    p.local_mpp_max_w = float(data.get("local_mpp_max_w", p.local_mpp_max_w))
+    p.local_mpp_hold_s = float(data.get("local_mpp_hold_s", p.local_mpp_hold_s))
     return p
 
 
@@ -128,12 +141,47 @@ def ingest(state: ResetState, ts: float, watts: float, policy: ResetPolicy) -> R
     return state
 
 
-def should_pulse(state: ResetState, ts: float, watts: float, policy: ResetPolicy) -> bool:
+def local_mpp_stuck(
+    watts: float,
+    panel_v: float | None,
+    battery_v: float | None,
+    policy: ResetPolicy,
+) -> bool:
+    """True when Vpv is near Voc, battery still wants charge, and watts are too low."""
+    if panel_v is None or panel_v < policy.local_mpp_panel_min_v:
+        return False
+    if battery_v is not None and battery_v > policy.local_mpp_battery_max_v:
+        return False
+    return watts < policy.local_mpp_max_w
+
+
+def should_pulse(
+    state: ResetState,
+    ts: float,
+    watts: float,
+    policy: ResetPolicy,
+    panel_v: float | None = None,
+    battery_v: float | None = None,
+) -> bool:
+    state.pulse_reason = ""
     if not is_daytime(ts, policy):
         state.below_since = None
+        state.local_mpp_since = None
         return False
     if ts - state.last_pulse_at < policy.cooldown_s:
         return False
+
+    if local_mpp_stuck(watts, panel_v, battery_v, policy):
+        if state.local_mpp_since is None:
+            state.local_mpp_since = ts
+            return False
+        if ts - state.local_mpp_since >= policy.local_mpp_hold_s:
+            bat = f"{battery_v:.1f}V" if isinstance(battery_v, (int, float)) else "?"
+            state.pulse_reason = f"local-mpp pv={panel_v:.1f}V bat={bat} watts={watts:.0f}"
+            return True
+    else:
+        state.local_mpp_since = None
+
     if state.peak_w < policy.min_peak_w:
         state.below_since = None
         return False
@@ -151,16 +199,25 @@ def should_pulse(state: ResetState, ts: float, watts: float, policy: ResetPolicy
         state.below_since = ts
         return False
     need = policy.hold_s if stuck else policy.shade_hold_s
-    return (ts - state.below_since) >= need
+    if (ts - state.below_since) >= need:
+        kind = "stuck" if stuck else "shade"
+        state.pulse_reason = f"{kind} watts={watts:.0f}"
+        return True
+    return False
 
 
 def fetch_watts(metrics_url: str, timeout: float = 5.0) -> float | None:
+    watts, _, _ = fetch_snapshot(metrics_url, timeout=timeout)
+    return watts
+
+
+def fetch_snapshot(metrics_url: str, timeout: float = 5.0) -> tuple[float | None, float | None, float | None]:
     with urlopen(metrics_url, timeout=timeout) as resp:
         body = resp.read().decode("utf-8", errors="replace")
-    m = POWER_RE.search(body)
-    if not m:
-        return None
-    return float(m.group(1))
+    def one(rx: re.Pattern[str]) -> float | None:
+        m = rx.search(body)
+        return float(m.group(1)) if m else None
+    return one(POWER_RE), one(PANEL_RE), one(BATT_RE)
 
 
 async def pulse(mac: str, off_s: float) -> str:
@@ -183,17 +240,27 @@ async def loop(args: argparse.Namespace) -> None:
     while True:
         ts = time.time()
         try:
-            watts = fetch_watts(args.metrics)
+            watts, panel_v, battery_v = fetch_snapshot(args.metrics)
         except Exception as e:
             log.warning("metrics fetch failed: %s", e)
             watts = None
+            panel_v = None
+            battery_v = None
         if watts is None:
             await asyncio.sleep(args.poll)
             continue
         ingest(state, ts, watts, policy)
-        log.info("watts=%.0f peak=%.0f expected=%.0f regime=%s", watts, state.peak_w, state.expected_w, state.regime)
-        if should_pulse(state, ts, watts, policy):
-            log.warning("stuck low watts=%.0f — OFF %.1fs then ON", watts, policy.off_s)
+        log.info(
+            "watts=%.0f pv=%s bat=%s peak=%.0f expected=%.0f regime=%s",
+            watts,
+            f"{panel_v:.1f}V" if panel_v is not None else "?",
+            f"{battery_v:.1f}V" if battery_v is not None else "?",
+            state.peak_w,
+            state.expected_w,
+            state.regime,
+        )
+        if should_pulse(state, ts, watts, policy, panel_v=panel_v, battery_v=battery_v):
+            log.warning("%s — OFF %.1fs then ON", state.pulse_reason or f"watts={watts:.0f}", policy.off_s)
             if args.dry_run:
                 msg = "dry-run skip"
                 state.last_pulse_at = time.time()
