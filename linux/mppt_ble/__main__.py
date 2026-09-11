@@ -252,10 +252,8 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     app.router.add_post("/charger", handle_charger)
     app.router.add_get("/metrics", handle_metrics)
     app.router.add_get("/node/metrics", handle_node_metrics)
-    print(
-        f"listening on http://{host}:{port}/ watchdog=on node={\"on\" if node_url else \"off\"} keys={len(keys)}",
-        flush=True,
-    )
+    node_flag = "on" if node_url else "off"
+    print(f"listening on http://{host}:{port}/ watchdog=on node={node_flag} keys={len(keys)}", flush=True)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, host, port).start()
