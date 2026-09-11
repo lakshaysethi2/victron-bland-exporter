@@ -1,8 +1,9 @@
-# Midday low watts → laptop pulses the charger
+# Midday low watts → local charger pulse (Linux)
 
-Grafana only *shows* the problem. It does not fix it.
+Some people run the exporter on a Linux host beside the SmartSolar instead of on Android.
 
-The Linux laptop next to the MPPT already sees Instant Readout watts on `http://127.0.0.1:5338/metrics`.
-`python -m mppt_ble.yield_reset` watches that local page. If watts stay under 500 W from 11:30–15:30 (laptop local clock) for about two minutes, it turns the charger OFF for 4 seconds, then ON. Same if watts look stuck after a cloud. Never leaves the charger off.
+That host already sees Instant Readout watts. `python -m mppt_ble serve` can watch those watts in-process. If they stay under a configured floor in the midday window (host local clock), it turns the charger OFF for a few seconds, then ON. Same if watts look stuck after a cloud. It must never leave the charger off.
 
-Enable `linux/mppt-yield-reset.service` on the laptop. Secrets stay in `~/.config/mppt/secrets.env`.
+Dashboards can scrape `/metrics`. They do not need to trigger the pulse.
+
+Secrets stay in a local env file (`~/.config/mppt/secrets.env`), not in git.
