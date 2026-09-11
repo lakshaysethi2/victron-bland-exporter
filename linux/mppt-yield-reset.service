@@ -1,6 +1,7 @@
 [Unit]
 Description=Pulse Victron MPPT when solar watts drop below recent peak
 After=bluetooth.target network.target
+Conflicts=mppt-ble.service
 
 [Service]
 Type=simple

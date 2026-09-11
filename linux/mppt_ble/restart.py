@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -37,14 +38,20 @@ def cooldown_ok(now: float | None = None) -> bool:
 
 
 async def pulse(mac: str, off_s: float = OFF_S):
+    """Always attempt ON, even if OFF or sleep fails."""
     from . import client
 
-    off = await client.set_mode(mac, False)
-    import asyncio
-
-    await asyncio.sleep(off_s)
-    on = await client.set_mode(mac, True)
-    if not on.success:
-        await asyncio.sleep(1)
+    off = client.SessionResult(False, None, "off not attempted", [])
+    on = client.SessionResult(False, None, "on not attempted", [])
+    try:
+        off = await client.set_mode(mac, False)
+        await asyncio.sleep(off_s)
+    finally:
         on = await client.set_mode(mac, True)
+        if not on.success:
+            await asyncio.sleep(1)
+            on = await client.set_mode(mac, True)
+        if not on.success:
+            await asyncio.sleep(1)
+            on = await client.set_mode(mac, True)
     return off, on
