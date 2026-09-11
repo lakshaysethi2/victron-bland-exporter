@@ -229,11 +229,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     async def panel_poll() -> None:
         await asyncio.sleep(2)
         while True:
-            now = time.time()
-            interval = P.PANEL_POLL_BACKOFF_S if panel["last_error"] else P.PANEL_POLL_S
-            if now - max(float(panel["last_poll_at"]), float(panel["updated_at"])) < interval:
-                await asyncio.sleep(5)
-                continue
+            started = time.time()
             row = live.get(mac.upper())
             if row:
                 panel["model_id"] = row.get("model_id")
@@ -243,7 +239,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                     await asyncio.wait_for(scan_idle.wait(), timeout=5)
                 except asyncio.TimeoutError:
                     pass
-                await asyncio.sleep(0.35)
+                await asyncio.sleep(0.2)
                 try:
                     r = await client.read_panel_voltage(mac)
                     panel["last_poll_at"] = time.time()
@@ -265,7 +261,8 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                     log.warning("panel voltage poll failed: %s", e)
                 finally:
                     scan_paused.clear()
-            await asyncio.sleep(5)
+            wait = P.PANEL_POLL_S - (time.time() - started)
+            await asyncio.sleep(wait if wait > 0.2 else 0.2)
 
     async def require(request: web.Request) -> None:
         if not secret_ok(request.headers, expected):
