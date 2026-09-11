@@ -48,6 +48,8 @@ class ResetPolicy:
     local_mpp_battery_max_v: float = 48.0
     local_mpp_max_w: float = 400.0
     local_mpp_hold_s: float = 20.0
+    # False = only pulse from panel-voltage conditions (no watt-drop / shade-floor pulses).
+    watt_only_pulses: bool = False
 
 
 @dataclass
@@ -90,6 +92,7 @@ def load_policy(path: str | None) -> ResetPolicy:
     p.local_mpp_battery_max_v = float(data.get("local_mpp_battery_max_v", p.local_mpp_battery_max_v))
     p.local_mpp_max_w = float(data.get("local_mpp_max_w", p.local_mpp_max_w))
     p.local_mpp_hold_s = float(data.get("local_mpp_hold_s", p.local_mpp_hold_s))
+    p.watt_only_pulses = bool(data.get("watt_only_pulses", p.watt_only_pulses))
     return p
 
 
@@ -181,6 +184,10 @@ def should_pulse(
             return True
     else:
         state.local_mpp_since = None
+
+    if not policy.watt_only_pulses:
+        state.below_since = None
+        return False
 
     if state.peak_w < policy.min_peak_w:
         state.below_since = None

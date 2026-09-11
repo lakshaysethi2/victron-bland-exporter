@@ -36,7 +36,7 @@ class YieldResetTest(unittest.TestCase):
         self.assertEqual("overcast", classify_weather(500, 1600, p)[0])
 
     def test_overcast_steady_does_not_pulse(self):
-        p = ResetPolicy(hold_s=10, min_peak_w=50)
+        p = ResetPolicy(hold_s=10, min_peak_w=50, watt_only_pulses=True)
         st = ResetState()
         t0 = noon()
         ingest(st, t0, 500, p)
@@ -45,7 +45,7 @@ class YieldResetTest(unittest.TestCase):
         self.assertFalse(should_pulse(st, t0 + 40, 450, p))
 
     def test_partly_cloudy_drop_from_peak_pulses(self):
-        p = ResetPolicy(hold_s=20, min_peak_w=50, stuck_fraction=0.55)
+        p = ResetPolicy(hold_s=20, min_peak_w=50, stuck_fraction=0.55, watt_only_pulses=True)
         st = ResetState()
         t0 = noon()
         ingest(st, t0, 1000, p)
@@ -55,7 +55,7 @@ class YieldResetTest(unittest.TestCase):
         self.assertTrue(should_pulse(st, t0 + 30, 200, p))
 
     def test_bright_drop_pulses(self):
-        p = ResetPolicy(hold_s=15, min_peak_w=50)
+        p = ResetPolicy(hold_s=15, min_peak_w=50, watt_only_pulses=True)
         st = ResetState()
         t0 = noon()
         ingest(st, t0, 1580, p)
@@ -69,7 +69,7 @@ class YieldResetTest(unittest.TestCase):
         self.assertFalse(is_daytime(time.mktime(time.strptime("2026-01-15 02:00", "%Y-%m-%d %H:%M")), p))
 
     def test_midday_floor_needs_higher_peak(self):
-        p = ResetPolicy(shade_hold_s=120, shade_floor_w=500)
+        p = ResetPolicy(shade_hold_s=120, shade_floor_w=500, watt_only_pulses=True)
         st = ResetState()
         t0 = noon()
         ingest(st, t0, 900, p)
@@ -77,7 +77,7 @@ class YieldResetTest(unittest.TestCase):
         self.assertTrue(should_pulse(st, t0 + 130, 200, p))
 
     def test_midday_low_without_peak_is_weather(self):
-        p = ResetPolicy(shade_hold_s=10, min_peak_w=50)
+        p = ResetPolicy(shade_hold_s=10, min_peak_w=50, watt_only_pulses=True)
         st = ResetState()
         t0 = noon()
         ingest(st, t0, 400, p)
@@ -106,6 +106,14 @@ class YieldResetTest(unittest.TestCase):
         t0 = noon()
         self.assertFalse(should_pulse(st, t0, 180, p, panel_v=90.0, battery_v=40.0))
         self.assertFalse(should_pulse(st, t0 + 30, 180, p, panel_v=90.0, battery_v=40.0))
+
+    def test_no_panel_voltage_does_not_pulse_blindly(self):
+        p = ResetPolicy(hold_s=1, min_peak_w=50)
+        st = ResetState()
+        t0 = noon()
+        ingest(st, t0, 1500, p)
+        ingest(st, t0 + 2, 200, p)
+        self.assertFalse(should_pulse(st, t0 + 40, 200, p, panel_v=None, battery_v=40.0))
 
     def test_local_mpp_skips_when_battery_full(self):
         p = ResetPolicy(local_mpp_hold_s=1)

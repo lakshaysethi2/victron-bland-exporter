@@ -13,7 +13,7 @@ from . import client, protocol as P
 from .metrics import panel_sample, render_metrics
 from .node_metrics import fetch_node_metrics, node_exporter_url
 from .restart import pulse
-from .yield_reset import ResetState, ingest, load_policy, should_pulse
+from .yield_reset import ResetState, ingest, load_policy, local_mpp_stuck, should_pulse
 
 log = logging.getLogger("mppt_ble")
 
@@ -186,6 +186,13 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             battery_v = row.get("battery_voltage")
             if not isinstance(battery_v, (int, float)):
                 battery_v = None
+            if local_mpp_stuck(float(watts), panel_v, battery_v, policy):
+                log.info(
+                    "local-mpp candidate pv=%s bat=%s watts=%.0f",
+                    f"{panel_v:.1f}V" if panel_v is not None else "?",
+                    f"{battery_v:.1f}V" if battery_v is not None else "?",
+                    watts,
+                )
             if not should_pulse(
                 reset_state, ts, float(watts), policy, panel_v=panel_v, battery_v=battery_v
             ):
