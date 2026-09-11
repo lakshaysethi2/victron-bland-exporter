@@ -14,6 +14,10 @@ import java.io.IOException
 private const val TAG = "PrometheusExporter"
 private const val DEFAULT_PORT = 5338
 
+/**
+ * Tiny embedded Prometheus exporter using NanoHTTPD.
+ * Serves /metrics in Prometheus text format.
+ */
 class PrometheusExporter(
     private val port: Int = DEFAULT_PORT,
     private val remoteChargerControl: RemoteChargerHttp? = null,
@@ -101,10 +105,8 @@ class PrometheusExporter(
         val chargerMode = AppState.chargerMode
         sb.append("# HELP victron_charger_enabled Whether the MPPT charger is enabled (1) or disabled (0)\n")
         sb.append("# TYPE victron_charger_enabled gauge\n")
-        sb.append(
-            "victron_charger_enabled${AppState.chargerMac?.let { \"{device=\\\"$it\\\"}\" } ?: \"\"} " +
-                "${when (chargerMode) { ChargerProtocol.MODE_CHARGER_ON -> 1; ChargerProtocol.MODE_CHARGER_OFF, ChargerProtocol.MODE_CHARGER_OFF_LEGACY -> 0; else -> -1 }}\n\n"
-        )
+        val chargerDevice = AppState.chargerMac?.let { "{device=\"$it\"}" } ?: ""
+        sb.append("victron_charger_enabled$chargerDevice ${when (chargerMode) { ChargerProtocol.MODE_CHARGER_ON -> 1; ChargerProtocol.MODE_CHARGER_OFF, ChargerProtocol.MODE_CHARGER_OFF_LEGACY -> 0; else -> -1 }}\n\n")
         val vs = AppState.voltageSettings
         val vsLabel = AppState.chargerMac?.let { "{device=\"$it\"}" } ?: ""
         sb.append("# HELP victron_battery_voltage_setting_volts Battery system-voltage setting (register 0xEDEF)\n")
@@ -114,11 +116,7 @@ class PrometheusExporter(
         appendMetric(sb, "victron_float_voltage_volts", vsLabel, vs?.floatVolts)
         appendMetric(sb, "victron_equalisation_voltage_volts", vsLabel, vs?.equalisationVolts)
         appendMetric(sb, "victron_charger_voltage_volts", vsLabel, vs?.chargerVolts)
-        val panelVolts = if (ExporterKeepAlive.voltageFresh(System.currentTimeMillis(), AppState.voltageSettingsUpdatedAt)) {
-            vs?.panelVolts
-        } else {
-            null
-        }
+        val panelVolts = if (ExporterKeepAlive.voltageFresh(System.currentTimeMillis(), AppState.voltageSettingsUpdatedAt)) vs?.panelVolts else null
         appendMetric(sb, "victron_panel_voltage_volts", vsLabel, panelVolts)
         if (vs != null) sb.append("\n")
         for ((mac, device) in all) {
@@ -154,14 +152,12 @@ class PrometheusExporter(
 
     private fun buildLabels(mac: String, device: ParsedDevice): String {
         val type = device.data["device_type"] as? String ?: "unknown"
-        val model = com.lakshaysethi.victronbleexporter.parser.VictronParser.getModelName(device.modelId)
-        return "{device=\"${model.replace(\"\"\", \"\")}\",mac=\"$mac\",type=\"$type\"}"
+        val model = com.lakshaysethi.victronbleexporter.parser.VictronParser.getModelName(device.modelId).replace("\"", "")
+        return "{device=\"$model\",mac=\"$mac\",type=\"$type\"}"
     }
 
     private fun appendMetric(sb: StringBuilder, name: String, labels: String, value: Number?) {
-        if (value != null) {
-            sb.append("$name$labels ${value.toDouble()}\n")
-        }
+        if (value != null) sb.append("$name$labels ${value.toDouble()}\n")
     }
 
     private fun serveDevicesJson(): Response {
