@@ -126,8 +126,8 @@ def render_page(host: str) -> str:
   function paintBanner(d) {{
     var cool = Math.max(0, Math.ceil((coolUntil - Date.now()) / 1000));
     var cls = "banner", kick = "Watching", head = d.chargeState || "Live", line = d.pulseWhy || "";
-    if (d.busy) {{ cls += " work"; kick = "Working"; head = "GATT…"; }}
-    else if (cool > 0) {{ cls += " cool"; kick = "Cooldown"; head = mmss(cool); line = d.lastPulseReason || line; }}
+    if (d.busy) {{ cls += " work"; kick = "Pulsing"; head = "Off → on"; }}
+    else if (cool > 0) {{ cls += " cool"; kick = "Cooldown"; head = mmss(cool); }}
     else if (d.pulseCandidate) {{
       cls += " ready"; kick = "Ready to pulse";
       head = d.holdRemainingS > 0 ? ("Hold " + d.holdRemainingS + "s") : "Auto pulse";

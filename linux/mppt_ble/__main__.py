@@ -99,6 +99,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     lock = asyncio.Lock()
     last: dict = {"mac": mac, "host": "linux"}
     pulse_log: list[dict] = []
+    control_busy = False
     live: dict[str, dict] = {}
     scan_paused = asyncio.Event()
     scan_idle = asyncio.Event()
@@ -158,6 +159,14 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         return row
 
     async def do_pulse(target: str, reason: str) -> client.SessionResult:
+        nonlocal control_busy
+        control_busy = True
+        try:
+            return await _do_pulse(target, reason)
+        finally:
+            control_busy = False
+
+    async def _do_pulse(target: str, reason: str) -> client.SessionResult:
         async with lock:
             scan_paused.set()
             try:
@@ -314,7 +323,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         else:
             snap["cooldownRemainingS"] = 0
             snap["lastPulseAt"] = None
-        snap["busy"] = lock.locked()
+        snap["busy"] = control_busy
         snap["host"] = "linux"
         snap["pulseWhy"] = pulse_why(
             watts, panel_v, battery_v, policy, now, reset_state.last_pulse_at
@@ -333,7 +342,24 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         }
         return web.json_response(snap)
 
+    async def _charger_cmd(target: str, action: str) -> client.SessionResult:
+        async with lock:
+            scan_paused.set()
+            try:
+                await asyncio.wait_for(scan_idle.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+            try:
+                if action == "on":
+                    return await client.set_mode(target, True)
+                if action == "off":
+                    return await client.set_mode(target, False)
+                return await client.read_mode(target)
+            finally:
+                scan_paused.clear()
+
     async def handle_charger(request: web.Request) -> web.Response:
+        nonlocal control_busy
         await require(request)
         try:
             body = await request.json()
@@ -344,21 +370,11 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         if action == "restart":
             r = await do_pulse(target, "manual restart")
         elif action in ("on", "off", "read"):
-            async with lock:
-                scan_paused.set()
-                try:
-                    await asyncio.wait_for(scan_idle.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    pass
-                try:
-                    if action == "on":
-                        r = await client.set_mode(target, True)
-                    elif action == "off":
-                        r = await client.set_mode(target, False)
-                    else:
-                        r = await client.read_mode(target)
-                finally:
-                    scan_paused.clear()
+            control_busy = True
+            try:
+                r = await _charger_cmd(target, action)
+            finally:
+                control_busy = False
         else:
             return web.json_response({"error": "action must be on|off|read|restart"}, status=400)
         payload = {

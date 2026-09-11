@@ -165,9 +165,6 @@ def pulse_why(
     """Short reason the watchdog will or will not pulse. For the /charger page."""
     if not is_daytime(ts, policy):
         return "night"
-    if last_pulse_at and ts - last_pulse_at < policy.cooldown_s:
-        left = int(policy.cooldown_s - (ts - last_pulse_at))
-        return f"cooldown {left}s"
     if panel_v is None:
         return "waiting for panel voltage"
     if panel_v < policy.local_mpp_panel_min_v:
