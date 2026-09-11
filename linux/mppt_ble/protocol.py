@@ -12,22 +12,31 @@ MODE_ON = 0x01
 MODE_OFF = 0x04
 MODE_OFF_LEGACY = 0x00
 
-# This SmartSolar drops the link on 306b0002 fa80ff and on 06008218… blobs.
+# VE.Direct HEX: PV input voltage. Instant Readout does not carry this.
+REG_PANEL_VOLTAGE = 0xEDBB
+PANEL_NA = 0xFFFF
+PANEL_POLL_S = 60.0
+PANEL_POLL_BACKOFF_S = 300.0
+PANEL_FRESH_S = 300.0
+
+# This SmartSolar drops the link on 306b0002 fa80ff, and on f941 after a 06008218 blob.
 SAFE_INIT = [
     (SINGLE, bytes.fromhex("01")),
     (SINGLE, bytes.fromhex("0300")),
 ]
+# Wakes type-00 register ACKs (09 00 19 …) without fa80ff.
+F980 = bytes.fromhex("f980")
 
 
 def hex_bytes(data: bytes) -> str:
     return data.hex()
 
 
-def make_read(register_id: int, opcode: int = 0x81) -> bytes:
+def make_read(register_id: int, opcode: int = 0x81, kind: int = 0x03) -> bytes:
     return bytes(
         [
             0x05,
-            0x03,
+            kind,
             opcode,
             0x19,
             (register_id >> 8) & 0xFF,
@@ -56,13 +65,28 @@ def make_mode_write(on: bool) -> bytes:
     return make_write(REG_DEVICE_MODE, bytes([MODE_ON if on else MODE_OFF]))
 
 
+def _frame_start(data: bytes, pos: int) -> int:
+    """08/09 … 19 register frames (type 00 or 03)."""
+    for i in range(pos, len(data) - 5):
+        if data[i] in (0x08, 0x09) and data[i + 2] == 0x19:
+            return i
+    return -1
+
+
 def parse_register_stream(data: bytes) -> tuple[dict[int, bytes], bytes]:
     result: dict[int, bytes] = {}
     pos = 0
     while pos + 6 <= len(data):
-        start = data.find(b"\x08\x03\x19", pos)
+        start = _frame_start(data, pos)
         if start < 0:
             return result, b""
+        if data[start] == 0x09:
+            if start + 6 > len(data):
+                return result, data[start:]
+            reg = (data[start + 3] << 8) | data[start + 4]
+            result[reg] = bytes([data[start + 5]])
+            pos = start + 6
+            continue
         length_type = data[start + 5]
         if length_type == 0x58:
             if start + 7 > len(data):
@@ -79,6 +103,21 @@ def parse_register_stream(data: bytes) -> tuple[dict[int, bytes], bytes]:
         result[reg] = data[value_start : value_start + length]
         pos = value_start + length
     return result, b""
+
+
+def panel_voltage_of(raw: bytes | None) -> float | None:
+    """Little-endian un16 at 0.01 V. 0xFFFF is night/no-PV, not 655.35 V."""
+    if raw is None or len(raw) < 2:
+        return None
+    centivolts = raw[0] | (raw[1] << 8)
+    if centivolts == PANEL_NA:
+        return None
+    return centivolts / 100.0
+
+
+def panel_payload_ok(raw: bytes | None) -> bool:
+    """True when the device sent a 2-byte EDBB value (including night 0xFFFF)."""
+    return raw is not None and len(raw) >= 2
 
 
 def charger_mode_of(values: dict[int, bytes]) -> int | None:

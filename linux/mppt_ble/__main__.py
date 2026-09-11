@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from . import client, protocol as P
-from .metrics import render_metrics
+from .metrics import panel_sample, render_metrics
 from .node_metrics import fetch_node_metrics, node_exporter_url
 from .restart import pulse
 from .yield_reset import ResetState, ingest, load_policy, should_pulse
@@ -46,6 +46,17 @@ async def _cmd_restart(args: argparse.Namespace) -> int:
     off, on = await pulse(_mac(args))
     print(json.dumps({"off": off.success, "on": on.success, "message": on.message}, indent=2))
     return 0 if on.success else 1
+
+
+async def _cmd_panel(args: argparse.Namespace) -> int:
+    r = await client.read_panel_voltage(_mac(args))
+    print(
+        json.dumps(
+            {"success": r.success, "panel_voltage": r.panel_volts(), "message": r.message},
+            indent=2,
+        )
+    )
+    return 0 if r.success else 1
 
 
 async def _cmd_serve(args: argparse.Namespace) -> int:
@@ -87,6 +98,14 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     policy_path = str(Path(__file__).resolve().parent.parent / "yield_config.json")
     policy = load_policy(policy_path if Path(policy_path).is_file() else None)
     reset_state = ResetState()
+    panel: dict = {
+        "mac": mac.upper(),
+        "volts": None,
+        "updated_at": 0.0,
+        "last_poll_at": 0.0,
+        "last_error": None,
+        "model_id": None,
+    }
 
     def on_detect(device, adv) -> None:
         md = (adv.manufacturer_data or {}).get(VICTRON_COMPANY_ID)
@@ -169,6 +188,47 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                 reset_state.last_pulse_at = time.time()
                 reset_state.below_since = None
 
+    async def panel_poll() -> None:
+        await asyncio.sleep(2)
+        while True:
+            now = time.time()
+            interval = P.PANEL_POLL_BACKOFF_S if panel["last_error"] else P.PANEL_POLL_S
+            if now - max(float(panel["last_poll_at"]), float(panel["updated_at"])) < interval:
+                await asyncio.sleep(5)
+                continue
+            row = live.get(mac.upper())
+            if row:
+                panel["model_id"] = row.get("model_id")
+            async with lock:
+                scan_paused.set()
+                try:
+                    await asyncio.wait_for(scan_idle.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
+                await asyncio.sleep(0.35)
+                try:
+                    r = await client.read_panel_voltage(mac)
+                    panel["last_poll_at"] = time.time()
+                    if r.success:
+                        volts = r.panel_volts()
+                        panel["volts"] = volts
+                        panel["updated_at"] = time.time()
+                        panel["last_error"] = None
+                        if volts is None:
+                            log.info("panel voltage NA (night / no PV)")
+                        else:
+                            log.info("panel voltage %.2f V", volts)
+                    else:
+                        panel["last_error"] = r.message
+                        log.warning("panel voltage: %s", r.message)
+                except Exception as e:
+                    panel["last_poll_at"] = time.time()
+                    panel["last_error"] = str(e)
+                    log.warning("panel voltage poll failed: %s", e)
+                finally:
+                    scan_paused.clear()
+            await asyncio.sleep(5)
+
     async def require(request: web.Request) -> None:
         if not secret_ok(request.headers, expected):
             raise web.HTTPUnauthorized(text='{"error":"unauthorized"}', content_type="application/json")
@@ -189,6 +249,8 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                     "lastBleAdAt": int(row["last_seen"] * 1000),
                 }
             )
+        sample = panel_sample(panel, time.time())
+        snap["panelVoltage"] = sample[1] if sample else None
         return web.json_response(snap)
 
     async def handle_charger(request: web.Request) -> web.Response:
@@ -235,7 +297,13 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     async def handle_metrics(_request: web.Request) -> web.Response:
         now = time.time()
         fresh = [r for r in live.values() if (now - float(r["last_seen"])) * 1000 <= FRESH_MS]
-        return web.Response(text=render_metrics(fresh), content_type="text/plain; version=0.0.4")
+        row = live.get(mac.upper())
+        if row:
+            panel["model_id"] = row.get("model_id")
+        return web.Response(
+            text=render_metrics(fresh, panel=panel, now=now),
+            content_type="text/plain; version=0.0.4",
+        )
 
     async def handle_node_metrics(_request: web.Request) -> web.Response:
         try:
@@ -259,6 +327,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     await web.TCPSite(runner, host, port).start()
     asyncio.create_task(scan_loop())
     asyncio.create_task(watchdog())
+    asyncio.create_task(panel_poll())
     while True:
         await asyncio.sleep(3600)
     return 0
@@ -277,6 +346,7 @@ def main() -> None:
     with_mac(sub.add_parser("on"))
     with_mac(sub.add_parser("off"))
     with_mac(sub.add_parser("restart"))
+    with_mac(sub.add_parser("panel"))
     sp = sub.add_parser("serve")
     with_mac(sp)
     sp.add_argument("--bind", default="127.0.0.1:5338")
@@ -287,6 +357,7 @@ def main() -> None:
         "on": lambda a: _cmd_onoff(a, True),
         "off": lambda a: _cmd_onoff(a, False),
         "restart": _cmd_restart,
+        "panel": _cmd_panel,
         "serve": _cmd_serve,
     }
     raise SystemExit(asyncio.run(cmds[args.cmd](args)))

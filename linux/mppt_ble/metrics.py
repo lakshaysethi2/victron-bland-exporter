@@ -2,10 +2,37 @@
 
 from __future__ import annotations
 
+import time
+
+from .protocol import PANEL_FRESH_S
+
 CHARGE_NUM = {"OFF": 0, "BULK": 3, "ABSORPTION": 4, "FLOAT": 5}
 
 
-def render_metrics(rows: list[dict]) -> str:
+def _labels(row: dict) -> str:
+    model = f"Victron-0x{int(row.get('model_id') or 0):X}"
+    dtype = row.get("device_type") or "mppt"
+    return f'device="{model}",mac="{row["mac"]}",type="{dtype}"'
+
+
+def panel_sample(panel: dict | None, now: float) -> tuple[str, float] | None:
+    """Return (labels, volts) while the GATT read is fresh and not night-NA."""
+    if not panel:
+        return None
+    volts = panel.get("volts")
+    updated = float(panel.get("updated_at") or 0)
+    if not isinstance(volts, (int, float)) or updated <= 0:
+        return None
+    if now - updated >= PANEL_FRESH_S:
+        return None
+    mac = str(panel.get("mac") or "")
+    model = f"Victron-0x{int(panel.get('model_id') or 0):X}"
+    labels = f'device="{model}",mac="{mac}",type="mppt"'
+    return labels, float(volts)
+
+
+def render_metrics(rows: list[dict], panel: dict | None = None, now: float | None = None) -> str:
+    ts = time.time() if now is None else now
     lines = [
         "# HELP mppt_exporter_up Linux charger-control exporter is up",
         "# TYPE mppt_exporter_up gauge",
@@ -27,11 +54,11 @@ def render_metrics(rows: list[dict]) -> str:
         "# TYPE victron_charge_state gauge",
         "# HELP victron_rssi_dbm Advertisement RSSI",
         "# TYPE victron_rssi_dbm gauge",
+        "# HELP victron_panel_voltage_volts PV input voltage (GATT 0xEDBB)",
+        "# TYPE victron_panel_voltage_volts gauge",
     ]
     for row in rows:
-        model = f"Victron-0x{int(row.get('model_id') or 0):X}"
-        dtype = row.get("device_type") or "mppt"
-        labels = f'device="{model}",mac="{row["mac"]}",type="{dtype}"'
+        labels = _labels(row)
         lines.append(f"victron_up{{{labels}}} 1")
         mapping = [
             ("victron_solar_power_watts", row.get("solar_power_w")),
@@ -46,4 +73,8 @@ def render_metrics(rows: list[dict]) -> str:
         st = row.get("charge_state")
         if isinstance(st, str) and st in CHARGE_NUM:
             lines.append(f"victron_charge_state{{{labels}}} {CHARGE_NUM[st]}")
+    sample = panel_sample(panel, ts)
+    if sample:
+        labels, volts = sample
+        lines.append(f"victron_panel_voltage_volts{{{labels}}} {volts}")
     return "\n".join(lines) + "\n"

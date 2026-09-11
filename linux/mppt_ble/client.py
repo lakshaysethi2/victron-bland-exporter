@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 
 from bleak import BleakClient, BleakScanner
@@ -20,6 +21,17 @@ class SessionResult:
     mode: int | None
     message: str
     notifies: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RegisterRead:
+    success: bool
+    values: dict[int, bytes]
+    message: str
+    notifies: list[str] = field(default_factory=list)
+
+    def panel_volts(self) -> float | None:
+        return P.panel_voltage_of(self.values.get(P.REG_PANEL_VOLTAGE))
 
 
 async def find_device(mac: str | None, timeout: float = 12.0) -> BLEDevice:
@@ -95,10 +107,7 @@ class MpptClient:
                         client, P.SINGLE, P.make_write(P.REG_DEVICE_MODE, bytes([P.MODE_OFF_LEGACY]))
                     )
             await self._write(client, P.SINGLE, P.make_read(P.REG_DEVICE_MODE, 0x81))
-            try:
-                await asyncio.wait_for(self._mode_event.wait(), timeout=1.5)
-            except asyncio.TimeoutError:
-                pass
+            await self._wait_regs({P.REG_DEVICE_MODE}, 1.5)
 
         if self._mode is not None:
             ok = on is None or P.mode_matches(self._mode, on)
@@ -111,6 +120,54 @@ class MpptClient:
                 self.notifies,
             )
         return SessionResult(False, None, "no device-mode readback", self.notifies)
+
+    async def _wait_regs(self, wanted: set[int], timeout_s: float) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if wanted <= self.regs.keys():
+                return
+            await asyncio.sleep(0.05)
+
+    async def read_regs(self, registers: list[int]) -> RegisterRead:
+        wanted = set(registers)
+        async with BleakClient(self.device, timeout=20.0) as client:
+            log.info("connected %s", self.device.address)
+            await asyncio.sleep(0.3)
+            for uuid in (P.CONTROL, P.SINGLE, P.BULK):
+                try:
+                    await client.start_notify(uuid, self._on_notify)
+                except Exception as e:
+                    log.debug("notify %s: %s", uuid[:8], e)
+            for uuid, payload in P.SAFE_INIT:
+                await self._write(client, uuid, payload)
+            try:
+                await self._write(client, P.CONTROL, P.F980)
+            except Exception as e:
+                log.debug("f980: %s", e)
+            for reg in registers:
+                kind = 0x00 if reg == P.REG_PANEL_VOLTAGE else 0x03
+                await self._write(client, P.SINGLE, P.make_read(reg, 0x81, kind=kind))
+            await self._wait_regs(wanted, 2.0)
+            if P.REG_PANEL_VOLTAGE in wanted and not P.panel_payload_ok(
+                self.regs.get(P.REG_PANEL_VOLTAGE)
+            ):
+                await asyncio.sleep(0.4)
+
+        if P.REG_PANEL_VOLTAGE in wanted and not P.panel_payload_ok(
+            self.regs.get(P.REG_PANEL_VOLTAGE)
+        ):
+            raw = self.regs.get(P.REG_PANEL_VOLTAGE)
+            return RegisterRead(
+                False,
+                dict(self.regs),
+                f"0xEDBB ack without value ({None if raw is None else raw.hex()})",
+                self.notifies,
+            )
+        missing = [r for r in registers if r not in self.regs]
+        if missing:
+            names = ",".join(f"0x{r:04X}" for r in missing)
+            return RegisterRead(False, dict(self.regs), f"no readback for {names}", self.notifies)
+        return RegisterRead(True, dict(self.regs), "ok", self.notifies)
 
 
 async def set_mode(mac: str, on: bool) -> SessionResult:
@@ -129,3 +186,19 @@ async def set_mode(mac: str, on: bool) -> SessionResult:
 async def read_mode(mac: str) -> SessionResult:
     device = await find_device(mac)
     return await MpptClient(device).run(on=None)
+
+
+async def read_registers(mac: str, registers: list[int]) -> RegisterRead:
+    last = RegisterRead(False, {}, "no attempt", [])
+    for attempt in range(2):
+        device = await find_device(mac)
+        last = await MpptClient(device).read_regs(registers)
+        if last.success:
+            return last
+        log.warning("read_registers attempt %s: %s", attempt + 1, last.message)
+        await asyncio.sleep(0.6)
+    return last
+
+
+async def read_panel_voltage(mac: str) -> RegisterRead:
+    return await read_registers(mac, [P.REG_PANEL_VOLTAGE])
