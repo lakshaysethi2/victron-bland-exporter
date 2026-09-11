@@ -1,6 +1,9 @@
 package com.lakshaysethi.victronbleexporter.exporter
 
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import com.lakshaysethi.victronbleexporter.charger.ShadeAlertPulse
 import com.lakshaysethi.victronbleexporter.AppState
 import com.lakshaysethi.victronbleexporter.charger.ChargerProtocol
 import com.lakshaysethi.victronbleexporter.parser.ParsedDevice
@@ -11,13 +14,8 @@ import java.io.IOException
 private const val TAG = "PrometheusExporter"
 private const val DEFAULT_PORT = 5338
 
-/**
- * Tiny embedded Prometheus exporter using NanoHTTPD.
- * Serves /metrics in Prometheus text format.
- */
 class PrometheusExporter(
     private val port: Int = DEFAULT_PORT,
-    /** Optional remote charger-control surface (GET / or /charger, /charger/status, POST /charger, /charger/tunnel, /charger/scan, GET/POST /voltage). */
     private val remoteChargerControl: RemoteChargerHttp? = null,
 ) : NanoHTTPD(port) {
 
@@ -39,8 +37,6 @@ class PrometheusExporter(
         if (control == null) {
             return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not Found\n")
         }
-        // Read the raw POST body once: NanoHTTPD puts non-form payloads into
-        // files["postData"] when parseBody() is called for a POST request.
         val body = if (session.method == NanoHTTPD.Method.POST) {
             try {
                 val files = HashMap<String, String>()
@@ -53,12 +49,36 @@ class PrometheusExporter(
         } else {
             ""
         }
+        var requestBody = body
+        val restart = session.method == NanoHTTPD.Method.POST &&
+            session.uri == "/charger" &&
+            ShadeAlertPulse.shouldRestart(body)
+        if (restart) {
+            if (!ShadeAlertPulse.tryClaim(System.currentTimeMillis())) {
+                return newFixedLengthResponse(
+                    Response.Status.lookup(429) ?: Response.Status.INTERNAL_ERROR,
+                    "application/json; charset=utf-8",
+                    "{\"error\":\"restart cooldown\"}\n",
+                )
+            }
+            requestBody = "{\"action\":\"off\"}"
+        }
         val result = control.handle(
             uri = session.uri,
             method = session.method.name,
             headers = session.headers,
-            body = body,
+            body = requestBody,
         )
+        if (restart) {
+            Handler(Looper.getMainLooper()).postDelayed({
+                control.handle(
+                    uri = "/charger",
+                    method = "POST",
+                    headers = session.headers,
+                    body = "{\"action\":\"on\"}",
+                )
+            }, ShadeAlertPulse.OFF_HOLD_MS)
+        }
         val response = newFixedLengthResponse(
             Response.Status.lookup(result.statusCode) ?: Response.Status.INTERNAL_ERROR,
             result.mimeType,
@@ -75,21 +95,16 @@ class PrometheusExporter(
         val now = System.currentTimeMillis()
         val all = MetricsStore.getAll()
         val fresh = MetricsStore.getFresh(now)
-
         sb.append("# HELP victron_devices_total Number of Victron devices with a fresh Instant Readout\n")
         sb.append("# TYPE victron_devices_total gauge\n")
         sb.append("victron_devices_total ${fresh.size}\n\n")
-
-        // Charger control state (1 = charger enabled, 0 = disabled, -1 = unknown)
         val chargerMode = AppState.chargerMode
         sb.append("# HELP victron_charger_enabled Whether the MPPT charger is enabled (1) or disabled (0)\n")
         sb.append("# TYPE victron_charger_enabled gauge\n")
         sb.append(
-            "victron_charger_enabled${AppState.chargerMac?.let { "{device=\"$it\"}" } ?: ""} " +
+            "victron_charger_enabled${AppState.chargerMac?.let { \"{device=\\\"$it\\\"}\" } ?: \"\"} " +
                 "${when (chargerMode) { ChargerProtocol.MODE_CHARGER_ON -> 1; ChargerProtocol.MODE_CHARGER_OFF, ChargerProtocol.MODE_CHARGER_OFF_LEGACY -> 0; else -> -1 }}\n\n"
         )
-
-        // Voltage settings (read via GATT registers 0xEDEF/0xEDF7/0xEDF6 etc; null = not read yet)
         val vs = AppState.voltageSettings
         val vsLabel = AppState.chargerMac?.let { "{device=\"$it\"}" } ?: ""
         sb.append("# HELP victron_battery_voltage_setting_volts Battery system-voltage setting (register 0xEDEF)\n")
@@ -106,24 +121,19 @@ class PrometheusExporter(
         }
         appendMetric(sb, "victron_panel_voltage_volts", vsLabel, panelVolts)
         if (vs != null) sb.append("\n")
-
         for ((mac, device) in all) {
             val labels = buildLabels(mac, device)
             val data = device.data
             val live = MetricsStore.isFresh(now, device.lastSeen)
-
             appendMetric(sb, "victron_up", labels, if (live) 1.0 else 0.0)
             appendMetric(sb, "victron_last_seen_timestamp", labels, device.lastSeen / 1000.0)
             if (!live) continue
-
             appendMetric(sb, "victron_battery_voltage_volts", labels, data["battery_voltage"] as? Number)
             appendMetric(sb, "victron_battery_current_amps", labels, data["battery_current"] as? Number)
             appendMetric(sb, "victron_solar_power_watts", labels, data["solar_power_w"] as? Number)
             appendMetric(sb, "victron_yield_today_wh", labels, data["yield_today_wh"] as? Number)
             appendMetric(sb, "victron_load_current_amps", labels, data["load_current_a"] as? Number)
-
             appendMetric(sb, "victron_rssi_dbm", labels, device.rssi.toDouble())
-
             if (data.containsKey("charge_state")) {
                 val stateStr = data["charge_state"] as? String
                 val stateNum = when (stateStr) {
@@ -135,23 +145,17 @@ class PrometheusExporter(
                 }
                 appendMetric(sb, "victron_charge_state", labels, stateNum.toDouble())
             }
-
-            if (data.containsKey("charger_error")) {
-                appendMetric(sb, "victron_charger_error", labels, 0.0) // numeric error or 0 if none
-            }
-
             if (data.containsKey("soc_percent")) {
                 appendMetric(sb, "victron_soc_percent", labels, data["soc_percent"] as? Number)
             }
         }
-
         return newFixedLengthResponse(Response.Status.OK, "text/plain; version=0.0.4; charset=utf-8", sb.toString())
     }
 
     private fun buildLabels(mac: String, device: ParsedDevice): String {
         val type = device.data["device_type"] as? String ?: "unknown"
         val model = com.lakshaysethi.victronbleexporter.parser.VictronParser.getModelName(device.modelId)
-        return "{device=\"${model.replace("\"", "")}\",mac=\"$mac\",type=\"$type\"}"
+        return "{device=\"${model.replace(\"\"\", \"\")}\",mac=\"$mac\",type=\"$type\"}"
     }
 
     private fun appendMetric(sb: StringBuilder, name: String, labels: String, value: Number?) {
