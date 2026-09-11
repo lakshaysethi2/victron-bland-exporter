@@ -134,26 +134,24 @@ def should_pulse(state: ResetState, ts: float, watts: float, policy: ResetPolicy
         return False
     if ts - state.last_pulse_at < policy.cooldown_s:
         return False
-    if (
-        in_shade_window(ts, policy)
-        and watts < policy.shade_floor_w
-        and state.peak_w > policy.shade_floor_w
-    ):
-        if state.below_since is None:
-            state.below_since = ts
-            return False
-        return (ts - state.below_since) >= policy.shade_hold_s
     if state.peak_w < policy.min_peak_w:
         state.below_since = None
         return False
     threshold = max(state.peak_w * policy.stuck_fraction, min(state.expected_w * 0.4, state.peak_w * 0.7))
-    if watts >= threshold:
+    stuck = watts < threshold
+    midday = (
+        in_shade_window(ts, policy)
+        and watts < policy.shade_floor_w
+        and state.peak_w > policy.shade_floor_w
+    )
+    if not stuck and not midday:
         state.below_since = None
         return False
     if state.below_since is None:
         state.below_since = ts
         return False
-    return (ts - state.below_since) >= policy.hold_s
+    need = policy.hold_s if stuck else policy.shade_hold_s
+    return (ts - state.below_since) >= need
 
 
 def fetch_watts(metrics_url: str, timeout: float = 5.0) -> float | None:
