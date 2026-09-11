@@ -1,21 +1,8 @@
-# Shade-free 500 W alert → charger pulse (Linux laptop)
+# Midday low watts → laptop pulses the charger
 
-The house MPPT is controlled by the Linux box next to it (`linux/mppt_ble`), not the Android phone.
+Grafana only *shows* the problem. It does not fix it.
 
-When Grafana fires `Solar power below 500W (11:30-15:30 NZST)`, pulse the charger:
+The Linux laptop next to the MPPT already sees Instant Readout watts on `http://127.0.0.1:5338/metrics`.
+`python -m mppt_ble.yield_reset` watches that local page. If watts stay under 500 W from 11:30–15:30 (laptop local clock) for about two minutes, it turns the charger OFF for 4 seconds, then ON. Same if watts look stuck after a cloud. Never leaves the charger off.
 
-```bash
-curl -sS -H "X-Remote-Secret: $MPPT_REMOTE_SECRET" \
-  -X POST http://127.0.0.1:5338/charger \
-  -d '{"action":"restart"}'
-```
-
-Or point the Grafana webhook at `https://<tunnel>/charger` with that header.
-The default Grafana **firing** payload (`kind=shade-free-expect`) is enough once `serve` accepts `restart`.
-Resolved webhooks must not pulse. Cooldown 10 minutes. Always ends ON.
-
-Existing helper on the laptop (no Grafana required):
-
-```bash
-python -m mppt_ble.yield_reset --mac "$MPPT_MAC" --metrics http://127.0.0.1:5338/metrics
-```
+Enable `linux/mppt-yield-reset.service` on the laptop. Secrets stay in `~/.config/mppt/secrets.env`.
