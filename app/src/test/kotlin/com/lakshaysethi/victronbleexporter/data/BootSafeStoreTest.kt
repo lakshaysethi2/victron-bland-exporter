@@ -115,6 +115,25 @@ class BootSafeStoreTest {
     }
 
     @Test
+    fun `legacy 08-30 window with schedule disabled re-enables on load`() {
+        context.createDeviceProtectedStorageContext()
+            .getSharedPreferences(ChargerScheduleStore.PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(ChargerScheduleStore.KEY_SCHEDULE_ENABLED, false)
+            .putString(ChargerScheduleStore.KEY_ENABLE_TIME, "08:30")
+            .putString(ChargerScheduleStore.KEY_DISABLE_TIME, "18:00")
+            .commit()
+
+        val loaded = ChargerScheduleStore(context).load()
+        assertTrue(loaded.scheduleEnabled)
+        assertEquals(7 * 60 + 45, loaded.enableMinutes)
+        val prefs = context.createDeviceProtectedStorageContext()
+            .getSharedPreferences(ChargerScheduleStore.PREFS, Context.MODE_PRIVATE)
+        assertEquals(true, prefs.getBoolean(ChargerScheduleStore.KEY_SCHEDULE_ENABLED, false))
+        assertEquals("07:45", prefs.getString(ChargerScheduleStore.KEY_ENABLE_TIME, null))
+    }
+
+    @Test
     fun `legacy credential remote secret migrates onto the device-protected store`() {
         context.getSharedPreferences(RemoteChargerStore.PREFS, Context.MODE_PRIVATE)
             .edit()
