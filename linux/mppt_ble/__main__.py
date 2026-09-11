@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from . import client, protocol as P
+from .metrics import render_metrics
 from .restart import pulse
 from .yield_reset import ResetState, ingest, load_policy, should_pulse
 
@@ -64,7 +65,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
 
         page_html = render_page(public_host())
     except Exception:
-        page_html = "<p>mppt_ble laptop</p>"
+        page_html = "<p>mppt_ble</p>"
     keys = {k.upper(): str(v).lower() for k, v in (cfg.get("keys") or {}).items()}
     host, _, port_s = args.bind.rpartition(":")
     port = int(port_s)
@@ -75,7 +76,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         return 2
 
     lock = asyncio.Lock()
-    last: dict = {"mac": mac, "host": "laptop"}
+    last: dict = {"mac": mac, "host": "linux"}
     live: dict[str, dict] = {}
     scan_paused = asyncio.Event()
     scan_idle = asyncio.Event()
@@ -148,7 +149,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         return r
 
     async def watchdog() -> None:
-        """Same process as BLE scan. No Grafana. No HTTP fetch to ourselves."""
+        """Read live Instant Readout; do not HTTP-fetch /metrics."""
         while True:
             await asyncio.sleep(10)
             row = fresh_row(mac)
@@ -161,9 +162,10 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             ingest(reset_state, ts, float(watts), policy)
             if not should_pulse(reset_state, ts, float(watts), policy):
                 continue
-            await do_pulse(mac, f"watchdog watts={watts:.0f}")
-            reset_state.last_pulse_at = time.time()
-            reset_state.below_since = None
+            r = await do_pulse(mac, f"watchdog watts={watts:.0f}")
+            if r.success:
+                reset_state.last_pulse_at = time.time()
+                reset_state.below_since = None
 
     async def require(request: web.Request) -> None:
         if not secret_ok(request.headers, expected):
@@ -223,7 +225,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             "mode": r.mode,
             "modeText": P.mode_text(r.mode),
             "message": r.message,
-            "host": "laptop",
+            "host": "linux",
         }
         last.update(payload)
         return web.json_response(payload, status=200 if r.success else 502)
@@ -231,18 +233,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     async def handle_metrics(_request: web.Request) -> web.Response:
         now = time.time()
         fresh = [r for r in live.values() if (now - float(r["last_seen"])) * 1000 <= FRESH_MS]
-        lines = [
-            "# TYPE mppt_exporter_up gauge",
-            "mppt_exporter_up 1",
-            f"victron_devices_total {len(fresh)}",
-        ]
-        for row in fresh:
-            model = f"Victron-0x{int(row.get('model_id') or 0):X}"
-            labels = 'device="%s",mac="%s",type="mppt"' % (model, row["mac"])
-            w = row.get("solar_power_w")
-            if w is not None:
-                lines.append("victron_solar_power_watts{%s} %s" % (labels, w))
-        return web.Response(text="\n".join(lines) + "\n", content_type="text/plain; version=0.0.4")
+        return web.Response(text=render_metrics(fresh), content_type="text/plain; version=0.0.4")
 
     app = web.Application()
     app.router.add_get("/", handle_page)
@@ -278,15 +269,15 @@ def main() -> None:
     with_mac(sp)
     sp.add_argument("--bind", default="127.0.0.1:5338")
     args = p.parse_args()
-    fn = {
-        "scan": _cmd_scan(args),
-        "read": _cmd_read(args),
-        "on": _cmd_onoff(args, True),
-        "off": _cmd_onoff(args, False),
-        "restart": _cmd_restart(args),
-        "serve": _cmd_serve(args),
-    }[args.cmd]
-    raise SystemExit(asyncio.run(fn))
+    cmds = {
+        "scan": _cmd_scan,
+        "read": _cmd_read,
+        "on": lambda a: _cmd_onoff(a, True),
+        "off": lambda a: _cmd_onoff(a, False),
+        "restart": _cmd_restart,
+        "serve": _cmd_serve,
+    }
+    raise SystemExit(asyncio.run(cmds[args.cmd](args)))
 
 
 if __name__ == "__main__":
