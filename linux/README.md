@@ -39,7 +39,7 @@ set -a && source ~/.config/mppt/secrets.env && set +a
 ~/.venv/mppt-ble/bin/python -m mppt_ble on --mac "$MPPT_MAC"
 ```
 
-HTTP (default bind `127.0.0.1:5338`; put a tunnel in front if you want the internet):
+HTTP (default bind `127.0.0.1:5338`; put a tunnel in front if you want the internet). `GET /charger` is the phone-friendly control page (secret in `X-Remote-Secret`; shows panel V, Victron out, gap, watts, pulse candidate):
 
 ```bash
 set -a && source ~/.config/mppt/secrets.env && set +a
