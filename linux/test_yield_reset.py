@@ -150,11 +150,22 @@ class YieldResetTest(unittest.TestCase):
         self.assertEqual("ready", pulse_why(180, 150.0, 40.0, p, t0, t0 - 10))
         self.assertIn("already high", pulse_why(1716, 147.7, 40.0, p, t0, t0 - 10))
 
+    def test_five_minute_cooldown_blocks_then_allows(self):
+        p = ResetPolicy(cooldown_s=300, local_mpp_hold_s=1)
+        st = ResetState()
+        t0 = noon()
+        self.assertFalse(should_pulse(st, t0, 180, p, panel_v=150.0, battery_v=40.0))
+        self.assertTrue(should_pulse(st, t0 + 1, 180, p, panel_v=150.0, battery_v=40.0))
+        st.last_pulse_at = t0 + 1
+        self.assertFalse(should_pulse(st, t0 + 1 + 299, 180, p, panel_v=150.0, battery_v=40.0))
+        self.assertTrue(should_pulse(st, t0 + 1 + 300, 180, p, panel_v=150.0, battery_v=40.0))
+
     def test_load_config_json(self):
         raw = {
             "clear_sky_watts_by_hour": {"12": 1600, "13": 1600},
             "partly_cloudy_factor": 0.6,
             "off_s": 4,
+            "cooldown_s": 300,
             "local_mpp_panel_min_v": 125,
             "local_mpp_max_w": 350,
         }
@@ -164,8 +175,14 @@ class YieldResetTest(unittest.TestCase):
             p = load_policy(str(path))
         self.assertEqual(1600, p.clear_sky[12])
         self.assertEqual(4, p.off_s)
+        self.assertEqual(300, p.cooldown_s)
         self.assertEqual(125, p.local_mpp_panel_min_v)
         self.assertEqual(350, p.local_mpp_max_w)
+
+    def test_repo_yield_config_cooldown_is_five_minutes(self):
+        path = Path(__file__).resolve().parent / "yield_config.json"
+        p = load_policy(str(path))
+        self.assertEqual(300, p.cooldown_s)
 
 
 if __name__ == "__main__":

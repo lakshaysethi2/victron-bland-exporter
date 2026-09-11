@@ -34,7 +34,7 @@ class ResetPolicy:
     stuck_fraction: float = 0.55
     hold_s: float = 50.0
     off_s: float = 4.0
-    cooldown_s: float = 12 * 60.0
+    cooldown_s: float = 5 * 60.0
     min_peak_w: float = 120.0
     daytime_start: int = 7 * 60
     daytime_end: int = 18 * 60
