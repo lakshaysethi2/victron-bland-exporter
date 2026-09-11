@@ -181,9 +181,17 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                 continue
             ts = time.time()
             ingest(reset_state, ts, float(watts), policy)
-            if not should_pulse(reset_state, ts, float(watts), policy):
+            sample = panel_sample(panel, ts)
+            panel_v = sample[1] if sample else None
+            battery_v = row.get("battery_voltage")
+            if not isinstance(battery_v, (int, float)):
+                battery_v = None
+            if not should_pulse(
+                reset_state, ts, float(watts), policy, panel_v=panel_v, battery_v=battery_v
+            ):
                 continue
-            r = await do_pulse(mac, f"watchdog watts={watts:.0f}")
+            reason = reset_state.pulse_reason or f"watchdog watts={watts:.0f}"
+            r = await do_pulse(mac, reason)
             if r.success:
                 reset_state.last_pulse_at = time.time()
                 reset_state.below_since = None
