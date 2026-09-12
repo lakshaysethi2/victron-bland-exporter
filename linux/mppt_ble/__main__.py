@@ -91,7 +91,12 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     try:
         from .http_page import render_page
 
-        page_html = render_page(public_host(), max_per_hour=policy.local_mpp_max_per_hour)
+        page_html = render_page(
+            public_host(),
+            max_per_hour=policy.local_mpp_max_per_hour,
+            gap_avg_s=policy.local_mpp_gap_avg_s,
+            extrema_s=policy.local_mpp_extrema_s,
+        )
     except Exception:
         page_html = "<p>mppt_ble</p>"
     keys = {k.upper(): str(v).lower() for k, v in (cfg.get("keys") or {}).items()}
@@ -356,6 +361,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             "outMinV": policy.local_mpp_battery_min_v,
             "gapMarginV": policy.local_mpp_gap_margin_v,
             "gapAvgS": policy.local_mpp_gap_avg_s,
+            "extremaS": policy.local_mpp_extrema_s,
             "maxPerHour": policy.local_mpp_max_per_hour,
             "cooldownS": policy.cooldown_s,
             "maxPanel2h": max_pv,

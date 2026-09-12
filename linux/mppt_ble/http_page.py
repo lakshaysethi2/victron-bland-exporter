@@ -3,9 +3,22 @@
 from __future__ import annotations
 
 
-def render_page(host: str, max_per_hour: int = 4) -> str:
+def _window_label(seconds: float) -> str:
+    s = int(round(seconds))
+    if s >= 3600 and s % 3600 == 0:
+        return f"{s // 3600}h"
+    if s >= 60 and s % 60 == 0:
+        return f"{s // 60} min"
+    if s >= 60:
+        return f"{int(round(s / 60))} min"
+    return f"{s}s"
+
+
+def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrema_s: float = 7200) -> str:
     host = "".join(c for c in host if c.isalnum() or c in ".-") or "local"
     n = max(1, int(max_per_hour))
+    avg_w = _window_label(gap_avg_s)
+    voc_w = _window_label(extrema_s)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -61,8 +74,10 @@ def render_page(host: str, max_per_hour: int = 4) -> str:
   <div class="grid">
     <div class="tile" id="tPv"><div class="kicker">Panel</div><div class="n" id="nPv">&mdash;</div></div>
     <div class="tile" id="tOut"><div class="kicker">Victron out</div><div class="n" id="nOut">&mdash;</div></div>
-    <div class="tile" id="tDv"><div class="kicker">Gap</div><div class="n" id="nDv">&mdash;</div></div>
+    <div class="tile" id="tDv"><div class="kicker">Gap now</div><div class="n" id="nDv">&mdash;</div></div>
     <div class="tile" id="tW"><div class="kicker">Solar</div><div class="n" id="nW">&mdash;</div></div>
+    <div class="tile" id="tAvg"><div class="kicker" id="kAvg">{avg_w} avg</div><div class="n" id="nAvg">&mdash;</div></div>
+    <div class="tile" id="tVoc"><div class="kicker" id="kVoc">{voc_w} Voc</div><div class="n" id="nVoc">&mdash;</div></div>
   </div>
   <div class="err" id="err"></div>
   <div class="gate" id="gate">
@@ -77,7 +92,7 @@ def render_page(host: str, max_per_hour: int = 4) -> str:
   <button class="btn ghost" id="btnRead" type="button" disabled>Read charger</button>
   <div class="kicker" style="margin:16px 0 4px">Recent pulses</div>
   <ul class="hist" id="hist"><li>None yet this run</li></ul>
-  <p class="hint">Panel is GATT 0xEDBB (same as VictronConnect). Out is the bus into the next MPPT, not the cells (~40 V). Auto-pulse when the 2 min average gap is near the 2h Voc gap, panel is near 2h max, out is 30–52 V, and watts are below this hour’s envelope. At most {n} auto-pulses per hour (15 min apart). Secret stays in this tab only.</p>
+  <p class="hint">Panel is GATT 0xEDBB (same as VictronConnect). Out is the bus into the next MPPT, not the cells (~40 V). Auto-pulse when the {avg_w} average gap is near the {voc_w} Voc gap, panel is near {voc_w} max, out is 30–52 V, and watts are below this hour’s envelope. At most {n} auto-pulses per hour (15 min apart). Secret stays in this tab only.</p>
 </div>
 <script>
 (function () {{
@@ -99,6 +114,13 @@ def render_page(host: str, max_per_hour: int = 4) -> str:
   function fmt(n, d, u) {{
     if (n == null) return "—";
     return (Math.round(n * Math.pow(10, d)) / Math.pow(10, d)).toFixed(d) + u;
+  }}
+  function secsLabel(s) {{
+    s = Number(s) || 0;
+    if (s >= 3600 && s % 3600 === 0) return (s / 3600) + "h";
+    if (s >= 60 && s % 60 === 0) return (s / 60) + " min";
+    if (s >= 60) return Math.round(s / 60) + " min";
+    return s + "s";
   }}
   function mmss(s) {{
     s = Math.max(0, Math.floor(s));
@@ -145,8 +167,14 @@ def render_page(host: str, max_per_hour: int = 4) -> str:
     document.getElementById("nOut").textContent = fmt(d.outputVoltage != null ? d.outputVoltage : d.batteryVoltage, 1, " V");
     document.getElementById("nDv").textContent = fmt(d.deltaVoltage, 0, " V");
     document.getElementById("nW").textContent = fmt(d.solarPowerW, 0, " W");
+    document.getElementById("nAvg").textContent = fmt(d.avgGap, 0, " V");
+    document.getElementById("nVoc").textContent = fmt(d.vocGap, 0, " V");
+    var th = d.thresholds || {{}};
+    if (th.gapAvgS) document.getElementById("kAvg").textContent = secsLabel(th.gapAvgS) + " avg";
+    if (th.extremaS) document.getElementById("kVoc").textContent = secsLabel(th.extremaS) + " Voc";
     document.getElementById("tPv").className = "tile" + (d.pulseCandidate ? " warn" : "");
     document.getElementById("tDv").className = "tile" + (d.pulseCandidate ? " warn" : "");
+    document.getElementById("tAvg").className = "tile" + (d.pulseCandidate ? " warn" : "");
     paintBanner(d);
     var hist = document.getElementById("hist");
     var rows = (d.pulses || []).slice().reverse();

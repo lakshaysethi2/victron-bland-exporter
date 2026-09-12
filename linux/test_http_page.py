@@ -17,10 +17,20 @@ class HttpPageTest(unittest.TestCase):
         self.assertIn("Recent pulses", html)
         self.assertIn("Cooldown", html)
         self.assertIn("At most 4 auto-pulses per hour", html)
+        self.assertIn("Gap now", html)
+        self.assertIn("2 min avg", html)
+        self.assertIn("2h Voc", html)
+        self.assertIn("avgGap", html)
+        self.assertIn("vocGap", html)
 
     def test_max_per_hour_in_hint(self):
         html = render_page("mppt.lak.nz", max_per_hour=6)
         self.assertIn("At most 6 auto-pulses per hour", html)
+
+    def test_window_labels_follow_args(self):
+        html = render_page("mppt.lak.nz", gap_avg_s=180, extrema_s=3600)
+        self.assertIn("3 min avg", html)
+        self.assertIn("1h Voc", html)
 
     def test_host_is_sanitized(self):
         html = render_page('<script>alert(1)</script>')
