@@ -49,8 +49,8 @@ class ResetPolicy:
     # Average gap vs 2h (max panel − max out). Each auto-pulse costs a yield dip.
     local_mpp_panel_min_v: float = 120.0
     local_mpp_min_delta_v: float = 80.0
+    local_mpp_battery_min_v: float = 30.0
     local_mpp_battery_max_v: float = 52.0
-    local_mpp_max_w: float = 1500.0
     local_mpp_hold_s: float = 30.0
     local_mpp_gap_avg_s: float = 120.0
     local_mpp_extrema_s: float = 2 * 3600.0
@@ -104,8 +104,8 @@ def load_policy(path: str | None) -> ResetPolicy:
         p.daytime_end = int(data["daytime_end_hour"]) * 60
     p.local_mpp_panel_min_v = float(data.get("local_mpp_panel_min_v", p.local_mpp_panel_min_v))
     p.local_mpp_min_delta_v = float(data.get("local_mpp_min_delta_v", p.local_mpp_min_delta_v))
+    p.local_mpp_battery_min_v = float(data.get("local_mpp_battery_min_v", p.local_mpp_battery_min_v))
     p.local_mpp_battery_max_v = float(data.get("local_mpp_battery_max_v", p.local_mpp_battery_max_v))
-    p.local_mpp_max_w = float(data.get("local_mpp_max_w", p.local_mpp_max_w))
     p.local_mpp_hold_s = float(data.get("local_mpp_hold_s", p.local_mpp_hold_s))
     p.local_mpp_gap_avg_s = float(data.get("local_mpp_gap_avg_s", p.local_mpp_gap_avg_s))
     p.local_mpp_extrema_s = float(data.get("local_mpp_extrema_s", p.local_mpp_extrema_s))
@@ -264,6 +264,8 @@ def pulse_why(
         return "waiting for panel voltage"
     if panel_v < policy.local_mpp_panel_min_v:
         return f"panel {panel_v:.0f}V below {policy.local_mpp_panel_min_v:.0f}V"
+    if battery_v is not None and battery_v < policy.local_mpp_battery_min_v:
+        return f"output {battery_v:.0f}V collapsed"
     if battery_v is not None and battery_v > policy.local_mpp_battery_max_v:
         return f"output {battery_v:.0f}V already high"
     if watts is None:
@@ -280,7 +282,7 @@ def pulse_why(
             return "need 2h panel/out max"
         need = voc - policy.local_mpp_gap_margin_v
         if mean < need:
-            return f"avg gap {mean:.0f}V < {need:.0f}V Voc"
+            return f"avg gap {mean:.0f}V < {need:.0f}V (Voc {voc:.0f}-8)"
         envelope = clear_sky_watts(ts, policy) * policy.local_mpp_clear_skip
         if watts >= envelope:
             return f"{watts:.0f}W ≥ {envelope:.0f}W envelope"
@@ -301,6 +303,8 @@ def local_mpp_stuck(
 ) -> bool:
     """Sustained Voc-like average gap vs 2h (max panel − max out). No watt cap."""
     if panel_v is None or panel_v < policy.local_mpp_panel_min_v:
+        return False
+    if battery_v is not None and battery_v < policy.local_mpp_battery_min_v:
         return False
     if battery_v is not None and battery_v > policy.local_mpp_battery_max_v:
         return False

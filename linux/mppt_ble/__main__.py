@@ -351,6 +351,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         snap["thresholds"] = {
             "panelMinV": policy.local_mpp_panel_min_v,
             "minDeltaV": policy.local_mpp_min_delta_v,
+            "outMinV": policy.local_mpp_battery_min_v,
             "gapMarginV": policy.local_mpp_gap_margin_v,
             "gapAvgS": policy.local_mpp_gap_avg_s,
             "maxPerHour": policy.local_mpp_max_per_hour,
