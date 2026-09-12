@@ -108,7 +108,7 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
   <button class="btn ghost" id="btnRead" type="button" disabled>Read charger</button>
   <div class="kicker" style="margin:16px 0 4px">Recent pulses</div>
   <ul class="hist" id="hist"><li>None yet this run</li></ul>
-  <p class="hint">Panel is GATT 0xEDBB (live). Out is the bus into the next MPPT, not the cells. Gap now = panel − out (calc). {avg_w} avg and {voc_w} Voc are calculated from samples. Out band, rate limit, fractions, and cooldown are hardcoded in yield_config. Secret stays in this tab only. At most {n} auto-pulses per hour.</p>
+  <p class="hint">Panel is GATT 0xEDBB (live). Out is the bus into the next MPPT, not the cells. Gap now = panel − out (calc). {avg_w} avg, {voc_w} Voc, and the out band are calculated (0xEDEF or 2h max out). Rate limit, fractions, and cooldown are hardcoded in yield_config. Secret stays in this tab only. At most {n} auto-pulses per hour.</p>
 </div>
 <script>
 (function () {{
