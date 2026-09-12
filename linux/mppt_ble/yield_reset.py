@@ -49,14 +49,16 @@ class ResetPolicy:
     # Average gap vs 2h (max panel − max out). Each auto-pulse costs a yield dip.
     # Panel floor is 2h max panel × this fraction (not a fixed 120 V).
     local_mpp_panel_min_frac: float = 0.85
-    local_mpp_min_delta_v: float = 80.0
+    # Min Voc gap = this × bus (0xEDEF / 2h max out). 40 V × 2 → 80 V.
+    local_mpp_min_voc_bus_mult: float = 2.0
     # Out band from 0xEDEF (or 2h max out): 0.75×bus … 1.30×bus. 40 V mode → 30–52 V.
     local_mpp_out_min_frac: float = 0.75
     local_mpp_out_max_frac: float = 1.30
     local_mpp_hold_s: float = 30.0
     local_mpp_gap_avg_s: float = 120.0
     local_mpp_extrema_s: float = 2 * 3600.0
-    local_mpp_gap_margin_v: float = 8.0
+    # Pulse when 2 min avg gap ≥ Voc − this × Voc. 0.07 × ~110 V → ~8 V.
+    local_mpp_gap_margin_frac: float = 0.07
     local_mpp_gap_min_samples: int = 6
     local_mpp_extrema_min_w: float = 100.0
     local_mpp_max_per_hour: int = 4
@@ -107,13 +109,17 @@ def load_policy(path: str | None) -> ResetPolicy:
     if "daytime_end_hour" in data:
         p.daytime_end = int(data["daytime_end_hour"]) * 60
     p.local_mpp_panel_min_frac = float(data.get("local_mpp_panel_min_frac", p.local_mpp_panel_min_frac))
-    p.local_mpp_min_delta_v = float(data.get("local_mpp_min_delta_v", p.local_mpp_min_delta_v))
+    p.local_mpp_min_voc_bus_mult = float(
+        data.get("local_mpp_min_voc_bus_mult", p.local_mpp_min_voc_bus_mult)
+    )
     p.local_mpp_out_min_frac = float(data.get("local_mpp_out_min_frac", p.local_mpp_out_min_frac))
     p.local_mpp_out_max_frac = float(data.get("local_mpp_out_max_frac", p.local_mpp_out_max_frac))
     p.local_mpp_hold_s = float(data.get("local_mpp_hold_s", p.local_mpp_hold_s))
     p.local_mpp_gap_avg_s = float(data.get("local_mpp_gap_avg_s", p.local_mpp_gap_avg_s))
     p.local_mpp_extrema_s = float(data.get("local_mpp_extrema_s", p.local_mpp_extrema_s))
-    p.local_mpp_gap_margin_v = float(data.get("local_mpp_gap_margin_v", p.local_mpp_gap_margin_v))
+    p.local_mpp_gap_margin_frac = float(
+        data.get("local_mpp_gap_margin_frac", p.local_mpp_gap_margin_frac)
+    )
     p.local_mpp_gap_min_samples = int(data.get("local_mpp_gap_min_samples", p.local_mpp_gap_min_samples))
     p.local_mpp_extrema_min_w = float(data.get("local_mpp_extrema_min_w", p.local_mpp_extrema_min_w))
     p.local_mpp_max_per_hour = int(data.get("local_mpp_max_per_hour", p.local_mpp_max_per_hour))
@@ -283,6 +289,22 @@ def out_ceil_v(state: ResetState, ts: float, policy: ResetPolicy) -> float | Non
     return bus * policy.local_mpp_out_max_frac
 
 
+def min_voc_gap_v(state: ResetState, ts: float, policy: ResetPolicy) -> float | None:
+    """Need 2h Voc gap at least this: 2 × bus (40 V mode → 80 V)."""
+    bus = out_bus_v(state, ts, policy)
+    if bus is None:
+        return None
+    return bus * policy.local_mpp_min_voc_bus_mult
+
+
+def gap_margin_v(state: ResetState, ts: float, policy: ResetPolicy) -> float | None:
+    """How close 2 min avg must be to Voc: 0.07 × Voc gap (~8 V at 110 V)."""
+    voc = voc_gap(state, ts, policy)
+    if voc is None:
+        return None
+    return voc * policy.local_mpp_gap_margin_frac
+
+
 def rate_limit_why(state: ResetState, ts: float, policy: ResetPolicy) -> str | None:
     n = pulses_last_hour(state, ts)
     if n >= policy.local_mpp_max_per_hour:
@@ -348,20 +370,22 @@ def pulse_why(
         voc = voc_gap(state, ts, policy)
         if mean is None:
             return f"waiting for {window_label(policy.local_mpp_gap_avg_s)} gap average"
-        if voc is None or voc < policy.local_mpp_min_delta_v:
+        min_voc = min_voc_gap_v(state, ts, policy)
+        if voc is None or (min_voc is not None and voc < min_voc):
             return f"need {window_label(policy.local_mpp_extrema_s)} panel/out max"
-        need = voc - policy.local_mpp_gap_margin_v
+        margin = gap_margin_v(state, ts, policy) or 0.0
+        need = voc - margin
         if mean < need:
             avg_w = window_label(policy.local_mpp_gap_avg_s)
             voc_w = window_label(policy.local_mpp_extrema_s)
-            return f"{avg_w} avg {mean:.0f}V < {need:.0f}V ({voc_w} Voc {voc:.0f}-8)"
+            return f"{avg_w} avg {mean:.0f}V < {need:.0f}V ({voc_w} Voc {voc:.0f}-{margin:.0f})"
         envelope = clear_sky_watts(ts, policy) * policy.local_mpp_clear_skip
         if watts >= envelope:
             return f"{watts:.0f}W ≥ {envelope:.0f}W envelope"
         return "ready"
     delta = voltage_delta(panel_v, battery_v)
-    if delta is not None and delta < policy.local_mpp_min_delta_v:
-        return f"gap {delta:.0f}V below {policy.local_mpp_min_delta_v:.0f}V"
+    if delta is None:
+        return "no gap"
     return "ready"
 
 
@@ -388,17 +412,16 @@ def local_mpp_stuck(
         if hi is not None and battery_v > hi:
             return False
     if state is None or ts is None:
-        delta = voltage_delta(panel_v, battery_v)
-        if delta is None or delta < policy.local_mpp_min_delta_v:
-            return False
-        return True
+        return voltage_delta(panel_v, battery_v) is not None
     mean = avg_gap(state, ts, policy)
     voc = voc_gap(state, ts, policy)
     if mean is None or voc is None:
         return False
-    if voc < policy.local_mpp_min_delta_v:
+    min_voc = min_voc_gap_v(state, ts, policy)
+    if min_voc is not None and voc < min_voc:
         return False
-    if mean < voc - policy.local_mpp_gap_margin_v:
+    margin = gap_margin_v(state, ts, policy)
+    if margin is not None and mean < voc - margin:
         return False
     envelope = clear_sky_watts(ts, policy) * policy.local_mpp_clear_skip
     if watts >= envelope:

@@ -180,7 +180,8 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
       tag("calc", "calc") + "Envelope skip " + fmt(th.envelopeW, 0, " W") + " = " + skip + " × " + fmt(th.clearSkyW, 0, " W") + " this hour (frac + table hardcoded)",
       tag("calc", "calc") + "Out " + fmt(th.outMinV, 0, " V") + "–" + fmt(th.outMaxV, 0, " V") + " = " + (th.outMinFrac != null ? th.outMinFrac : "—") + "–" + (th.outMaxFrac != null ? th.outMaxFrac : "—") + " × " + (th.systemVoltageV != null ? ("0xEDEF " + fmt(th.systemVoltageV, 0, " V")) : (vocW + " max out " + fmt(th.maxOut2h, 0, " V"))),
       tag("rule", "hardcoded") + (th.maxPerHour != null ? th.maxPerHour : "—") + " / hour, " + secsLabel(th.cooldownS || 0) + " cooldown, hold " + (th.holdS != null ? th.holdS : "—") + " s",
-      tag("rule", "hardcoded") + "Voc margin " + (th.gapMarginV != null ? th.gapMarginV : "—") + " V, min Voc gap " + (th.minDeltaV != null ? th.minDeltaV : "—") + " V"
+      tag("calc", "calc") + "Voc margin " + fmt(th.gapMarginV, 0, " V") + " = " + (th.gapMarginFrac != null ? th.gapMarginFrac : "—") + " × " + vocW + " Voc",
+      tag("calc", "calc") + "Min Voc gap " + fmt(th.minDeltaV, 0, " V") + " = " + (th.minVocBusMult != null ? th.minVocBusMult : "—") + " × bus"
     ];
     document.getElementById("rules").innerHTML = lines.map(function (s) {{ return "<div>" + s + "</div>"; }}).join("");
   }}
