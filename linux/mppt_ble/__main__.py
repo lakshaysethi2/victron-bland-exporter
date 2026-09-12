@@ -269,10 +269,8 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
 
     async def panel_poll() -> None:
         await asyncio.sleep(2)
-        fails = 0
         while True:
             started = time.time()
-            ok = False
             row = live.get(mac.upper())
             if row:
                 panel["model_id"] = row.get("model_id")
@@ -287,8 +285,6 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                     r = await client.read_panel_voltage(mac)
                     panel["last_poll_at"] = time.time()
                     if r.success:
-                        fails = 0
-                        ok = True
                         volts = r.panel_volts()
                         panel["volts"] = volts
                         panel["updated_at"] = time.time()
@@ -301,25 +297,16 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                         else:
                             log.info("panel voltage %.2f V", volts)
                     else:
-                        fails += 1
                         panel["last_error"] = r.message
-                        log.warning("panel voltage: %s (fail %s)", r.message, fails)
+                        log.warning("panel voltage: %s", r.message)
                 except Exception as e:
-                    fails += 1
                     panel["last_poll_at"] = time.time()
                     panel["last_error"] = str(e)
-                    log.warning("panel voltage poll failed: %s (fail %s)", e, fails)
+                    log.warning("panel voltage poll failed: %s", e)
                 finally:
                     scan_paused.clear()
-            elapsed = time.time() - started
-            wait = P.panel_poll_sleep_s(ok, fails, elapsed)
-            if not ok and P.should_reset_adapter(fails):
-                try:
-                    await client.reset_bluetooth_adapter()
-                except Exception as e:
-                    log.warning("adapter reset failed: %s", e)
-                wait = 8.0
-            await asyncio.sleep(wait)
+            wait = P.PANEL_POLL_S - (time.time() - started)
+            await asyncio.sleep(wait if wait > 0.2 else 0.2)
 
     async def require(request: web.Request) -> None:
         if not secret_ok(request.headers, expected):

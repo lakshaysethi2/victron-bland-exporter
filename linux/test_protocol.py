@@ -73,6 +73,13 @@ class PanelVoltageProtocolTest(unittest.TestCase):
         self.assertTrue(stream_started(["f901", "08001893421027"]))
         self.assertTrue(stream_started(["080319edbb425934"]))
 
+    def test_session_awake_is_f980_reply_or_stream(self):
+        from mppt_ble.protocol import session_awake
+
+        self.assertFalse(session_awake(["f901"]))
+        self.assertTrue(session_awake(["029f000001000301ff07000300"]))
+        self.assertTrue(session_awake(["f901", "08001893421027"]))
+
     def test_poll_sleep_backs_off_on_failure(self):
         self.assertGreaterEqual(panel_poll_sleep_s(True, 0, 3.0), 6.0)
         self.assertEqual(panel_poll_sleep_s(True, 0, 11.0), ACL_SETTLE_S)

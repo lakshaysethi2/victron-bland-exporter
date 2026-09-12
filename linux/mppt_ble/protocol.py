@@ -153,6 +153,14 @@ def stream_started(notifies: list[str] | None) -> bool:
     return any(notify_is_stream(n) for n in (notifies or []))
 
 
+def session_awake(notifies: list[str] | None) -> bool:
+    """f980 wake is 029f…; stream start is 08…. CONTROL f901 is not awake."""
+    for n in notifies or []:
+        if n.startswith("029f") or n.startswith("08"):
+            return True
+    return False
+
+
 def panel_poll_sleep_s(ok: bool, fail_count: int, elapsed: float) -> float:
     """Gap until the next GATT poll. Failures back off so a dead ACL is not hammered."""
     if ok:
