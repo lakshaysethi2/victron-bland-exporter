@@ -19,6 +19,7 @@ from mppt_ble.yield_reset import (
     panel_floor_v,
     pulse_why,
     should_pulse,
+    window_label,
     voltage_delta,
 )
 
@@ -36,6 +37,11 @@ def fill(st: ResetState, p: ResetPolicy, t0: float, series, step: float = 10.0) 
 
 
 class YieldResetTest(unittest.TestCase):
+    def test_window_label(self):
+        self.assertEqual("2 min", window_label(120))
+        self.assertEqual("2h", window_label(7200))
+        self.assertEqual("1 min", window_label(60))
+
     def test_clear_sky_noon_is_1600(self):
         p = ResetPolicy()
         self.assertAlmostEqual(1600, clear_sky_watts(noon(), p), delta=1)
@@ -107,7 +113,8 @@ class YieldResetTest(unittest.TestCase):
         self.assertFalse(should_pulse(st, end, 1198, p, panel_v=148.9, battery_v=40.0))
         self.assertTrue(should_pulse(st, end + 20, 1198, p, panel_v=148.9, battery_v=40.0))
         self.assertIn("local-mpp", st.pulse_reason)
-        self.assertIn("avgGap", st.pulse_reason)
+        self.assertIn("2 min avg", st.pulse_reason)
+        self.assertIn("2h Voc", st.pulse_reason)
 
     def test_envelope_skips_1414w_at_noon(self):
         p = ResetPolicy()

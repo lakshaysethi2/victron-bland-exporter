@@ -251,6 +251,20 @@ def rate_limit_why(state: ResetState, ts: float, policy: ResetPolicy) -> str | N
     return None
 
 
+def window_label(seconds: float) -> str:
+    """Human window for /charger: 120 → '2 min', 7200 → '2h'."""
+    s = int(round(seconds))
+    if s >= 3600 and s % 3600 == 0:
+        n = s // 3600
+        return f"{n}h"
+    if s >= 60 and s % 60 == 0:
+        n = s // 60
+        return f"{n} min"
+    if s >= 60:
+        return f"{int(round(s / 60))} min"
+    return f"{s}s"
+
+
 def voltage_delta(panel_v: float | None, battery_v: float | None) -> float | None:
     if panel_v is None or battery_v is None:
         return None
@@ -288,12 +302,14 @@ def pulse_why(
         mean = avg_gap(state, ts, policy)
         voc = voc_gap(state, ts, policy)
         if mean is None:
-            return "waiting for gap average"
+            return f"waiting for {window_label(policy.local_mpp_gap_avg_s)} gap average"
         if voc is None or voc < policy.local_mpp_min_delta_v:
-            return "need 2h panel/out max"
+            return f"need {window_label(policy.local_mpp_extrema_s)} panel/out max"
         need = voc - policy.local_mpp_gap_margin_v
         if mean < need:
-            return f"avg gap {mean:.0f}V < {need:.0f}V (Voc {voc:.0f}-8)"
+            avg_w = window_label(policy.local_mpp_gap_avg_s)
+            voc_w = window_label(policy.local_mpp_extrema_s)
+            return f"{avg_w} avg {mean:.0f}V < {need:.0f}V ({voc_w} Voc {voc:.0f}-8)"
         envelope = clear_sky_watts(ts, policy) * policy.local_mpp_clear_skip
         if watts >= envelope:
             return f"{watts:.0f}W ≥ {envelope:.0f}W envelope"
@@ -369,7 +385,9 @@ def should_pulse(
             mean = avg_gap(state, ts, policy)
             voc = voc_gap(state, ts, policy)
             if mean is not None and voc is not None:
-                dtxt += f" avgGap={mean:.0f}V vocGap={voc:.0f}V"
+                avg_w = window_label(policy.local_mpp_gap_avg_s)
+                voc_w = window_label(policy.local_mpp_extrema_s)
+                dtxt += f" {avg_w} avg {mean:.0f}V {voc_w} Voc {voc:.0f}V"
             state.pulse_reason = f"local-mpp pv={panel_v:.1f}V out={bat}{dtxt} watts={watts:.0f}"
             return True
     else:
