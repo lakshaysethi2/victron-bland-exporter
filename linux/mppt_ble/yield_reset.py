@@ -79,6 +79,7 @@ class ResetState:
     last_status_log_at: float = 0.0
     samples: deque = field(default_factory=lambda: deque(maxlen=900))
     pulse_times: list[float] = field(default_factory=list)
+    store: object | None = None
 
 
 def load_policy(path: str | None) -> ResetPolicy:
@@ -180,6 +181,8 @@ def ingest(
     cutoff = ts - policy.local_mpp_extrema_s
     while state.samples and state.samples[0][0] < cutoff:
         state.samples.popleft()
+    if state.store is not None:
+        state.store.record_sample(ts, float(watts), panel_v, battery_v)
     return state
 
 
@@ -187,6 +190,21 @@ def note_pulse(state: ResetState, ts: float) -> None:
     state.last_pulse_at = ts
     state.pulse_times.append(ts)
     state.pulse_times = [t for t in state.pulse_times if ts - t < 3 * 3600]
+    if state.store is not None:
+        state.store.record_pulse(ts)
+
+
+def hydrate_state(state: ResetState, store: object, now: float) -> int:
+    """Load samples and pulse times from sqlite. Hold timer stays empty."""
+    samples, pulses = store.load(now)
+    state.store = store
+    state.samples.clear()
+    for row in samples:
+        state.samples.append(row)
+    state.pulse_times = list(pulses)
+    if state.pulse_times:
+        state.last_pulse_at = state.pulse_times[-1]
+    return len(state.samples)
 
 
 def pulses_last_hour(state: ResetState, ts: float) -> int:
