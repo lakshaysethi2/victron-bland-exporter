@@ -138,16 +138,23 @@ class MpptClient:
                 return
             await asyncio.sleep(0.05)
 
+    async def _subscribe(self, client: BleakClient, uuids: tuple[str, ...]) -> None:
+        for uuid in uuids:
+            try:
+                await client.start_notify(uuid, self._on_notify)
+                log.info("subscribed %s", uuid[:8])
+            except Exception as e:
+                log.warning("notify %s: %s", uuid[:8], e)
+
     async def read_regs(self, registers: list[int]) -> RegisterRead:
         wanted = set(registers)
         async with BleakClient(self.device, timeout=20.0) as client:
             log.info("connected %s", self.device.address)
             await asyncio.sleep(0.3)
-            for uuid in (P.CONTROL, P.SINGLE, P.BULK):
-                try:
-                    await client.start_notify(uuid, self._on_notify)
-                except Exception as e:
-                    log.debug("notify %s: %s", uuid[:8], e)
+            # BULK CCCD during f980 floods empty handle 0x0027 (btmon 13 Sep)
+            # and saturates Intel ACL (4 buffers). Enable BULK after STREAM_ENABLE.
+            # Always GET 0xEDBB; do not abort if only f901 has arrived.
+            await self._subscribe(client, (P.CONTROL, P.SINGLE))
             for uuid, payload in P.SAFE_INIT:
                 await self._write(client, uuid, payload)
             try:
@@ -156,6 +163,7 @@ class MpptClient:
                 log.debug("f980: %s", e)
             if P.REG_PANEL_VOLTAGE in wanted:
                 await self._write(client, P.SINGLE, P.STREAM_ENABLE)
+                await self._subscribe(client, (P.BULK,))
             for reg in registers:
                 await self._write(client, P.SINGLE, P.make_read(reg, 0x81, kind=0x03))
             if P.REG_PANEL_VOLTAGE in wanted:

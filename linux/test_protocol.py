@@ -67,6 +67,13 @@ class PanelVoltageProtocolTest(unittest.TestCase):
         self.assertIsNone(panel_voltage_of(None))
         self.assertIsNone(panel_voltage_of(b"\x00"))
 
+    def test_f901_only_is_not_panel_voltage(self):
+        parsed, leftover = parse_register_stream(bytes.fromhex("f901"))
+        self.assertNotIn(REG_PANEL_VOLTAGE, parsed)
+        self.assertFalse(panel_payload_ok(parsed.get(REG_PANEL_VOLTAGE)))
+        self.assertIsNone(panel_voltage_of(parsed.get(REG_PANEL_VOLTAGE)))
+        self.assertFalse(stream_started(["f901"]))
+
     def test_stream_started_ignores_control_ack(self):
         self.assertFalse(stream_started(["f901"]))
         self.assertFalse(stream_started([]))
