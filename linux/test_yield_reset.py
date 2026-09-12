@@ -99,8 +99,17 @@ class YieldResetTest(unittest.TestCase):
         p = ResetPolicy()
         st = ResetState()
         t0 = noon()
-        self.assertFalse(local_mpp_stuck(1200, 139.0, 40.0, p))
-        self.assertFalse(should_pulse(st, t0 + 40, 1200, p, panel_v=139.0, battery_v=40.0))
+        self.assertFalse(local_mpp_stuck(1716, 147.7, 40.0, p))
+        self.assertFalse(should_pulse(st, t0 + 40, 1716, p, panel_v=147.7, battery_v=40.0))
+
+    def test_large_gap_at_1200w_still_pulses(self):
+        p = ResetPolicy()
+        st = ResetState()
+        t0 = noon()
+        self.assertAlmostEqual(108.9, voltage_delta(148.9, 40.0), delta=0.01)
+        self.assertTrue(local_mpp_stuck(1198, 148.9, 40.0, p))
+        self.assertFalse(should_pulse(st, t0, 1198, p, panel_v=148.9, battery_v=40.0))
+        self.assertTrue(should_pulse(st, t0 + 30, 1198, p, panel_v=148.9, battery_v=40.0))
 
     def test_cascade_high_delta_low_enough_watts_pulses(self):
         p = ResetPolicy()
@@ -144,11 +153,11 @@ class YieldResetTest(unittest.TestCase):
         p = ResetPolicy()
         t0 = noon()
         self.assertEqual("ready", pulse_why(180, 150.0, 40.0, p, t0, 0))
-        self.assertIn("already high", pulse_why(1200, 150.0, 40.0, p, t0, 0))
+        self.assertEqual("ready", pulse_why(1198, 148.9, 40.0, p, t0, 0))
         self.assertIn("waiting", pulse_why(180, None, 40.0, p, t0, 0))
         self.assertIn("below", pulse_why(180, 90.0, 40.0, p, t0, 0))
         self.assertEqual("ready", pulse_why(180, 150.0, 40.0, p, t0, t0 - 10))
-        self.assertIn("already high", pulse_why(1716, 147.7, 40.0, p, t0, t0 - 10))
+        self.assertIn("skip", pulse_why(1716, 147.7, 40.0, p, t0, t0 - 10))
 
     def test_five_minute_cooldown_blocks_then_allows(self):
         p = ResetPolicy(cooldown_s=300, local_mpp_hold_s=1)
@@ -183,6 +192,7 @@ class YieldResetTest(unittest.TestCase):
         path = Path(__file__).resolve().parent / "yield_config.json"
         p = load_policy(str(path))
         self.assertEqual(300, p.cooldown_s)
+        self.assertEqual(1500, p.local_mpp_max_w)
 
 
 if __name__ == "__main__":
