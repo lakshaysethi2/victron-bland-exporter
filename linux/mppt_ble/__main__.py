@@ -17,6 +17,7 @@ from .watchdog_store import WatchdogStore, default_path as watchdog_db_path
 from .yield_reset import (
     ResetState,
     avg_gap,
+    clear_sky_watts,
     extrema_2h,
     hydrate_state,
     ingest,
@@ -368,16 +369,22 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         snap["avgGap"] = avg_gap(reset_state, now, policy)
         snap["vocGap"] = voc_gap(reset_state, now, policy)
         snap["pulsesLastHour"] = pulses_last_hour(reset_state, now)
+        clear_w = clear_sky_watts(now, policy)
         snap["thresholds"] = {
             "panelMinV": panel_floor_v(reset_state, now, policy),
             "panelMinFrac": policy.local_mpp_panel_min_frac,
             "minDeltaV": policy.local_mpp_min_delta_v,
             "outMinV": policy.local_mpp_battery_min_v,
+            "outMaxV": policy.local_mpp_battery_max_v,
             "gapMarginV": policy.local_mpp_gap_margin_v,
             "gapAvgS": policy.local_mpp_gap_avg_s,
             "extremaS": policy.local_mpp_extrema_s,
             "maxPerHour": policy.local_mpp_max_per_hour,
             "cooldownS": policy.cooldown_s,
+            "holdS": policy.local_mpp_hold_s,
+            "clearSkip": policy.local_mpp_clear_skip,
+            "clearSkyW": clear_w,
+            "envelopeW": clear_w * policy.local_mpp_clear_skip,
             "maxPanel2h": max_pv,
             "maxOut2h": max_out,
         }
