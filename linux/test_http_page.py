@@ -16,6 +16,11 @@ class HttpPageTest(unittest.TestCase):
         self.assertIn("pulseWhy", html)
         self.assertIn("Recent pulses", html)
         self.assertIn("Cooldown", html)
+        self.assertIn("At most 4 auto-pulses per hour", html)
+
+    def test_max_per_hour_in_hint(self):
+        html = render_page("mppt.lak.nz", max_per_hour=6)
+        self.assertIn("At most 6 auto-pulses per hour", html)
 
     def test_host_is_sanitized(self):
         html = render_page('<script>alert(1)</script>')

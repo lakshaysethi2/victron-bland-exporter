@@ -38,7 +38,7 @@
   "local_mpp_gap_margin_v": 8,
   "local_mpp_gap_min_samples": 6,
   "local_mpp_extrema_min_w": 100,
-  "local_mpp_max_per_hour": 2,
+  "local_mpp_max_per_hour": 4,
   "local_mpp_clear_skip": 0.85,
   "watt_only_pulses": false
 }

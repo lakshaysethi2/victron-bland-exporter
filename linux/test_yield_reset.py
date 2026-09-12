@@ -1,8 +1,10 @@
 import json
+import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from mppt_ble.yield_reset import (
     ResetPolicy,
@@ -218,11 +220,20 @@ class YieldResetTest(unittest.TestCase):
         path = Path(__file__).resolve().parent / "yield_config.json"
         p = load_policy(str(path))
         self.assertEqual(900, p.cooldown_s)
-        self.assertEqual(2, p.local_mpp_max_per_hour)
+        self.assertEqual(4, p.local_mpp_max_per_hour)
         self.assertEqual(120, p.local_mpp_gap_avg_s)
         self.assertEqual(7200, p.local_mpp_extrema_s)
         self.assertEqual(8, p.local_mpp_gap_margin_v)
         self.assertEqual(0.85, p.local_mpp_clear_skip)
+
+    def test_env_overrides_max_pulses_per_hour(self):
+        path = Path(__file__).resolve().parent / "yield_config.json"
+        with mock.patch.dict(os.environ, {"MPPT_MAX_PULSES_PER_HOUR": "4"}):
+            self.assertEqual(4, load_policy(str(path)).local_mpp_max_per_hour)
+        with mock.patch.dict(os.environ, {"MPPT_MAX_PULSES_PER_HOUR": "6"}):
+            self.assertEqual(6, load_policy(str(path)).local_mpp_max_per_hour)
+        with mock.patch.dict(os.environ, {"MPPT_MAX_PULSES_PER_HOUR": "0"}):
+            self.assertEqual(4, load_policy(str(path)).local_mpp_max_per_hour)
 
 
 if __name__ == "__main__":

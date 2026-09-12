@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from collections import deque
@@ -56,7 +57,7 @@ class ResetPolicy:
     local_mpp_gap_margin_v: float = 8.0
     local_mpp_gap_min_samples: int = 6
     local_mpp_extrema_min_w: float = 100.0
-    local_mpp_max_per_hour: int = 2
+    local_mpp_max_per_hour: int = 4
     local_mpp_clear_skip: float = 0.85
     # False = only pulse from panel-voltage conditions (no watt-drop / shade-floor pulses).
     watt_only_pulses: bool = False
@@ -114,6 +115,11 @@ def load_policy(path: str | None) -> ResetPolicy:
     p.local_mpp_max_per_hour = int(data.get("local_mpp_max_per_hour", p.local_mpp_max_per_hour))
     p.local_mpp_clear_skip = float(data.get("local_mpp_clear_skip", p.local_mpp_clear_skip))
     p.watt_only_pulses = bool(data.get("watt_only_pulses", p.watt_only_pulses))
+    env_max = os.environ.get("MPPT_MAX_PULSES_PER_HOUR", "").strip()
+    if env_max:
+        n = int(env_max)
+        if n >= 1:
+            p.local_mpp_max_per_hour = n
     return p
 
 

@@ -54,7 +54,7 @@ curl -sS -H "X-Remote-Secret: $MPPT_REMOTE_SECRET" \
 
 Handshake on this SmartSolar: `01` / `0300` / `f980` / `060082189342102703010303` (VictronConnect stream-enable). That last frame is what switches the radio to type-03 `08 03 19` value notifies, including `0xEDBB`. Without the trailing `03010303`, GET returns `09 00 19 ed bb 01` (unknown id, not volts). Do not send `fa80ff` or `f941` after the blob — those drop this unit.
 
-This Victron feeds a downstream MPPT, not the cells. The watchdog pulses when the 2-minute average `Vpv − Vout` is near the 2-hour (max panel − max out) Voc gap and watts are below 0.85 × this hour’s clear-sky envelope. Each pulse costs a yield dip, so auto-pulse is limited to 15 minutes apart and 2 per hour. Tune `linux/yield_config.json`.
+This Victron feeds a downstream MPPT, not the cells. The watchdog pulses when the 2-minute average `Vpv − Vout` is near the 2-hour (max panel − max out) Voc gap and watts are below 0.85 × this hour’s clear-sky envelope. Each pulse costs a yield dip, so auto-pulse is limited to 15 minutes apart and 4 per hour (`local_mpp_max_per_hour` in `linux/yield_config.json`, or `MPPT_MAX_PULSES_PER_HOUR` in `~/.config/mppt/secrets.env`).
 
 systemd user units: copy `mppt-ble.service` (and optionally `cloudflared-mppt.service`) to `~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl --user enable --now mppt-ble`.
 

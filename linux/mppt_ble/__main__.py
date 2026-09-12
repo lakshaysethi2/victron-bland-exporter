@@ -85,10 +85,12 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     if not mac:
         print("set MPPT_MAC or ~/.config/mppt/devices.json mac", file=sys.stderr)
         return 2
+    policy_path = str(Path(__file__).resolve().parent.parent / "yield_config.json")
+    policy = load_policy(policy_path if Path(policy_path).is_file() else None)
     try:
         from .http_page import render_page
 
-        page_html = render_page(public_host())
+        page_html = render_page(public_host(), max_per_hour=policy.local_mpp_max_per_hour)
     except Exception:
         page_html = "<p>mppt_ble</p>"
     keys = {k.upper(): str(v).lower() for k, v in (cfg.get("keys") or {}).items()}
@@ -110,8 +112,6 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     scan_idle = asyncio.Event()
     scan_paused.clear()
     scan_idle.set()
-    policy_path = str(Path(__file__).resolve().parent.parent / "yield_config.json")
-    policy = load_policy(policy_path if Path(policy_path).is_file() else None)
     reset_state = ResetState()
     panel: dict = {
         "mac": mac.upper(),
