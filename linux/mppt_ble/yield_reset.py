@@ -47,7 +47,8 @@ class ResetPolicy:
     shade_hold_s: float = 120.0
     # Cascade: panels → this Victron → downstream MPPT → cells.
     # Average gap vs 2h (max panel − max out). Each auto-pulse costs a yield dip.
-    local_mpp_panel_min_v: float = 120.0
+    # Panel floor is 2h max panel × this fraction (not a fixed 120 V).
+    local_mpp_panel_min_frac: float = 0.85
     local_mpp_min_delta_v: float = 80.0
     local_mpp_battery_min_v: float = 30.0
     local_mpp_battery_max_v: float = 52.0
@@ -102,7 +103,7 @@ def load_policy(path: str | None) -> ResetPolicy:
         p.daytime_start = int(data["daytime_start_hour"]) * 60
     if "daytime_end_hour" in data:
         p.daytime_end = int(data["daytime_end_hour"]) * 60
-    p.local_mpp_panel_min_v = float(data.get("local_mpp_panel_min_v", p.local_mpp_panel_min_v))
+    p.local_mpp_panel_min_frac = float(data.get("local_mpp_panel_min_frac", p.local_mpp_panel_min_frac))
     p.local_mpp_min_delta_v = float(data.get("local_mpp_min_delta_v", p.local_mpp_min_delta_v))
     p.local_mpp_battery_min_v = float(data.get("local_mpp_battery_min_v", p.local_mpp_battery_min_v))
     p.local_mpp_battery_max_v = float(data.get("local_mpp_battery_max_v", p.local_mpp_battery_max_v))
@@ -232,6 +233,14 @@ def voc_gap(state: ResetState, ts: float, policy: ResetPolicy) -> float | None:
     return max_pv - max_out
 
 
+def panel_floor_v(state: ResetState, ts: float, policy: ResetPolicy) -> float | None:
+    """Skip auto-pulse if panel is well below today's Voc (2h max × frac)."""
+    max_pv, _, _ = extrema_2h(state, ts, policy)
+    if max_pv is None:
+        return None
+    return max_pv * policy.local_mpp_panel_min_frac
+
+
 def rate_limit_why(state: ResetState, ts: float, policy: ResetPolicy) -> str | None:
     n = pulses_last_hour(state, ts)
     if n >= policy.local_mpp_max_per_hour:
@@ -262,8 +271,10 @@ def pulse_why(
         return "night"
     if panel_v is None:
         return "waiting for panel voltage"
-    if panel_v < policy.local_mpp_panel_min_v:
-        return f"panel {panel_v:.0f}V below {policy.local_mpp_panel_min_v:.0f}V"
+    if state is not None:
+        floor = panel_floor_v(state, ts, policy)
+        if floor is not None and panel_v < floor:
+            return f"panel {panel_v:.0f}V below {floor:.0f}V (2h max)"
     if battery_v is not None and battery_v < policy.local_mpp_battery_min_v:
         return f"output {battery_v:.0f}V collapsed"
     if battery_v is not None and battery_v > policy.local_mpp_battery_max_v:
@@ -302,8 +313,12 @@ def local_mpp_stuck(
     ts: float | None = None,
 ) -> bool:
     """Sustained Voc-like average gap vs 2h (max panel − max out). No watt cap."""
-    if panel_v is None or panel_v < policy.local_mpp_panel_min_v:
+    if panel_v is None:
         return False
+    if state is not None and ts is not None:
+        floor = panel_floor_v(state, ts, policy)
+        if floor is not None and panel_v < floor:
+            return False
     if battery_v is not None and battery_v < policy.local_mpp_battery_min_v:
         return False
     if battery_v is not None and battery_v > policy.local_mpp_battery_max_v:

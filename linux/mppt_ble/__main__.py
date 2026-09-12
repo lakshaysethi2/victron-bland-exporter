@@ -21,6 +21,7 @@ from .yield_reset import (
     load_policy,
     local_mpp_stuck,
     note_pulse,
+    panel_floor_v,
     pulse_why,
     pulses_last_hour,
     should_pulse,
@@ -349,7 +350,8 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         snap["vocGap"] = voc_gap(reset_state, now, policy)
         snap["pulsesLastHour"] = pulses_last_hour(reset_state, now)
         snap["thresholds"] = {
-            "panelMinV": policy.local_mpp_panel_min_v,
+            "panelMinV": panel_floor_v(reset_state, now, policy),
+            "panelMinFrac": policy.local_mpp_panel_min_frac,
             "minDeltaV": policy.local_mpp_min_delta_v,
             "outMinV": policy.local_mpp_battery_min_v,
             "gapMarginV": policy.local_mpp_gap_margin_v,

@@ -28,7 +28,7 @@
   "peak_window_s": 1200,
   "daytime_start_hour": 7,
   "daytime_end_hour": 18,
-  "local_mpp_panel_min_v": 120,
+  "local_mpp_panel_min_frac": 0.85,
   "local_mpp_min_delta_v": 80,
   "local_mpp_battery_min_v": 30,
   "local_mpp_battery_max_v": 52,
