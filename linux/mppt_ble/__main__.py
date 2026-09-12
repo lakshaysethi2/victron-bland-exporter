@@ -379,6 +379,8 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         snap["pulseWhy"] = pulse_why(
             watts, panel_v, battery_v, policy, now, reset_state.last_pulse_at, reset_state
         )
+        if panel_v is None and panel.get("last_error"):
+            snap["pulseWhy"] = f"{snap['pulseWhy']}: {panel['last_error']}"
         hold_left = 0
         if reset_state.local_mpp_since and snap["pulseCandidate"]:
             hold_left = int(policy.local_mpp_hold_s - (now - reset_state.local_mpp_since))

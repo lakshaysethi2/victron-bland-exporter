@@ -202,7 +202,11 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
   function render(d) {{
     last = d;
     coolUntil = Date.now() + Math.max(0, (d.cooldownRemainingS || 0) * 1000);
-    document.getElementById("nPv").textContent = fmt(d.panelVoltage, 1, " V");
+    if (d.panelVoltage == null && d.panelError) {{
+      document.getElementById("nPv").textContent = "GATT";
+    }} else {{
+      document.getElementById("nPv").textContent = fmt(d.panelVoltage, 1, " V");
+    }}
     document.getElementById("nOut").textContent = fmt(d.outputVoltage != null ? d.outputVoltage : d.batteryVoltage, 1, " V");
     document.getElementById("nDv").textContent = fmt(d.deltaVoltage, 0, " V");
     document.getElementById("nW").textContent = fmt(d.solarPowerW, 0, " W");

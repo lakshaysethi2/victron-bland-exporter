@@ -23,7 +23,9 @@ PANEL_POLL_BACKOFF_MAX_S = 120.0
 PANEL_FRESH_S = 30.0
 PANEL_STREAM_WAIT_S = 1.5
 ACL_SETTLE_S = 0.8
-PANEL_ADAPTER_RESET_AFTER = 6
+# 0 = never USB-reset the adapter. Resetting Intel hci0 (18:10) killed
+# Instant Readout briefly and did not recover 0xEDBB.
+PANEL_ADAPTER_RESET_AFTER = 0
 
 # This SmartSolar drops the link on 306b0002 fa80ff, and on f941 after a 06008218 blob.
 SAFE_INIT = [
@@ -164,7 +166,10 @@ def panel_poll_sleep_s(ok: bool, fail_count: int, elapsed: float) -> float:
 
 def should_reset_adapter(fail_count: int) -> bool:
     n = int(fail_count)
-    return n > 0 and n % PANEL_ADAPTER_RESET_AFTER == 0
+    every = int(PANEL_ADAPTER_RESET_AFTER)
+    if every <= 0 or n <= 0:
+        return False
+    return n % every == 0
 
 
 def charger_mode_of(values: dict[int, bytes]) -> int | None:

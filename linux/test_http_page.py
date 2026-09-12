@@ -31,6 +31,8 @@ class HttpPageTest(unittest.TestCase):
         self.assertIn("panelMinV", html)
         self.assertIn("gapMarginFrac", html)
         self.assertIn("minVocBusMult", html)
+        self.assertIn("panelError", html)
+        self.assertIn("GATT", html)
 
     def test_max_per_hour_in_hint(self):
         html = render_page("mppt.lak.nz", max_per_hour=6)

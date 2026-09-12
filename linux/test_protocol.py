@@ -81,11 +81,12 @@ class PanelVoltageProtocolTest(unittest.TestCase):
         self.assertLessEqual(panel_poll_sleep_s(False, 8, 0.0), PANEL_POLL_BACKOFF_MAX_S)
         self.assertGreaterEqual(panel_poll_sleep_s(False, 8, 200.0), 1.0)
 
-    def test_adapter_reset_every_n_failures(self):
+    def test_adapter_reset_disabled(self):
+        self.assertEqual(0, PANEL_ADAPTER_RESET_AFTER)
         self.assertFalse(should_reset_adapter(0))
-        self.assertFalse(should_reset_adapter(PANEL_ADAPTER_RESET_AFTER - 1))
-        self.assertTrue(should_reset_adapter(PANEL_ADAPTER_RESET_AFTER))
-        self.assertTrue(should_reset_adapter(PANEL_ADAPTER_RESET_AFTER * 2))
+        self.assertFalse(should_reset_adapter(1))
+        self.assertFalse(should_reset_adapter(6))
+        self.assertFalse(should_reset_adapter(12))
 
 
 if __name__ == "__main__":
