@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.request import urlopen
@@ -34,7 +35,7 @@ class ResetPolicy:
     stuck_fraction: float = 0.55
     hold_s: float = 50.0
     off_s: float = 4.0
-    cooldown_s: float = 5 * 60.0
+    cooldown_s: float = 15 * 60.0
     min_peak_w: float = 120.0
     daytime_start: int = 7 * 60
     daytime_end: int = 18 * 60
@@ -44,12 +45,19 @@ class ResetPolicy:
     shade_floor_w: float = 500.0
     shade_hold_s: float = 120.0
     # Cascade: panels → this Victron → downstream MPPT → cells.
-    # High Vpv vs Victron output + low watts = sitting near Voc; pulse restarts the chain.
+    # Average gap vs 2h (max panel − max out). Each auto-pulse costs a yield dip.
     local_mpp_panel_min_v: float = 120.0
     local_mpp_min_delta_v: float = 80.0
     local_mpp_battery_max_v: float = 52.0
     local_mpp_max_w: float = 1500.0
     local_mpp_hold_s: float = 30.0
+    local_mpp_gap_avg_s: float = 120.0
+    local_mpp_extrema_s: float = 2 * 3600.0
+    local_mpp_gap_margin_v: float = 8.0
+    local_mpp_gap_min_samples: int = 6
+    local_mpp_extrema_min_w: float = 100.0
+    local_mpp_max_per_hour: int = 2
+    local_mpp_clear_skip: float = 0.85
     # False = only pulse from panel-voltage conditions (no watt-drop / shade-floor pulses).
     watt_only_pulses: bool = False
 
@@ -67,6 +75,8 @@ class ResetState:
     local_mpp_since: float | None = None
     pulse_reason: str = ""
     last_status_log_at: float = 0.0
+    samples: deque = field(default_factory=lambda: deque(maxlen=900))
+    pulse_times: list[float] = field(default_factory=list)
 
 
 def load_policy(path: str | None) -> ResetPolicy:
@@ -96,6 +106,13 @@ def load_policy(path: str | None) -> ResetPolicy:
     p.local_mpp_battery_max_v = float(data.get("local_mpp_battery_max_v", p.local_mpp_battery_max_v))
     p.local_mpp_max_w = float(data.get("local_mpp_max_w", p.local_mpp_max_w))
     p.local_mpp_hold_s = float(data.get("local_mpp_hold_s", p.local_mpp_hold_s))
+    p.local_mpp_gap_avg_s = float(data.get("local_mpp_gap_avg_s", p.local_mpp_gap_avg_s))
+    p.local_mpp_extrema_s = float(data.get("local_mpp_extrema_s", p.local_mpp_extrema_s))
+    p.local_mpp_gap_margin_v = float(data.get("local_mpp_gap_margin_v", p.local_mpp_gap_margin_v))
+    p.local_mpp_gap_min_samples = int(data.get("local_mpp_gap_min_samples", p.local_mpp_gap_min_samples))
+    p.local_mpp_extrema_min_w = float(data.get("local_mpp_extrema_min_w", p.local_mpp_extrema_min_w))
+    p.local_mpp_max_per_hour = int(data.get("local_mpp_max_per_hour", p.local_mpp_max_per_hour))
+    p.local_mpp_clear_skip = float(data.get("local_mpp_clear_skip", p.local_mpp_clear_skip))
     p.watt_only_pulses = bool(data.get("watt_only_pulses", p.watt_only_pulses))
     return p
 
@@ -135,7 +152,14 @@ def classify_weather(peak_w: float, clear_w: float, policy: ResetPolicy) -> tupl
     return "overcast", max(peak_w, clear_w * policy.overcast_factor)
 
 
-def ingest(state: ResetState, ts: float, watts: float, policy: ResetPolicy) -> ResetState:
+def ingest(
+    state: ResetState,
+    ts: float,
+    watts: float,
+    policy: ResetPolicy,
+    panel_v: float | None = None,
+    battery_v: float | None = None,
+) -> ResetState:
     if ts - state.peak_at > policy.peak_window_s:
         state.peak_w = watts
         state.peak_at = ts
@@ -145,7 +169,71 @@ def ingest(state: ResetState, ts: float, watts: float, policy: ResetPolicy) -> R
     clear = clear_sky_watts(ts, policy)
     state.regime, state.expected_w = classify_weather(state.peak_w, clear, policy)
     state.last_watts = watts
+    state.samples.append((ts, float(watts), panel_v, battery_v))
+    cutoff = ts - policy.local_mpp_extrema_s
+    while state.samples and state.samples[0][0] < cutoff:
+        state.samples.popleft()
     return state
+
+
+def note_pulse(state: ResetState, ts: float) -> None:
+    state.last_pulse_at = ts
+    state.pulse_times.append(ts)
+    state.pulse_times = [t for t in state.pulse_times if ts - t < 3 * 3600]
+
+
+def pulses_last_hour(state: ResetState, ts: float) -> int:
+    return sum(1 for t in state.pulse_times if ts - t < 3600)
+
+
+def extrema_2h(
+    state: ResetState, ts: float, policy: ResetPolicy
+) -> tuple[float | None, float | None, float]:
+    """Max panel and Victron-out over 2h. Ignore pulse-off / tiny watts so Voc-off does not inflate."""
+    cutoff = ts - policy.local_mpp_extrema_s
+    max_pv: float | None = None
+    max_out: float | None = None
+    max_w = 0.0
+    for t, watts, pv, out in state.samples:
+        if t < cutoff or watts < policy.local_mpp_extrema_min_w:
+            continue
+        if isinstance(pv, (int, float)):
+            max_pv = pv if max_pv is None else max(max_pv, float(pv))
+        if isinstance(out, (int, float)):
+            max_out = out if max_out is None else max(max_out, float(out))
+        max_w = max(max_w, float(watts))
+    return max_pv, max_out, max_w
+
+
+def avg_gap(state: ResetState, ts: float, policy: ResetPolicy) -> float | None:
+    cutoff = ts - policy.local_mpp_gap_avg_s
+    gaps: list[float] = []
+    for t, _watts, pv, out in state.samples:
+        if t < cutoff:
+            continue
+        delta = voltage_delta(pv, out)
+        if delta is not None:
+            gaps.append(delta)
+    if len(gaps) < policy.local_mpp_gap_min_samples:
+        return None
+    return sum(gaps) / len(gaps)
+
+
+def voc_gap(state: ResetState, ts: float, policy: ResetPolicy) -> float | None:
+    max_pv, max_out, _ = extrema_2h(state, ts, policy)
+    if max_pv is None or max_out is None:
+        return None
+    return max_pv - max_out
+
+
+def rate_limit_why(state: ResetState, ts: float, policy: ResetPolicy) -> str | None:
+    n = pulses_last_hour(state, ts)
+    if n >= policy.local_mpp_max_per_hour:
+        return f"rate {n}/{policy.local_mpp_max_per_hour} this hour"
+    if state.last_pulse_at and ts - state.last_pulse_at < policy.cooldown_s:
+        left = int(policy.cooldown_s - (ts - state.last_pulse_at))
+        return f"cooldown {left}s"
+    return None
 
 
 def voltage_delta(panel_v: float | None, battery_v: float | None) -> float | None:
@@ -161,6 +249,7 @@ def pulse_why(
     policy: ResetPolicy,
     ts: float,
     last_pulse_at: float,
+    state: ResetState | None = None,
 ) -> str:
     """Short reason the watchdog will or will not pulse. For the /charger page."""
     if not is_daytime(ts, policy):
@@ -171,13 +260,28 @@ def pulse_why(
         return f"panel {panel_v:.0f}V below {policy.local_mpp_panel_min_v:.0f}V"
     if battery_v is not None and battery_v > policy.local_mpp_battery_max_v:
         return f"output {battery_v:.0f}V already high"
+    if watts is None:
+        return "no watts yet"
+    if state is not None:
+        limited = rate_limit_why(state, ts, policy)
+        if limited:
+            return limited
+        mean = avg_gap(state, ts, policy)
+        voc = voc_gap(state, ts, policy)
+        if mean is None:
+            return "waiting for gap average"
+        if voc is None or voc < policy.local_mpp_min_delta_v:
+            return "need 2h panel/out max"
+        need = voc - policy.local_mpp_gap_margin_v
+        if mean < need:
+            return f"avg gap {mean:.0f}V < {need:.0f}V Voc"
+        envelope = clear_sky_watts(ts, policy) * policy.local_mpp_clear_skip
+        if watts >= envelope:
+            return f"{watts:.0f}W ≥ {envelope:.0f}W envelope"
+        return "ready"
     delta = voltage_delta(panel_v, battery_v)
     if delta is not None and delta < policy.local_mpp_min_delta_v:
         return f"gap {delta:.0f}V below {policy.local_mpp_min_delta_v:.0f}V"
-    if watts is None:
-        return "no watts yet"
-    if watts >= policy.local_mpp_max_w:
-        return f"{watts:.0f}W ≥ {policy.local_mpp_max_w:.0f}W skip"
     return "ready"
 
 
@@ -186,16 +290,31 @@ def local_mpp_stuck(
     panel_v: float | None,
     battery_v: float | None,
     policy: ResetPolicy,
+    state: ResetState | None = None,
+    ts: float | None = None,
 ) -> bool:
-    """Victron sitting near Voc: high Vpv, large Vpv−Vout, watts not high enough."""
+    """Sustained Voc-like average gap vs 2h (max panel − max out). No watt cap."""
     if panel_v is None or panel_v < policy.local_mpp_panel_min_v:
         return False
     if battery_v is not None and battery_v > policy.local_mpp_battery_max_v:
         return False
-    delta = voltage_delta(panel_v, battery_v)
-    if delta is not None and delta < policy.local_mpp_min_delta_v:
+    if state is None or ts is None:
+        delta = voltage_delta(panel_v, battery_v)
+        if delta is None or delta < policy.local_mpp_min_delta_v:
+            return False
+        return True
+    mean = avg_gap(state, ts, policy)
+    voc = voc_gap(state, ts, policy)
+    if mean is None or voc is None:
         return False
-    return watts < policy.local_mpp_max_w
+    if voc < policy.local_mpp_min_delta_v:
+        return False
+    if mean < voc - policy.local_mpp_gap_margin_v:
+        return False
+    envelope = clear_sky_watts(ts, policy) * policy.local_mpp_clear_skip
+    if watts >= envelope:
+        return False
+    return True
 
 
 def should_pulse(
@@ -211,10 +330,10 @@ def should_pulse(
         state.below_since = None
         state.local_mpp_since = None
         return False
-    if ts - state.last_pulse_at < policy.cooldown_s:
+    if rate_limit_why(state, ts, policy):
         return False
 
-    if local_mpp_stuck(watts, panel_v, battery_v, policy):
+    if local_mpp_stuck(watts, panel_v, battery_v, policy, state=state, ts=ts):
         if state.local_mpp_since is None:
             state.local_mpp_since = ts
             return False
@@ -222,6 +341,10 @@ def should_pulse(
             bat = f"{battery_v:.1f}V" if isinstance(battery_v, (int, float)) else "?"
             delta = voltage_delta(panel_v, battery_v)
             dtxt = f" dV={delta:.0f}V" if delta is not None else ""
+            mean = avg_gap(state, ts, policy)
+            voc = voc_gap(state, ts, policy)
+            if mean is not None and voc is not None:
+                dtxt += f" avgGap={mean:.0f}V vocGap={voc:.0f}V"
             state.pulse_reason = f"local-mpp pv={panel_v:.1f}V out={bat}{dtxt} watts={watts:.0f}"
             return True
     else:
@@ -298,7 +421,7 @@ async def loop(args: argparse.Namespace) -> None:
         if watts is None:
             await asyncio.sleep(args.poll)
             continue
-        ingest(state, ts, watts, policy)
+        ingest(state, ts, watts, policy, panel_v, battery_v)
         log.info(
             "watts=%.0f pv=%s bat=%s peak=%.0f expected=%.0f regime=%s",
             watts,
@@ -312,11 +435,11 @@ async def loop(args: argparse.Namespace) -> None:
             log.warning("%s — OFF %.1fs then ON", state.pulse_reason or f"watts={watts:.0f}", policy.off_s)
             if args.dry_run:
                 msg = "dry-run skip"
-                state.last_pulse_at = time.time()
+                note_pulse(state, time.time())
             else:
                 msg = await pulse(args.mac, policy.off_s)
                 if "on=True" in msg:
-                    state.last_pulse_at = time.time()
+                    note_pulse(state, time.time())
             state.below_since = None
             state.last_action = msg
             log.info("pulse done: %s", msg)
