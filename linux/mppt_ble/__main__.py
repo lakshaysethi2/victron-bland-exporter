@@ -13,10 +13,12 @@ from . import client, protocol as P
 from .metrics import panel_sample, render_metrics
 from .node_metrics import fetch_node_metrics, node_exporter_url
 from .restart import pulse
+from .watchdog_store import WatchdogStore, default_path as watchdog_db_path
 from .yield_reset import (
     ResetState,
     avg_gap,
     extrema_2h,
+    hydrate_state,
     ingest,
     load_policy,
     local_mpp_stuck,
@@ -119,6 +121,18 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     scan_paused.clear()
     scan_idle.set()
     reset_state = ResetState()
+    try:
+        store = WatchdogStore(watchdog_db_path())
+        n = hydrate_state(reset_state, store, time.time())
+        log.info(
+            "watchdog db %s samples=%s pulses=%s last_pulse=%s",
+            store.path,
+            n,
+            len(reset_state.pulse_times),
+            int(reset_state.last_pulse_at) if reset_state.last_pulse_at else 0,
+        )
+    except Exception:
+        log.exception("watchdog db unavailable; in-memory only")
     panel: dict = {
         "mac": mac.upper(),
         "volts": None,
