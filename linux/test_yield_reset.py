@@ -186,16 +186,27 @@ class YieldResetTest(unittest.TestCase):
     def test_collapsed_victron_out_does_not_pulse(self):
         """13:47 NZST 2026-09-12: out 16.7 V after a restart is a dead bus, not Voc sit."""
         p = ResetPolicy(local_mpp_hold_s=1)
-        st = ResetState()
+        st = ResetState(system_voltage_v=40.0)
         t0 = noon()
         end = fill(st, p, t0, [(392, 129.1, 16.7)] * 12)
         self.assertFalse(local_mpp_stuck(392, 129.1, 16.7, p, state=st, ts=end))
         self.assertFalse(should_pulse(st, end + 1, 392, p, panel_v=129.1, battery_v=16.7))
         self.assertIn("collapsed", pulse_why(392, 129.1, 16.7, p, end, 0, st))
 
+    def test_edef_40v_mode_band_is_30_to_52(self):
+        from mppt_ble.yield_reset import out_ceil_v, out_floor_v
+
+        p = ResetPolicy()
+        st = ResetState(system_voltage_v=40.0)
+        t0 = noon()
+        fill(st, p, t0, [(800, 150.0, 40.0)] * 12)
+        ts = t0 + 110
+        self.assertAlmostEqual(30.0, out_floor_v(st, ts, p), delta=0.05)
+        self.assertAlmostEqual(52.0, out_ceil_v(st, ts, p), delta=0.05)
+
     def test_local_mpp_skips_when_battery_full(self):
         p = ResetPolicy(local_mpp_hold_s=1)
-        st = ResetState()
+        st = ResetState(system_voltage_v=40.0)
         t0 = noon()
         fill(st, p, t0, [(180, 150.0, 54.0)] * 12)
         self.assertFalse(local_mpp_stuck(180, 150.0, 54.0, p, state=st, ts=t0 + 110))
@@ -235,7 +246,7 @@ class YieldResetTest(unittest.TestCase):
             "off_s": 4,
             "cooldown_s": 300,
             "local_mpp_panel_min_frac": 0.8,
-            "local_mpp_battery_min_v": 28,
+            "local_mpp_out_min_frac": 0.7,
         }
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "c.json"
@@ -245,7 +256,7 @@ class YieldResetTest(unittest.TestCase):
         self.assertEqual(4, p.off_s)
         self.assertEqual(300, p.cooldown_s)
         self.assertEqual(0.8, p.local_mpp_panel_min_frac)
-        self.assertEqual(28, p.local_mpp_battery_min_v)
+        self.assertEqual(0.7, p.local_mpp_out_min_frac)
 
     def test_repo_yield_config_rate_limits_and_gap_average(self):
         path = Path(__file__).resolve().parent / "yield_config.json"
@@ -257,7 +268,8 @@ class YieldResetTest(unittest.TestCase):
         self.assertEqual(8, p.local_mpp_gap_margin_v)
         self.assertEqual(0.85, p.local_mpp_clear_skip)
         self.assertEqual(0.85, p.local_mpp_panel_min_frac)
-        self.assertEqual(30, p.local_mpp_battery_min_v)
+        self.assertEqual(0.75, p.local_mpp_out_min_frac)
+        self.assertEqual(1.30, p.local_mpp_out_max_frac)
 
     def test_env_overrides_max_pulses_per_hour(self):
         path = Path(__file__).resolve().parent / "yield_config.json"

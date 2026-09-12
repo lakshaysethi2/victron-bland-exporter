@@ -178,7 +178,7 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
       tag("calc", "calc") + vocW + " Voc " + fmt(d.vocGap, 0, " V") + " = max panel − max out (" + fmt(th.maxPanel2h, 0, " V") + " − " + fmt(th.maxOut2h, 0, " V") + ")",
       tag("calc", "calc") + "Panel floor " + fmt(th.panelMinV, 0, " V") + " = " + frac + " × " + vocW + " max panel (frac hardcoded)",
       tag("calc", "calc") + "Envelope skip " + fmt(th.envelopeW, 0, " W") + " = " + skip + " × " + fmt(th.clearSkyW, 0, " W") + " this hour (frac + table hardcoded)",
-      tag("rule", "hardcoded") + "Out " + (th.outMinV != null ? th.outMinV : "—") + "–" + (th.outMaxV != null ? th.outMaxV : "—") + " V",
+      tag("calc", "calc") + "Out " + fmt(th.outMinV, 0, " V") + "–" + fmt(th.outMaxV, 0, " V") + " = " + (th.outMinFrac != null ? th.outMinFrac : "—") + "–" + (th.outMaxFrac != null ? th.outMaxFrac : "—") + " × " + (th.systemVoltageV != null ? ("0xEDEF " + fmt(th.systemVoltageV, 0, " V")) : (vocW + " max out " + fmt(th.maxOut2h, 0, " V"))),
       tag("rule", "hardcoded") + (th.maxPerHour != null ? th.maxPerHour : "—") + " / hour, " + secsLabel(th.cooldownS || 0) + " cooldown, hold " + (th.holdS != null ? th.holdS : "—") + " s",
       tag("rule", "hardcoded") + "Voc margin " + (th.gapMarginV != null ? th.gapMarginV : "—") + " V, min Voc gap " + (th.minDeltaV != null ? th.minDeltaV : "—") + " V"
     ];

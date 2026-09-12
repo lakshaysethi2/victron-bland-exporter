@@ -50,8 +50,9 @@ class ResetPolicy:
     # Panel floor is 2h max panel × this fraction (not a fixed 120 V).
     local_mpp_panel_min_frac: float = 0.85
     local_mpp_min_delta_v: float = 80.0
-    local_mpp_battery_min_v: float = 30.0
-    local_mpp_battery_max_v: float = 52.0
+    # Out band from 0xEDEF (or 2h max out): 0.75×bus … 1.30×bus. 40 V mode → 30–52 V.
+    local_mpp_out_min_frac: float = 0.75
+    local_mpp_out_max_frac: float = 1.30
     local_mpp_hold_s: float = 30.0
     local_mpp_gap_avg_s: float = 120.0
     local_mpp_extrema_s: float = 2 * 3600.0
@@ -80,6 +81,7 @@ class ResetState:
     samples: deque = field(default_factory=lambda: deque(maxlen=900))
     pulse_times: list[float] = field(default_factory=list)
     store: object | None = None
+    system_voltage_v: float | None = None
 
 
 def load_policy(path: str | None) -> ResetPolicy:
@@ -106,8 +108,8 @@ def load_policy(path: str | None) -> ResetPolicy:
         p.daytime_end = int(data["daytime_end_hour"]) * 60
     p.local_mpp_panel_min_frac = float(data.get("local_mpp_panel_min_frac", p.local_mpp_panel_min_frac))
     p.local_mpp_min_delta_v = float(data.get("local_mpp_min_delta_v", p.local_mpp_min_delta_v))
-    p.local_mpp_battery_min_v = float(data.get("local_mpp_battery_min_v", p.local_mpp_battery_min_v))
-    p.local_mpp_battery_max_v = float(data.get("local_mpp_battery_max_v", p.local_mpp_battery_max_v))
+    p.local_mpp_out_min_frac = float(data.get("local_mpp_out_min_frac", p.local_mpp_out_min_frac))
+    p.local_mpp_out_max_frac = float(data.get("local_mpp_out_max_frac", p.local_mpp_out_max_frac))
     p.local_mpp_hold_s = float(data.get("local_mpp_hold_s", p.local_mpp_hold_s))
     p.local_mpp_gap_avg_s = float(data.get("local_mpp_gap_avg_s", p.local_mpp_gap_avg_s))
     p.local_mpp_extrema_s = float(data.get("local_mpp_extrema_s", p.local_mpp_extrema_s))
@@ -259,6 +261,28 @@ def panel_floor_v(state: ResetState, ts: float, policy: ResetPolicy) -> float | 
     return max_pv * policy.local_mpp_panel_min_frac
 
 
+def out_bus_v(state: ResetState, ts: float, policy: ResetPolicy) -> float | None:
+    """Cascade bus class: 0xEDEF if read, else 2h max Victron-out."""
+    if state.system_voltage_v is not None:
+        return state.system_voltage_v
+    _, max_out, _ = extrema_2h(state, ts, policy)
+    return max_out
+
+
+def out_floor_v(state: ResetState, ts: float, policy: ResetPolicy) -> float | None:
+    bus = out_bus_v(state, ts, policy)
+    if bus is None:
+        return None
+    return bus * policy.local_mpp_out_min_frac
+
+
+def out_ceil_v(state: ResetState, ts: float, policy: ResetPolicy) -> float | None:
+    bus = out_bus_v(state, ts, policy)
+    if bus is None:
+        return None
+    return bus * policy.local_mpp_out_max_frac
+
+
 def rate_limit_why(state: ResetState, ts: float, policy: ResetPolicy) -> str | None:
     n = pulses_last_hour(state, ts)
     if n >= policy.local_mpp_max_per_hour:
@@ -307,10 +331,13 @@ def pulse_why(
         floor = panel_floor_v(state, ts, policy)
         if floor is not None and panel_v < floor:
             return f"panel {panel_v:.0f}V below {floor:.0f}V (2h max)"
-    if battery_v is not None and battery_v < policy.local_mpp_battery_min_v:
-        return f"output {battery_v:.0f}V collapsed"
-    if battery_v is not None and battery_v > policy.local_mpp_battery_max_v:
-        return f"output {battery_v:.0f}V already high"
+    if state is not None and battery_v is not None:
+        lo = out_floor_v(state, ts, policy)
+        hi = out_ceil_v(state, ts, policy)
+        if lo is not None and battery_v < lo:
+            return f"output {battery_v:.0f}V collapsed (< {lo:.0f}V)"
+        if hi is not None and battery_v > hi:
+            return f"output {battery_v:.0f}V already high (>{hi:.0f}V)"
     if watts is None:
         return "no watts yet"
     if state is not None:
@@ -353,10 +380,13 @@ def local_mpp_stuck(
         floor = panel_floor_v(state, ts, policy)
         if floor is not None and panel_v < floor:
             return False
-    if battery_v is not None and battery_v < policy.local_mpp_battery_min_v:
-        return False
-    if battery_v is not None and battery_v > policy.local_mpp_battery_max_v:
-        return False
+    if state is not None and ts is not None and battery_v is not None:
+        lo = out_floor_v(state, ts, policy)
+        hi = out_ceil_v(state, ts, policy)
+        if lo is not None and battery_v < lo:
+            return False
+        if hi is not None and battery_v > hi:
+            return False
     if state is None or ts is None:
         delta = voltage_delta(panel_v, battery_v)
         if delta is None or delta < policy.local_mpp_min_delta_v:

@@ -33,6 +33,9 @@ class RegisterRead:
     def panel_volts(self) -> float | None:
         return P.panel_voltage_of(self.values.get(P.REG_PANEL_VOLTAGE))
 
+    def system_volts(self) -> float | None:
+        return P.system_voltage_of(self.values.get(P.REG_BATTERY_VOLTAGE_SETTING))
+
 
 async def find_device(mac: str | None, timeout: float = 12.0) -> BLEDevice:
     if mac:
@@ -174,7 +177,10 @@ class MpptClient:
                 f"0xEDBB ack without value ({None if raw is None else raw.hex()})",
                 self.notifies,
             )
-        missing = [r for r in registers if r not in self.regs]
+        required = set(registers)
+        if P.REG_PANEL_VOLTAGE in required:
+            required = {P.REG_PANEL_VOLTAGE}
+        missing = [r for r in required if r not in self.regs]
         if missing:
             names = ",".join(f"0x{r:04X}" for r in missing)
             return RegisterRead(False, dict(self.regs), f"no readback for {names}", self.notifies)
@@ -212,4 +218,6 @@ async def read_registers(mac: str, registers: list[int]) -> RegisterRead:
 
 
 async def read_panel_voltage(mac: str) -> RegisterRead:
-    return await read_registers(mac, [P.REG_PANEL_VOLTAGE])
+    return await read_registers(
+        mac, [P.REG_PANEL_VOLTAGE, P.REG_BATTERY_VOLTAGE_SETTING]
+    )
