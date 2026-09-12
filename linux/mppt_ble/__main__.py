@@ -269,8 +269,10 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
 
     async def panel_poll() -> None:
         await asyncio.sleep(2)
+        fails = 0
         while True:
             started = time.time()
+            ok = False
             row = live.get(mac.upper())
             if row:
                 panel["model_id"] = row.get("model_id")
@@ -285,6 +287,8 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                     r = await client.read_panel_voltage(mac)
                     panel["last_poll_at"] = time.time()
                     if r.success:
+                        fails = 0
+                        ok = True
                         volts = r.panel_volts()
                         panel["volts"] = volts
                         panel["updated_at"] = time.time()
@@ -297,16 +301,25 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                         else:
                             log.info("panel voltage %.2f V", volts)
                     else:
+                        fails += 1
                         panel["last_error"] = r.message
-                        log.warning("panel voltage: %s", r.message)
+                        log.warning("panel voltage: %s (fail %s)", r.message, fails)
                 except Exception as e:
+                    fails += 1
                     panel["last_poll_at"] = time.time()
                     panel["last_error"] = str(e)
-                    log.warning("panel voltage poll failed: %s", e)
+                    log.warning("panel voltage poll failed: %s (fail %s)", e, fails)
                 finally:
                     scan_paused.clear()
-            wait = P.PANEL_POLL_S - (time.time() - started)
-            await asyncio.sleep(wait if wait > 0.2 else 0.2)
+            elapsed = time.time() - started
+            wait = P.panel_poll_sleep_s(ok, fails, elapsed)
+            if not ok and P.should_reset_adapter(fails):
+                try:
+                    await client.reset_bluetooth_adapter()
+                except Exception as e:
+                    log.warning("adapter reset failed: %s", e)
+                wait = 8.0
+            await asyncio.sleep(wait)
 
     async def require(request: web.Request) -> None:
         if not secret_ok(request.headers, expected):
@@ -343,6 +356,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         if not isinstance(watts, (int, float)):
             watts = None
         snap["panelVoltage"] = panel_v
+        snap["panelError"] = None if panel_v is not None else panel.get("last_error")
         snap["outputVoltage"] = battery_v
         snap["deltaVoltage"] = voltage_delta(panel_v, battery_v)
         snap["pulseCandidate"] = (

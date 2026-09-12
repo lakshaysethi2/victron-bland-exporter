@@ -96,11 +96,7 @@ class MpptClient:
         async with BleakClient(self.device, timeout=20.0) as client:
             log.info("connected %s", self.device.address)
             await asyncio.sleep(0.3)
-            for uuid in (P.CONTROL, P.SINGLE, P.BULK):
-                try:
-                    await client.start_notify(uuid, self._on_notify)
-                except Exception as e:
-                    log.debug("notify %s: %s", uuid[:8], e)
+            await self._subscribe(client)
             for uuid, payload in P.SAFE_INIT:
                 await self._write(client, uuid, payload)
             if on is not None:
@@ -124,6 +120,13 @@ class MpptClient:
             )
         return SessionResult(False, None, "no device-mode readback", self.notifies)
 
+    async def _subscribe(self, client: BleakClient, uuids: tuple[str, ...] | None = None) -> None:
+        for uuid in uuids or (P.CONTROL, P.SINGLE):
+            try:
+                await client.start_notify(uuid, self._on_notify)
+            except Exception as e:
+                log.warning("notify %s: %s", uuid[:8], e)
+
     async def _wait_regs(self, wanted: set[int], timeout_s: float) -> None:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
@@ -138,35 +141,54 @@ class MpptClient:
                 return
             await asyncio.sleep(0.05)
 
+    async def _wait_stream(self, timeout_s: float) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if P.stream_started(self.notifies):
+                return True
+            await asyncio.sleep(0.05)
+        return False
+
     async def read_regs(self, registers: list[int]) -> RegisterRead:
         wanted = set(registers)
         async with BleakClient(self.device, timeout=20.0) as client:
             log.info("connected %s", self.device.address)
             await asyncio.sleep(0.3)
-            for uuid in (P.CONTROL, P.SINGLE, P.BULK):
-                try:
-                    await client.start_notify(uuid, self._on_notify)
-                except Exception as e:
-                    log.debug("notify %s: %s", uuid[:8], e)
+            await self._subscribe(client)
             for uuid, payload in P.SAFE_INIT:
                 await self._write(client, uuid, payload)
             try:
                 await self._write(client, P.CONTROL, P.F980)
             except Exception as e:
                 log.debug("f980: %s", e)
+            stream_ok = True
             if P.REG_PANEL_VOLTAGE in wanted:
                 await self._write(client, P.SINGLE, P.STREAM_ENABLE)
-            for reg in registers:
-                await self._write(client, P.SINGLE, P.make_read(reg, 0x81, kind=0x03))
-            if P.REG_PANEL_VOLTAGE in wanted:
-                await self._wait_panel(2.5)
-            else:
-                await self._wait_regs(wanted, 2.0)
-            if P.REG_PANEL_VOLTAGE in wanted and not P.panel_payload_ok(
-                self.regs.get(P.REG_PANEL_VOLTAGE)
-            ):
-                await asyncio.sleep(0.4)
+                # BULK CCCD after STREAM_ENABLE: enabling it before f980 makes
+                # this unit flood empty 0x0027 notifies and saturates Intel ACL.
+                await self._subscribe(client, (P.BULK,))
+                stream_ok = await self._wait_stream(P.PANEL_STREAM_WAIT_S)
+                if not stream_ok:
+                    log.warning("STREAM_ENABLE produced no 08-frame")
+            if stream_ok:
+                for reg in registers:
+                    await self._write(client, P.SINGLE, P.make_read(reg, 0x81, kind=0x03))
+                if P.REG_PANEL_VOLTAGE in wanted:
+                    await self._wait_panel(2.5)
+                else:
+                    await self._wait_regs(wanted, 2.0)
+                if P.REG_PANEL_VOLTAGE in wanted and not P.panel_payload_ok(
+                    self.regs.get(P.REG_PANEL_VOLTAGE)
+                ):
+                    await asyncio.sleep(0.4)
 
+        if P.REG_PANEL_VOLTAGE in wanted and not P.stream_started(self.notifies):
+            return RegisterRead(
+                False,
+                dict(self.regs),
+                "STREAM_ENABLE produced no 08-frame (ACL/notify stall)",
+                self.notifies,
+            )
         if P.REG_PANEL_VOLTAGE in wanted and not P.panel_payload_ok(
             self.regs.get(P.REG_PANEL_VOLTAGE)
         ):
@@ -190,30 +212,91 @@ class MpptClient:
 async def set_mode(mac: str, on: bool) -> SessionResult:
     last = SessionResult(False, None, "no attempt", [])
     for attempt in range(2):
+        if attempt:
+            await _drop_acl(mac)
         device = await find_device(mac)
         last = await MpptClient(device).run(on=on)
         if last.success:
             if last.mode is None or P.mode_matches(last.mode, on):
+                await _drop_acl(mac)
                 return last
         log.warning("set_mode attempt %s: %s", attempt + 1, last.message)
-        await asyncio.sleep(0.6)
+        await _drop_acl(mac)
     return last
 
 
 async def read_mode(mac: str) -> SessionResult:
     device = await find_device(mac)
-    return await MpptClient(device).run(on=None)
+    try:
+        return await MpptClient(device).run(on=None)
+    finally:
+        await _drop_acl(mac)
+
+
+async def _drop_acl(mac: str) -> None:
+    """Ask BlueZ to drop a leftover SmartSolar ACL so the next connect is clean."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "bluetoothctl",
+            "disconnect",
+            mac,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except Exception:
+        pass
+    await asyncio.sleep(P.ACL_SETTLE_S)
+
+
+async def reset_bluetooth_adapter() -> None:
+    """USB-reset the Intel dongle if allowed, else bluetoothctl power cycle."""
+    log.warning("resetting bluetooth adapter after GATT stream stall")
+    usb = await asyncio.create_subprocess_exec(
+        "sudo",
+        "-n",
+        "usbreset",
+        "8087:0a2b",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        rc = await asyncio.wait_for(usb.wait(), timeout=8)
+    except Exception as e:
+        log.warning("usbreset: %s", e)
+        rc = 1
+    if rc == 0:
+        await asyncio.sleep(5.0)
+        return
+    for args in (("power", "off"), ("power", "on")):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "bluetoothctl",
+                *args,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=8)
+        except Exception as e:
+            log.warning("bluetoothctl %s: %s", " ".join(args), e)
+        await asyncio.sleep(2.0)
+    await asyncio.sleep(3.0)
 
 
 async def read_registers(mac: str, registers: list[int]) -> RegisterRead:
     last = RegisterRead(False, {}, "no attempt", [])
     for attempt in range(2):
+        if attempt:
+            await _drop_acl(mac)
         device = await find_device(mac)
         last = await MpptClient(device).read_regs(registers)
         if last.success:
+            await _drop_acl(mac)
             return last
         log.warning("read_registers attempt %s: %s", attempt + 1, last.message)
-        await asyncio.sleep(0.6)
+        await _drop_acl(mac)
+        if not P.stream_started(last.notifies):
+            break
     return last
 
 

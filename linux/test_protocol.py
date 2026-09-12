@@ -1,13 +1,19 @@
 import unittest
 
 from mppt_ble.protocol import (
+    ACL_SETTLE_S,
+    PANEL_ADAPTER_RESET_AFTER,
+    PANEL_POLL_BACKOFF_MAX_S,
     PANEL_POLL_S,
     REG_BATTERY_VOLTAGE_SETTING,
     REG_PANEL_VOLTAGE,
     make_read,
     panel_payload_ok,
+    panel_poll_sleep_s,
     panel_voltage_of,
     parse_register_stream,
+    should_reset_adapter,
+    stream_started,
     system_voltage_of,
 )
 
@@ -60,6 +66,26 @@ class PanelVoltageProtocolTest(unittest.TestCase):
         self.assertTrue(panel_payload_ok(bytes.fromhex("ffff")))
         self.assertIsNone(panel_voltage_of(None))
         self.assertIsNone(panel_voltage_of(b"\x00"))
+
+    def test_stream_started_ignores_control_ack(self):
+        self.assertFalse(stream_started(["f901"]))
+        self.assertFalse(stream_started([]))
+        self.assertTrue(stream_started(["f901", "08001893421027"]))
+        self.assertTrue(stream_started(["080319edbb425934"]))
+
+    def test_poll_sleep_backs_off_on_failure(self):
+        self.assertGreaterEqual(panel_poll_sleep_s(True, 0, 3.0), 6.0)
+        self.assertEqual(panel_poll_sleep_s(True, 0, 11.0), ACL_SETTLE_S)
+        self.assertGreaterEqual(panel_poll_sleep_s(False, 1, 5.0), 14.0)
+        self.assertGreaterEqual(panel_poll_sleep_s(False, 2, 5.0), 34.0)
+        self.assertLessEqual(panel_poll_sleep_s(False, 8, 0.0), PANEL_POLL_BACKOFF_MAX_S)
+        self.assertGreaterEqual(panel_poll_sleep_s(False, 8, 200.0), 1.0)
+
+    def test_adapter_reset_every_n_failures(self):
+        self.assertFalse(should_reset_adapter(0))
+        self.assertFalse(should_reset_adapter(PANEL_ADAPTER_RESET_AFTER - 1))
+        self.assertTrue(should_reset_adapter(PANEL_ADAPTER_RESET_AFTER))
+        self.assertTrue(should_reset_adapter(PANEL_ADAPTER_RESET_AFTER * 2))
 
 
 if __name__ == "__main__":

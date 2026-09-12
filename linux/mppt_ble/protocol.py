@@ -18,8 +18,12 @@ REG_BATTERY_VOLTAGE_SETTING = 0xEDEF
 REG_PANEL_VOLTAGE = 0xEDBB
 PANEL_NA = 0xFFFF
 PANEL_POLL_S = 10.0
-PANEL_POLL_BACKOFF_S = 10.0
+PANEL_POLL_BACKOFF_S = 20.0
+PANEL_POLL_BACKOFF_MAX_S = 120.0
 PANEL_FRESH_S = 30.0
+PANEL_STREAM_WAIT_S = 1.5
+ACL_SETTLE_S = 0.8
+PANEL_ADAPTER_RESET_AFTER = 6
 
 # This SmartSolar drops the link on 306b0002 fa80ff, and on f941 after a 06008218 blob.
 SAFE_INIT = [
@@ -136,6 +140,31 @@ def system_voltage_of(raw: bytes | None) -> float | None:
 def panel_payload_ok(raw: bytes | None) -> bool:
     """True when the device sent a 2-byte EDBB value (including night 0xFFFF)."""
     return raw is not None and len(raw) >= 2
+
+
+def notify_is_stream(hex_payload: str) -> bool:
+    """Type-03/00 value frames start 08; CONTROL f901 is not a stream."""
+    return (hex_payload or "").startswith("08")
+
+
+def stream_started(notifies: list[str] | None) -> bool:
+    return any(notify_is_stream(n) for n in (notifies or []))
+
+
+def panel_poll_sleep_s(ok: bool, fail_count: int, elapsed: float) -> float:
+    """Gap until the next GATT poll. Failures back off so a dead ACL is not hammered."""
+    if ok:
+        wait = PANEL_POLL_S - elapsed
+        return wait if wait > ACL_SETTLE_S else ACL_SETTLE_S
+    exp = max(0, int(fail_count) - 1)
+    backoff = min(PANEL_POLL_BACKOFF_MAX_S, PANEL_POLL_BACKOFF_S * (2**exp))
+    wait = backoff - elapsed
+    return wait if wait > 1.0 else 1.0
+
+
+def should_reset_adapter(fail_count: int) -> bool:
+    n = int(fail_count)
+    return n > 0 and n % PANEL_ADAPTER_RESET_AFTER == 0
 
 
 def charger_mode_of(values: dict[int, bytes]) -> int | None:
