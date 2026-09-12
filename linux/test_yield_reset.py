@@ -161,6 +161,16 @@ class YieldResetTest(unittest.TestCase):
         ingest(st, t0 + 2, 200, p)
         self.assertFalse(should_pulse(st, t0 + 40, 200, p, panel_v=None, battery_v=40.0))
 
+    def test_collapsed_victron_out_does_not_pulse(self):
+        """13:47 NZST 2026-09-12: out 16.7 V after a restart is a dead bus, not Voc sit."""
+        p = ResetPolicy(local_mpp_hold_s=1)
+        st = ResetState()
+        t0 = noon()
+        end = fill(st, p, t0, [(392, 129.1, 16.7)] * 12)
+        self.assertFalse(local_mpp_stuck(392, 129.1, 16.7, p, state=st, ts=end))
+        self.assertFalse(should_pulse(st, end + 1, 392, p, panel_v=129.1, battery_v=16.7))
+        self.assertIn("collapsed", pulse_why(392, 129.1, 16.7, p, end, 0, st))
+
     def test_local_mpp_skips_when_battery_full(self):
         p = ResetPolicy(local_mpp_hold_s=1)
         st = ResetState()
@@ -204,7 +214,7 @@ class YieldResetTest(unittest.TestCase):
             "off_s": 4,
             "cooldown_s": 300,
             "local_mpp_panel_min_v": 125,
-            "local_mpp_max_w": 350,
+            "local_mpp_battery_min_v": 28,
         }
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "c.json"
@@ -214,7 +224,7 @@ class YieldResetTest(unittest.TestCase):
         self.assertEqual(4, p.off_s)
         self.assertEqual(300, p.cooldown_s)
         self.assertEqual(125, p.local_mpp_panel_min_v)
-        self.assertEqual(350, p.local_mpp_max_w)
+        self.assertEqual(28, p.local_mpp_battery_min_v)
 
     def test_repo_yield_config_rate_limits_and_gap_average(self):
         path = Path(__file__).resolve().parent / "yield_config.json"
@@ -225,6 +235,7 @@ class YieldResetTest(unittest.TestCase):
         self.assertEqual(7200, p.local_mpp_extrema_s)
         self.assertEqual(8, p.local_mpp_gap_margin_v)
         self.assertEqual(0.85, p.local_mpp_clear_skip)
+        self.assertEqual(30, p.local_mpp_battery_min_v)
 
     def test_env_overrides_max_pulses_per_hour(self):
         path = Path(__file__).resolve().parent / "yield_config.json"

@@ -4,12 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 
-COOLDOWN_S = 300.0
 OFF_S = 4.0
-
-_last = 0.0
 
 
 def grafana_firing(body: dict | str) -> bool:
@@ -26,15 +22,6 @@ def wants_restart(body: dict | str) -> bool:
     if isinstance(body, dict) and str(body.get("action", "")).lower() == "restart":
         return True
     return grafana_firing(body)
-
-
-def cooldown_ok(now: float | None = None) -> bool:
-    global _last
-    ts = time.time() if now is None else now
-    if ts - _last < COOLDOWN_S:
-        return False
-    _last = ts
-    return True
 
 
 async def pulse(mac: str, off_s: float = OFF_S):
