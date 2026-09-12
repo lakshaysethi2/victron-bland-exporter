@@ -2,15 +2,22 @@ import unittest
 
 from mppt_ble.protocol import (
     PANEL_POLL_S,
+    REG_BATTERY_VOLTAGE_SETTING,
     REG_PANEL_VOLTAGE,
     make_read,
     panel_payload_ok,
     panel_voltage_of,
     parse_register_stream,
+    system_voltage_of,
 )
 
 
 class PanelVoltageProtocolTest(unittest.TestCase):
+    def test_edef_40v_mode(self):
+        self.assertEqual(0xEDEF, REG_BATTERY_VOLTAGE_SETTING)
+        self.assertEqual(40.0, system_voltage_of(b"\x28"))
+        self.assertIsNone(system_voltage_of(b"\x00"))
+
     def test_poll_at_least_every_10s(self):
         self.assertLessEqual(PANEL_POLL_S, 10.0)
 

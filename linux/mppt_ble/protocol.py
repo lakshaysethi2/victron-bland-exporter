@@ -13,6 +13,8 @@ MODE_OFF = 0x04
 MODE_OFF_LEGACY = 0x00
 
 # VE.Direct HEX: PV input voltage. Instant Readout does not carry this.
+# Battery system / "20V / 40V mode" (un8, V). Cascade bus class on this site.
+REG_BATTERY_VOLTAGE_SETTING = 0xEDEF
 REG_PANEL_VOLTAGE = 0xEDBB
 PANEL_NA = 0xFFFF
 PANEL_POLL_S = 10.0
@@ -119,6 +121,16 @@ def panel_voltage_of(raw: bytes | None) -> float | None:
     if centivolts == PANEL_NA:
         return None
     return centivolts / 100.0
+
+
+def system_voltage_of(raw: bytes | None) -> float | None:
+    """0xEDEF un8 volts (12/20/24/36/40/48)."""
+    if raw is None or len(raw) < 1:
+        return None
+    volts = raw[0]
+    if volts < 12 or volts > 96:
+        return None
+    return float(volts)
 
 
 def panel_payload_ok(raw: bytes | None) -> bool:
