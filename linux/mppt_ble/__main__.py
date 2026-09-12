@@ -15,11 +15,16 @@ from .node_metrics import fetch_node_metrics, node_exporter_url
 from .restart import pulse
 from .yield_reset import (
     ResetState,
+    avg_gap,
+    extrema_2h,
     ingest,
     load_policy,
     local_mpp_stuck,
+    note_pulse,
     pulse_why,
+    pulses_last_hour,
     should_pulse,
+    voc_gap,
     voltage_delta,
 )
 
@@ -207,13 +212,15 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             if not isinstance(watts, (int, float)):
                 continue
             ts = time.time()
-            ingest(reset_state, ts, float(watts), policy)
             sample = panel_sample(panel, ts)
             panel_v = sample[1] if sample else None
             battery_v = row.get("battery_voltage")
             if not isinstance(battery_v, (int, float)):
                 battery_v = None
-            candidate = local_mpp_stuck(float(watts), panel_v, battery_v, policy)
+            ingest(reset_state, ts, float(watts), policy, panel_v, battery_v)
+            candidate = local_mpp_stuck(
+                float(watts), panel_v, battery_v, policy, state=reset_state, ts=ts
+            )
             if ts - reset_state.last_status_log_at >= 30:
                 delta = voltage_delta(panel_v, battery_v)
                 log.info(
@@ -232,7 +239,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             reason = reset_state.pulse_reason or f"watchdog watts={watts:.0f}"
             r = await do_pulse(mac, reason)
             if r.success:
-                reset_state.last_pulse_at = time.time()
+                note_pulse(reset_state, time.time())
                 reset_state.below_since = None
 
     async def panel_poll() -> None:
@@ -311,7 +318,9 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         snap["outputVoltage"] = battery_v
         snap["deltaVoltage"] = voltage_delta(panel_v, battery_v)
         snap["pulseCandidate"] = (
-            local_mpp_stuck(float(watts), panel_v, battery_v, policy)
+            local_mpp_stuck(
+                float(watts), panel_v, battery_v, policy, state=reset_state, ts=now
+            )
             if watts is not None
             else False
         )
@@ -326,7 +335,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         snap["busy"] = control_busy
         snap["host"] = "linux"
         snap["pulseWhy"] = pulse_why(
-            watts, panel_v, battery_v, policy, now, reset_state.last_pulse_at
+            watts, panel_v, battery_v, policy, now, reset_state.last_pulse_at, reset_state
         )
         hold_left = 0
         if reset_state.local_mpp_since and snap["pulseCandidate"]:
@@ -335,10 +344,19 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                 hold_left = 0
         snap["holdRemainingS"] = hold_left
         snap["pulses"] = list(pulse_log)
+        max_pv, max_out, _ = extrema_2h(reset_state, now, policy)
+        snap["avgGap"] = avg_gap(reset_state, now, policy)
+        snap["vocGap"] = voc_gap(reset_state, now, policy)
+        snap["pulsesLastHour"] = pulses_last_hour(reset_state, now)
         snap["thresholds"] = {
             "panelMinV": policy.local_mpp_panel_min_v,
             "minDeltaV": policy.local_mpp_min_delta_v,
-            "maxW": policy.local_mpp_max_w,
+            "gapMarginV": policy.local_mpp_gap_margin_v,
+            "gapAvgS": policy.local_mpp_gap_avg_s,
+            "maxPerHour": policy.local_mpp_max_per_hour,
+            "cooldownS": policy.cooldown_s,
+            "maxPanel2h": max_pv,
+            "maxOut2h": max_out,
         }
         return web.json_response(snap)
 

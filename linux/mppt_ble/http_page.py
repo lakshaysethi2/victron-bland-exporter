@@ -76,7 +76,7 @@ def render_page(host: str) -> str:
   <button class="btn ghost" id="btnRead" type="button" disabled>Read charger</button>
   <div class="kicker" style="margin:16px 0 4px">Recent pulses</div>
   <ul class="hist" id="hist"><li>None yet this run</li></ul>
-  <p class="hint">Panel is GATT 0xEDBB (same as VictronConnect). Out is the bus into the next MPPT, not the cells. Auto-pulse when panel is high, gap is large, and watts are still low. Secret stays in this tab only.</p>
+  <p class="hint">Panel is GATT 0xEDBB (same as VictronConnect). Out is the bus into the next MPPT, not the cells. Auto-pulse when the 2 min average gap is near the 2h Voc gap and watts are below this hour’s envelope. At most two auto-pulses per hour (15 min apart). Secret stays in this tab only.</p>
 </div>
 <script>
 (function () {{
