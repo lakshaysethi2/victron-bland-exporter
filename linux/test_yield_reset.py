@@ -194,7 +194,7 @@ class YieldResetTest(unittest.TestCase):
         self.assertIn("collapsed", pulse_why(392, 129.1, 16.7, p, end, 0, st))
 
     def test_edef_40v_mode_band_is_30_to_52(self):
-        from mppt_ble.yield_reset import out_ceil_v, out_floor_v
+        from mppt_ble.yield_reset import gap_margin_v, min_voc_gap_v, out_ceil_v, out_floor_v
 
         p = ResetPolicy()
         st = ResetState(system_voltage_v=40.0)
@@ -203,6 +203,8 @@ class YieldResetTest(unittest.TestCase):
         ts = t0 + 110
         self.assertAlmostEqual(30.0, out_floor_v(st, ts, p), delta=0.05)
         self.assertAlmostEqual(52.0, out_ceil_v(st, ts, p), delta=0.05)
+        self.assertAlmostEqual(80.0, min_voc_gap_v(st, ts, p), delta=0.05)
+        self.assertAlmostEqual(7.7, gap_margin_v(st, ts, p), delta=0.2)
 
     def test_local_mpp_skips_when_battery_full(self):
         p = ResetPolicy(local_mpp_hold_s=1)
@@ -265,7 +267,8 @@ class YieldResetTest(unittest.TestCase):
         self.assertEqual(4, p.local_mpp_max_per_hour)
         self.assertEqual(120, p.local_mpp_gap_avg_s)
         self.assertEqual(7200, p.local_mpp_extrema_s)
-        self.assertEqual(8, p.local_mpp_gap_margin_v)
+        self.assertEqual(0.07, p.local_mpp_gap_margin_frac)
+        self.assertEqual(2.0, p.local_mpp_min_voc_bus_mult)
         self.assertEqual(0.85, p.local_mpp_clear_skip)
         self.assertEqual(0.85, p.local_mpp_panel_min_frac)
         self.assertEqual(0.75, p.local_mpp_out_min_frac)
