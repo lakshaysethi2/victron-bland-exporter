@@ -7,6 +7,8 @@ It uses BlueZ (via [bleak](https://github.com/hbldh/bleak)).
 
 Do **not** put site hostnames, tunnel tokens, remote secrets, Bluetooth PINs, or device MACs in git. Those live in `~/.config/mppt/` (see `secrets.env.example`).
 
+If this laptop dies: **[Disaster recovery](../docs/disaster-recovery.md)** — git-backed vs laptop-only, ordered restore for https://mppt.lak.nz.
+
 ## Why this exists
 
 Instant Readout advertisements are read-only. Charger on/off is a GATT write to register `0x0200` on service `306b0001-…`. Some extra handshake frames (`fa80ff` on `306b0002`, long `06008218…` blobs) make this MPPT drop the link.
