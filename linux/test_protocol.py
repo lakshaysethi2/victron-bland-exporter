@@ -40,6 +40,13 @@ class PanelVoltageProtocolTest(unittest.TestCase):
         self.assertAlmostEqual(222.00, panel_voltage_of(parsed[0xEDBB]), delta=0.001)
         self.assertTrue(panel_payload_ok(parsed[0xEDBB]))
 
+    def test_live_hq2531_152v_from_control_read_session(self):
+        """09:11 NZST 2026-09-13: 08 03 19 edbb 42 a0 3b after CONTROL read."""
+        parsed, leftover = parse_register_stream(bytes.fromhex("080319edbb42a03b"))
+        self.assertEqual(b"", leftover)
+        self.assertAlmostEqual(152.64, panel_voltage_of(parsed[0xEDBB]), delta=0.001)
+        self.assertTrue(panel_payload_ok(parsed[0xEDBB]))
+
     def test_live_hq2531_118v(self):
         parsed, leftover = parse_register_stream(bytes.fromhex("080319edbb422f2e"))
         self.assertEqual(b"", leftover)

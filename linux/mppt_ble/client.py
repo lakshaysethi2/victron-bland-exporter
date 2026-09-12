@@ -161,8 +161,19 @@ class MpptClient:
                 await self._write(client, P.CONTROL, P.F980)
             except Exception as e:
                 log.debug("f980: %s", e)
+            # Read CONTROL after f980: BlueZ otherwise swallows the 029f wake
+            # and never delivers 08 03 19 edbb (13 Sep 09:11 exclusive session).
+            try:
+                raw = await client.read_gatt_char(P.CONTROL)
+                log.info("control read after f980 %s", bytes(raw).hex())
+            except Exception as e:
+                log.debug("control read after f980: %s", e)
             if P.REG_PANEL_VOLTAGE in wanted:
                 await self._write(client, P.SINGLE, P.STREAM_ENABLE)
+                try:
+                    await client.read_gatt_char(P.CONTROL)
+                except Exception as e:
+                    log.debug("control read after stream: %s", e)
                 await self._subscribe(client, (P.BULK,))
             for reg in registers:
                 await self._write(client, P.SINGLE, P.make_read(reg, 0x81, kind=0x03))
