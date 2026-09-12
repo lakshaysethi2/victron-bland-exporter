@@ -22,6 +22,13 @@ class HttpPageTest(unittest.TestCase):
         self.assertIn("2h Voc", html)
         self.assertIn("avgGap", html)
         self.assertIn("vocGap", html)
+        self.assertIn("tag live", html)
+        self.assertIn("tag calc", html)
+        self.assertIn("tag rule", html)
+        self.assertIn("hardcoded", html)
+        self.assertIn('id="rules"', html)
+        self.assertIn("envelopeW", html)
+        self.assertIn("panelMinV", html)
 
     def test_max_per_hour_in_hint(self):
         html = render_page("mppt.lak.nz", max_per_hour=6)
