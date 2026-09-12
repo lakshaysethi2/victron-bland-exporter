@@ -48,7 +48,7 @@ class ResetPolicy:
     local_mpp_panel_min_v: float = 120.0
     local_mpp_min_delta_v: float = 80.0
     local_mpp_battery_max_v: float = 52.0
-    local_mpp_max_w: float = 800.0
+    local_mpp_max_w: float = 1500.0
     local_mpp_hold_s: float = 30.0
     # False = only pulse from panel-voltage conditions (no watt-drop / shade-floor pulses).
     watt_only_pulses: bool = False
@@ -177,7 +177,7 @@ def pulse_why(
     if watts is None:
         return "no watts yet"
     if watts >= policy.local_mpp_max_w:
-        return f"{watts:.0f}W already high"
+        return f"{watts:.0f}W ≥ {policy.local_mpp_max_w:.0f}W skip"
     return "ready"
 
 
