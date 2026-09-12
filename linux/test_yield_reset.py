@@ -16,6 +16,7 @@ from mppt_ble.yield_reset import (
     load_policy,
     local_mpp_stuck,
     note_pulse,
+    panel_floor_v,
     pulse_why,
     should_pulse,
     voltage_delta,
@@ -150,8 +151,22 @@ class YieldResetTest(unittest.TestCase):
         p = ResetPolicy(local_mpp_hold_s=1)
         st = ResetState()
         t0 = noon()
-        fill(st, p, t0, [(180, 90.0, 40.0)] * 12)
-        self.assertFalse(should_pulse(st, t0 + 120, 180, p, panel_v=90.0, battery_v=40.0))
+        fill(st, p, t0, [(800, 150.0, 40.0)] * 12)
+        t1 = t0 + 120
+        end = fill(st, p, t1, [(180, 90.0, 40.0)] * 12)
+        self.assertAlmostEqual(127.5, panel_floor_v(st, end, p), delta=0.1)
+        self.assertFalse(local_mpp_stuck(180, 90.0, 40.0, p, state=st, ts=end))
+        self.assertFalse(should_pulse(st, end + 1, 180, p, panel_v=90.0, battery_v=40.0))
+        self.assertIn("below", pulse_why(180, 90.0, 40.0, p, end, 0, st))
+
+    def test_mpp_panel_stays_above_runtime_floor(self):
+        p = ResetPolicy(local_mpp_hold_s=1)
+        st = ResetState()
+        t0 = noon()
+        fill(st, p, t0, [(900, 151.0, 40.0)] * 6 + [(800, 144.0, 40.0)] * 6)
+        ts = t0 + 110
+        self.assertGreaterEqual(144.0, panel_floor_v(st, ts, p))
+        self.assertTrue(local_mpp_stuck(800, 144.0, 40.0, p, state=st, ts=ts))
 
     def test_no_panel_voltage_does_not_pulse_blindly(self):
         p = ResetPolicy(hold_s=1, min_peak_w=50)
@@ -187,7 +202,6 @@ class YieldResetTest(unittest.TestCase):
         ts = t0 + 110
         self.assertEqual("ready", pulse_why(180, 150.0, 40.0, p, ts, 0, st))
         self.assertIn("waiting", pulse_why(180, None, 40.0, p, ts, 0))
-        self.assertIn("below", pulse_why(180, 90.0, 40.0, p, ts, 0))
         self.assertIn("envelope", pulse_why(1716, 147.7, 40.0, p, ts, 0, st))
 
     def test_rate_limit_two_per_hour_and_15m_cooldown(self):
@@ -213,7 +227,7 @@ class YieldResetTest(unittest.TestCase):
             "partly_cloudy_factor": 0.6,
             "off_s": 4,
             "cooldown_s": 300,
-            "local_mpp_panel_min_v": 125,
+            "local_mpp_panel_min_frac": 0.8,
             "local_mpp_battery_min_v": 28,
         }
         with tempfile.TemporaryDirectory() as d:
@@ -223,7 +237,7 @@ class YieldResetTest(unittest.TestCase):
         self.assertEqual(1600, p.clear_sky[12])
         self.assertEqual(4, p.off_s)
         self.assertEqual(300, p.cooldown_s)
-        self.assertEqual(125, p.local_mpp_panel_min_v)
+        self.assertEqual(0.8, p.local_mpp_panel_min_frac)
         self.assertEqual(28, p.local_mpp_battery_min_v)
 
     def test_repo_yield_config_rate_limits_and_gap_average(self):
@@ -235,6 +249,7 @@ class YieldResetTest(unittest.TestCase):
         self.assertEqual(7200, p.local_mpp_extrema_s)
         self.assertEqual(8, p.local_mpp_gap_margin_v)
         self.assertEqual(0.85, p.local_mpp_clear_skip)
+        self.assertEqual(0.85, p.local_mpp_panel_min_frac)
         self.assertEqual(30, p.local_mpp_battery_min_v)
 
     def test_env_overrides_max_pulses_per_hour(self):
