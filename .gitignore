@@ -33,6 +33,20 @@ cloudflared-token.txt
 # Local orchestrator / agent run state
 .gnhf/
 
+# Python (linux/ mppt_ble)
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Local secrets / watchdog db (never commit)
+secrets.env
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
 # Misc
 .DS_Store
 *.swp
