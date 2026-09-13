@@ -38,6 +38,26 @@ object ChargerSchedule {
 
     fun isValidTime(hhmm: String): Boolean = parseMinutes(hhmm) != null
 
+    /**
+     * "06:45" -> "6:45 AM", "17:30" -> "5:30 PM". The window is stored and
+     * posted as 24-hour HH:mm, but people read a schedule in 12-hour form
+     * (issue #67 asks for "6:45 am" / "5:30 pm"), so the UI and the remote
+     * status payload render this instead of guessing in JavaScript.
+     * Malformed input is returned unchanged rather than throwing.
+     */
+    fun humanTime(hhmm: String?): String {
+        val minutes = parseMinutes(hhmm) ?: return hhmm ?: ""
+        val hour = minutes / 60
+        val minute = minutes % 60
+        val suffix = if (hour < 12) "AM" else "PM"
+        val display = if (hour % 12 == 0) 12 else hour % 12
+        return "%d:%02d %s".format(display, minute, suffix)
+    }
+
+    /** "ON 6:45 AM -> OFF 5:30 PM daily": one line the UI and the page share. */
+    fun windowSummary(enableTime: String?, disableTime: String?): String =
+        "ON %s \u2192 OFF %s daily".format(humanTime(enableTime), humanTime(disableTime))
+
     /** True when the charger should be ON at the given minute-of-day. */
     fun isInWindow(nowMinutes: Int, enableMinutes: Int, disableMinutes: Int): Boolean {
         if (enableMinutes == disableMinutes) return true // degenerate: 24 h window

@@ -40,8 +40,13 @@ class RemoteChargerHttpServerTest {
 
     private class FakeSink : ChargerCommandSender {
         val calls = mutableListOf<Pair<Boolean, String>>()
-        override fun sendChargerCommand(enable: Boolean, mac: String) {
+
+        /** Flip to false to simulate a command the service could not dispatch. */
+        var succeed = true
+
+        override fun sendChargerCommand(enable: Boolean, mac: String): Boolean {
             calls.add(enable to mac)
+            return succeed
         }
     }
 

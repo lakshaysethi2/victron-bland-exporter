@@ -38,6 +38,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.lakshaysethi.victronbleexporter.charger.ChargerSchedule
 import com.lakshaysethi.victronbleexporter.charger.ExporterKeepAliveAlarm
 import com.lakshaysethi.victronbleexporter.data.DeviceRepository
 import com.lakshaysethi.victronbleexporter.data.RemoteChargerStore
@@ -1336,9 +1337,9 @@ fun VictronBleExporterScreen(
                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("Daily schedule", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Text("Automatic ON / OFF", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                         Text(
-                            "Charger ON from enable time, OFF from disable time.",
+                            "Turn the charger on and off at set times every day.",
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
@@ -1348,8 +1349,8 @@ fun VictronBleExporterScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     TimePickerButton(
                         current = enableTime,
-                        defaultHour = 8,
-                        defaultMinute = 30,
+                        defaultHour = 7,
+                        defaultMinute = 45,
                         onPicked = { enableTime = it },
                         modifier = Modifier.weight(1f)
                     ) { Text("ON at $it") }
@@ -1361,13 +1362,36 @@ fun VictronBleExporterScreen(
                         modifier = Modifier.weight(1f)
                     ) { Text("OFF at $it") }
                 }
+                // Say what the two times actually mean, in the words issue #67
+                // uses ("on at 6:45 am, off at 5:30 pm") rather than as a pair of
+                // opaque 24-hour strings. Recomputed on recomposition, which the
+                // status poll below drives.
+                val enMinutes = ChargerSchedule.parseMinutes(enableTime)
+                val disMinutes = ChargerSchedule.parseMinutes(disableTime)
+                if (enMinutes != null && disMinutes != null) {
+                    val nowMinutes = java.util.Calendar.getInstance().let {
+                        it.get(java.util.Calendar.HOUR_OF_DAY) * 60 + it.get(java.util.Calendar.MINUTE)
+                    }
+                    val wantsOn = ChargerSchedule.isInWindow(nowMinutes, enMinutes, disMinutes)
+                    val nextEdge = ChargerSchedule.humanTime(
+                        ChargerSchedule.formatMinutes(ChargerSchedule.nextTransition(nowMinutes, enMinutes, disMinutes))
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        ChargerSchedule.windowSummary(enableTime, disableTime) +
+                            " \u00b7 charger " + (if (wantsOn) "ON" else "OFF") + " now" +
+                            " \u00b7 next change " + (if (wantsOn) "OFF" else "ON") + " at " + nextEdge,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 Button(
                     onClick = { onChargerScheduleSave(chargerMac, scheduleEnabled, enableTime, disableTime) },
                     modifier = Modifier.fillMaxWidth(),
                     enabled = chargerMac.isNotBlank() &&
-                        com.lakshaysethi.victronbleexporter.charger.ChargerSchedule.isValidTime(enableTime) &&
-                        com.lakshaysethi.victronbleexporter.charger.ChargerSchedule.isValidTime(disableTime)
+                        ChargerSchedule.isValidTime(enableTime) &&
+                        ChargerSchedule.isValidTime(disableTime)
                 ) {
                     Text("Save Schedule")
                 }

@@ -93,6 +93,12 @@ class VictronBleExporterService : Service() {
                     nextTransition = ChargerSchedule.formatMinutes(
                         ChargerSchedule.nextTransition(minutes, s.enableMinutes, s.disableMinutes),
                     ),
+                    // Epoch of that edge, so the remote page can count down between polls.
+                    nextTransitionAt = ChargerSchedule.nextTransitionEpoch(
+                        System.currentTimeMillis(),
+                        s.enableMinutes,
+                        s.disableMinutes,
+                    ),
                     exactAlarm = ChargerScheduleAlarm.canExact(this),
                     batteryIgnored = ExporterKeepAliveAlarm.ignoringBatteryOptimizations(this),
                     live = LiveReadout.fromFreshMetrics(),
@@ -105,6 +111,9 @@ class VictronBleExporterService : Service() {
             },
             macProvider = { AppState.chargerMac ?: chargerScheduleStore.load().chargerMac.ifBlank { null } },
             commandSender = ChargerCommandSender { enable, mac ->
+                // Returns false when the intent could not be dispatched, so the
+                // HTTP layer answers 503 instead of reporting a flip that never
+                // reached the service (issue #26).
                 try {
                     val intent = Intent(this, VictronBleExporterService::class.java).apply {
                         action = "CHARGER_SET"
@@ -113,8 +122,10 @@ class VictronBleExporterService : Service() {
                     }
                     startForegroundService(intent)
                     Log.i(TAG, "Remote charger command: ${if (enable) "ENABLE" else "DISABLE"} for $mac")
+                    true
                 } catch (e: Exception) {
                     Log.e(TAG, "Remote charger command could not be sent", e)
+                    false
                 }
             },
             scheduleSender = ScheduleCommandSender { enabled, enableTime, disableTime, mac ->

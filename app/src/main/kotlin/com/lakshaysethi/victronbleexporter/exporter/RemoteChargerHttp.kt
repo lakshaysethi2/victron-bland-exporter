@@ -134,7 +134,15 @@ class RemoteChargerHttp(
             )
         }
         val enable = action == "on"
-        commandSender.sendChargerCommand(enable, mac)
+        if (!commandSender.sendChargerCommand(enable, mac)) {
+            // A command that never reached the service must not look accepted,
+            // otherwise the page reports success and the charger never moves.
+            return HttpResult(
+                statusCode = 503,
+                mimeType = MIME_JSON,
+                body = "{\"error\":\"command could not be sent \u2014 service unavailable\"}\n",
+            )
+        }
         return HttpResult(
             statusCode = 202,
             mimeType = MIME_JSON,
@@ -366,9 +374,9 @@ internal object RemoteChargerAuth {
     }
 }
 
-/** Sends a charger flip command. Production: CHARGER_SET intent to the service. */
+/** Sends a charger flip command. Returns false if the command could not be dispatched. */
 fun interface ChargerCommandSender {
-    fun sendChargerCommand(enable: Boolean, mac: String)
+    fun sendChargerCommand(enable: Boolean, mac: String): Boolean
 }
 
 /** Reads charger mode over GATT. Production: CHARGER_READ intent to the service. */
@@ -496,6 +504,8 @@ data class ChargerStatusSnapshot(
     val phoneZone: String = "",
     val scheduleWantsOn: Boolean = false,
     val nextTransition: String = "",
+    /** Epoch millis of [nextTransition], so the page can count down between polls. */
+    val nextTransitionAt: Long = 0L,
     val tunnelStatus: String = "",
     val tunnelUrl: String? = null,
     val tunnelHasToken: Boolean = false,
@@ -529,10 +539,15 @@ data class ChargerStatusSnapshot(
         append(",\"scheduleEnabled\":").append(scheduleEnabled)
         append(",\"enableTime\":\"${RemoteChargerHttpJson.escape(enableTime)}\"")
         append(",\"disableTime\":\"${RemoteChargerHttpJson.escape(disableTime)}\"")
+        // 12-hour renderings, so the page and the app show "6:45 AM" identically.
+        append(",\"enableTimeText\":\"${RemoteChargerHttpJson.escape(ChargerSchedule.humanTime(enableTime))}\"")
+        append(",\"disableTimeText\":\"${RemoteChargerHttpJson.escape(ChargerSchedule.humanTime(disableTime))}\"")
         append(",\"phoneTime\":\"${RemoteChargerHttpJson.escape(phoneTime)}\"")
         append(",\"phoneZone\":\"${RemoteChargerHttpJson.escape(phoneZone)}\"")
         append(",\"scheduleWantsOn\":").append(scheduleWantsOn)
         append(",\"nextTransition\":\"${RemoteChargerHttpJson.escape(nextTransition)}\"")
+        append(",\"nextTransitionText\":\"${RemoteChargerHttpJson.escape(ChargerSchedule.humanTime(nextTransition))}\"")
+        append(",\"nextTransitionAt\":").append(nextTransitionAt)
         append(",\"tunnelStatus\":\"${RemoteChargerHttpJson.escape(tunnelStatus)}\"")
         append(",\"tunnelHasToken\":").append(tunnelHasToken)
         append(",\"tunnelUrl\":").append(
@@ -597,15 +612,18 @@ data class ChargerStatusSnapshot(
 
 /** JSON string escaping shared by the handler and the status snapshot. */
 internal object RemoteChargerHttpJson {
+    /** Escape a string per RFC 8259: quote, backslash, and all control chars U+0000..U+001F. */
     fun escape(s: String): String = buildString {
         for (c in s) {
             when (c) {
                 '\\' -> append("\\\\")
                 '"' -> append("\\\"")
-                '\n' -> append("\\n")
-                '\r' -> append("\\r")
+                '\b' -> append("\\b")
                 '\t' -> append("\\t")
-                else -> append(c)
+                '\n' -> append("\\n")
+                '\u000C' -> append("\\f")
+                '\r' -> append("\\r")
+                else -> if (c.code < 0x20) append("\\u").append(c.code.toString(16).padStart(4, '0')) else append(c)
             }
         }
     }
@@ -707,10 +725,18 @@ private val CONTROL_PAGE: String = """
   .btn.on { background: #22c55e; }
   .btn.off { background: #ef4444; }
   .btn.small { background: #24344d; color: #e6edf7; font-weight: 600; padding: 12px; font-size: 15px; }
-  input[type=password], input[type=text] { width: 100%; padding: 14px; border-radius: 12px; border: 1px solid #24344d; background: #0d1626; color: #e6edf7; font-size: 16px; margin-bottom: 10px; }
+  input[type=password], input[type=text], input[type=time] { width: 100%; padding: 14px; border-radius: 12px; border: 1px solid #24344d; background: #0d1626; color: #e6edf7; font-size: 16px; margin-bottom: 10px; }
   .row { display: flex; gap: 8px; }
   .err { color: #f87171; font-size: 13px; margin: 8px 0; min-height: 18px; }
   .hint { color: #8fa3bf; font-size: 12px; line-height: 1.5; }
+  .schedbox { background: #0d1626; border: 1px solid #24344d; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  .schedbox.wantson { border-color: #22c55e; }
+  .schedsum { font-size: 15px; font-weight: 700; margin-bottom: 2px; }
+  .schednext { font-size: 12px; color: #8fa3bf; line-height: 1.45; margin-bottom: 10px; }
+  .chk { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .chk input { width: 18px; height: 18px; margin: 0; }
+  .fld { flex: 1; min-width: 0; }
+  .fld span { display: block; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: #8fa3bf; margin-bottom: 4px; }
   @keyframes pulse { 50% { opacity: .4; } }
 </style>
 </head>
@@ -745,11 +771,18 @@ private val CONTROL_PAGE: String = """
   <button class="btn off" id="btnOff" disabled>DISABLE CHARGER</button>
   <button class="btn small" id="btnRead" disabled>Read state</button>
   <button class="btn small" id="btnScan" disabled>Restart BLE scan</button>
-  <div class="sub" style="margin:14px 0 8px">Daily schedule (phone clock below)</div>
-  <label class="hint"><input type="checkbox" id="schedOn"> Enforce window</label>
-  <div class="row"><input type="text" id="enTime" placeholder="ON 07:45" inputmode="numeric"><input type="text" id="disTime" placeholder="OFF 18:00" inputmode="numeric"></div>
-  <button class="btn small" id="btnSched" disabled>Save schedule</button>
-  <button class="btn small" id="btnResume" disabled>Resume schedule</button>
+  <div class="sub" style="margin:16px 0 8px">Automatic ON / OFF</div>
+  <div class="schedbox" id="schedBox">
+    <div class="schedsum" id="schedSum">Unlock to load the window.</div>
+    <div class="schednext" id="schedNext"></div>
+    <label class="hint chk" for="schedOn"><input type="checkbox" id="schedOn"> Enforce this window every day</label>
+    <div class="row">
+      <label class="fld" for="enTime"><span>Turn ON at</span><input type="time" id="enTime" step="60"></label>
+      <label class="fld" for="disTime"><span>Turn OFF at</span><input type="time" id="disTime" step="60"></label>
+    </div>
+    <button class="btn small" id="btnSched" disabled>Save window</button>
+    <button class="btn small" id="btnResume" disabled>Resume window</button>
+  </div>
   <div class="sub" style="margin:14px 0 8px">Instant Readout key (VictronConnect → Product info)</div>
   <input type="text" id="keyMac" placeholder="MAC AA:BB:..." autocapitalize="characters" autocomplete="off" spellcheck="false">
   <input type="password" id="keyHex" placeholder="32-char hex key" autocomplete="off" spellcheck="false">
@@ -769,6 +802,7 @@ private val CONTROL_PAGE: String = """
   var secret = null;
   var selectedMac = null;
   var schedFilled = false;
+  var lastData = null;
   try { secret = sessionStorage.getItem(KEY); } catch (e) {}
   var dot = document.getElementById("dot"), state = document.getElementById("state"),
       meta = document.getElementById("meta"), err = document.getElementById("err"),
@@ -789,6 +823,9 @@ private val CONTROL_PAGE: String = """
       schedOn = document.getElementById("schedOn"),
       enTime = document.getElementById("enTime"),
       disTime = document.getElementById("disTime"),
+      schedBox = document.getElementById("schedBox"),
+      schedSum = document.getElementById("schedSum"),
+      schedNext = document.getElementById("schedNext"),
       secretInput = document.getElementById("secret");
   function setErr(t) { err.textContent = t || ""; }
   function setBusy(b) { btnOn.disabled = b; btnOff.disabled = b; btnRead.disabled = b; btnScan.disabled = b; btnSched.disabled = b; btnResume.disabled = b; btnKey.disabled = b; btnTunSave.disabled = b; btnTunStart.disabled = b; btnTunStop.disabled = b; if (b) { dot.className = "dot busy"; } }
@@ -799,11 +836,64 @@ private val CONTROL_PAGE: String = """
       if (r.status === 401) {
         secret = null;
         try { sessionStorage.removeItem(KEY); } catch (e) {}
-        setErr("Wrong secret &mdash; enter it again.");
+        setErr("Wrong secret \u2014 enter it again.");
         setBusy(true);
       }
       return r;
     });
+  }
+  function countdown(ms) {
+    var s = Math.max(0, Math.floor(ms / 1000));
+    if (s < 60) return "in under a minute";
+    var mins = Math.floor(s / 60), h = Math.floor(mins / 60), m = mins % 60;
+    if (h && m) return "in " + h + "h " + m + "m";
+    if (h) return "in " + h + "h";
+    return "in " + m + "m";
+  }
+  // Issue #67: say plainly what the window will do, and when. Server-rendered
+  // text is painted with textContent so nothing here can inject markup.
+  function paintSchedule(data) {
+    lastData = data;
+    if (!data || typeof data.scheduleEnabled !== "boolean") {
+      schedBox.className = "schedbox";
+      schedSum.textContent = "This build has no automatic ON/OFF window.";
+      schedNext.textContent = "";
+      return;
+    }
+    schedBox.className = "schedbox" + (data.scheduleEnabled && data.scheduleWantsOn ? " wantson" : "");
+    if (data.scheduleEnabled) {
+      schedSum.textContent = "ON " + (data.enableTimeText || data.enableTime) +
+        " \u2192 OFF " + (data.disableTimeText || data.disableTime) + " daily";
+    } else {
+      schedSum.textContent = "Automatic ON/OFF is switched off";
+    }
+    if (!schedFilled) {
+      schedOn.checked = data.scheduleEnabled;
+      if (data.enableTime) enTime.value = data.enableTime;
+      if (data.disableTime) disTime.value = data.disableTime;
+      schedFilled = true;
+    }
+    tickSchedule();
+  }
+  function tickSchedule() {
+    var data = lastData;
+    if (!data || typeof data.scheduleEnabled !== "boolean") return;
+    if (!data.scheduleEnabled) {
+      schedNext.textContent = "Hand control only \u2014 nothing changes the charger on a timer.";
+      return;
+    }
+    if (data.overrideUntilText) {
+      schedNext.textContent = "Paused by a manual ON/OFF until " + data.overrideUntilText +
+        " \u00b7 Resume window hands control back now.";
+      return;
+    }
+    var edge = data.scheduleWantsOn ? "OFF" : "ON";
+    var edgeAt = data.nextTransitionText || data.nextTransition || "";
+    var whenText = edgeAt ? (edge + " at " + edgeAt) : edge;
+    var left = data.nextTransitionAt ? countdown(data.nextTransitionAt - Date.now()) : "";
+    schedNext.textContent = (data.scheduleWantsOn ? "Charger should be ON now. " : "Charger should be OFF now. ") +
+      "Next change: " + whenText + (left ? (" \u00b7 " + left) : "") +
+      (data.phoneTime ? (" \u00b7 phone " + data.phoneTime + (data.phoneZone ? (" " + data.phoneZone) : "")) : "");
   }
   function renderStatus(data) {
     if (data.mode === "ON") { dot.className = "dot on"; state.textContent = "ON"; }
@@ -814,12 +904,11 @@ private val CONTROL_PAGE: String = """
     if (data.lastAction) parts.push(data.lastAction);
     if (data.lastError) parts.push(data.lastError);
     if (data.scheduleEnabled) {
-      parts.push("schedule " + (data.enableTime || "?") + "-" + (data.disableTime || "?"));
       parts.push("window " + (data.scheduleWantsOn ? "ON" : "OFF") + (data.nextTransition ? " until " + data.nextTransition : ""));
-      parts.push(data.exactAlarm ? "exact alarm" : "inexact alarm (may miss 07:45/18:00)");
+      parts.push(data.exactAlarm ? "exact alarm" : ("inexact alarm (may miss " + (data.enableTime || "?") + "/" + (data.disableTime || "?") + ")"));
     }
     parts.push(data.batteryIgnored ? "battery unrestricted" : "battery restricted (OEM may kill overnight)");
-    if (data.overrideUntilText) parts.push("manual override until " + data.overrideUntilText + " (Resume schedule to hand back to the window)");
+    if (data.overrideUntilText) parts.push("manual override until " + data.overrideUntilText + " (Resume window to hand back to the schedule)");
     if (data.phoneTime) parts.push("phone " + data.phoneTime + (data.phoneZone ? " " + data.phoneZone : ""));
     if (data.tunnelStatus) parts.push("tunnel " + data.tunnelStatus);
     if (data.tunnelUrl) parts.push(data.tunnelUrl);
@@ -840,12 +929,7 @@ private val CONTROL_PAGE: String = """
     }
     if (selectedMac || data.mac) parts.push("target " + (selectedMac || data.mac));
     meta.textContent = parts.join(" \u00b7 ");
-    if (!schedFilled) {
-      if (typeof data.scheduleEnabled === "boolean") schedOn.checked = data.scheduleEnabled;
-      if (data.enableTime) enTime.value = data.enableTime;
-      if (data.disableTime) disTime.value = data.disableTime;
-      schedFilled = true;
-    }
+    paintSchedule(data);
     var liveBox = document.getElementById("live");
     var liveMap = {};
     (data.live || []).forEach(function (d) { liveMap[d.mac] = d; });
@@ -923,8 +1007,10 @@ private val CONTROL_PAGE: String = """
   secretInput.addEventListener("keydown", function (ev) { if (ev.key === "Enter") unlock(); });
   function saveSched() {
     if (!secret) return;
+    var on = enTime.value.trim(), off = disTime.value.trim();
+    if (!on || !off) { setErr("Pick both an ON and an OFF time."); return; }
     setBusy(true); setErr("");
-    var payload = { enabled: schedOn.checked, enable: enTime.value.trim(), disable: disTime.value.trim() };
+    var payload = { enabled: schedOn.checked, enable: on, disable: off };
     if (selectedMac) payload.mac = selectedMac;
     api("/charger/schedule", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload) })
@@ -932,6 +1018,28 @@ private val CONTROL_PAGE: String = """
       .then(function (x) {
         if (x.r.status === 401) { setBusy(false); return; }
         if (x.r.ok) { if (x.d.error) setErr(x.d.error); loadStatus(); }
+        else { setBusy(false); setErr(x.d.error || ("Status " + x.r.status)); }
+      })
+      .catch(function () { setBusy(false); setErr("Request failed."); });
+  }
+  function resumeSched() {
+    if (!secret) return;
+    if (!lastData || !lastData.enableTime || !lastData.disableTime) {
+      setErr("No saved window to resume yet.");
+      return;
+    }
+    setBusy(true); setErr("");
+    // Resume = hand the charger back to the SAVED window right now, so send what
+    // is stored rather than whatever is half-typed in the inputs. Saving also
+    // clears the manual override on the phone.
+    var payload = { enabled: true, enable: lastData.enableTime, disable: lastData.disableTime };
+    if (selectedMac) payload.mac = selectedMac;
+    api("/charger/schedule", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload) })
+      .then(function (r) { return r.json().then(function (d) { return { r: r, d: d }; }); })
+      .then(function (x) {
+        if (x.r.status === 401) { setBusy(false); return; }
+        if (x.r.ok) { schedFilled = true; if (x.d.error) setErr(x.d.error); loadStatus(); }
         else { setBusy(false); setErr(x.d.error || ("Status " + x.r.status)); }
       })
       .catch(function () { setBusy(false); setErr("Request failed."); });
@@ -974,7 +1082,7 @@ private val CONTROL_PAGE: String = """
       .catch(function () { setBusy(false); setErr("Request failed."); });
   }
   btnSched.addEventListener("click", saveSched);
-  btnResume.addEventListener("click", saveSched);
+  btnResume.addEventListener("click", resumeSched);
   btnKey.addEventListener("click", saveKey);
   btnTunSave.addEventListener("click", function () {
     var t = tunToken.value.trim();
@@ -998,6 +1106,8 @@ private val CONTROL_PAGE: String = """
   btnRefresh.addEventListener("click", function () { schedFilled = false; loadStatus(); });
   loadStatus();
   setInterval(loadStatus, 3000);
+  // Keep the "next change in 4h 12m" line honest between status polls.
+  setInterval(tickSchedule, 1000);
 })();
 </script>
 </body>

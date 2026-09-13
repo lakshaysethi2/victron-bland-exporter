@@ -21,8 +21,13 @@ class RemoteChargerHttpTest {
 
     private class FakeSink : ChargerCommandSender {
         val calls = mutableListOf<Pair<Boolean, String>>()
-        override fun sendChargerCommand(enable: Boolean, mac: String) {
+
+        /** Flip to false to simulate a command the service could not dispatch. */
+        var succeed = true
+
+        override fun sendChargerCommand(enable: Boolean, mac: String): Boolean {
             calls.add(enable to mac)
+            return succeed
         }
     }
 
@@ -644,7 +649,7 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("viewport"))
         assertTrue(r.body.contains("ENABLE CHARGER"))
         assertTrue(r.body.contains("DISABLE CHARGER"))
-        assertTrue(r.body.contains("Save schedule"))
+        assertTrue(r.body.contains("Save window"))
         assertTrue(r.body.contains("/charger/schedule"))
         assertTrue(r.body.contains("/voltage"))
         assertTrue(r.body.contains("selectedMac"))
@@ -673,11 +678,109 @@ class RemoteChargerHttpTest {
         assertTrue(r.body.contains("inexact alarm"))
         assertTrue(r.body.contains("battery unrestricted"))
         assertTrue(r.body.contains("battery restricted"))
-        assertTrue(r.body.contains("Resume schedule"))
+        assertTrue(r.body.contains("Resume window"))
         assertTrue(r.body.contains("manual override until"))
         assertTrue(r.body.contains("sighted"))
         assertTrue(r.body.contains("wrong key"))
         assertFalse(r.body.contains(SECRET))
+    }
+
+    @Test
+    fun `control page exposes the automatic on off section`() {
+        // Issue #67: /charger must offer a schedule a person can actually set,
+        // labelled as automatic ON/OFF rather than buried as two blank text boxes.
+        val r = Harness().control().handle("/charger", GET, emptyMap(), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("Automatic ON / OFF"))
+        assertTrue(r.body.contains("Enforce this window every day"))
+        assertTrue(r.body.contains("Turn ON at"))
+        assertTrue(r.body.contains("Turn OFF at"))
+        assertTrue(r.body.contains("type=\"time\""))
+        assertTrue(r.body.contains("id=\"schedBox\""))
+        assertTrue(r.body.contains("id=\"schedSum\""))
+        assertTrue(r.body.contains("id=\"schedNext\""))
+        assertTrue(r.body.contains("Unlock to load the window."))
+        assertTrue(r.body.contains("paintSchedule"))
+        assertTrue(r.body.contains("tickSchedule"))
+        assertTrue(r.body.contains("Pick both an ON and an OFF time."))
+        // The plain-language line is built from server-rendered 12-hour text.
+        assertTrue(r.body.contains("enableTimeText"))
+        assertTrue(r.body.contains("disableTimeText"))
+        assertTrue(r.body.contains("nextTransitionText"))
+        assertTrue(r.body.contains("nextTransitionAt"))
+        // Resume sends the STORED window, not whatever is half-typed.
+        assertTrue(r.body.contains("resumeSched"))
+        assertTrue(r.body.contains("lastData.enableTime"))
+        // The shell is served without the secret, so it must carry no saved window.
+        assertFalse(r.body.contains("07:45"))
+        assertFalse(r.body.contains("18:00"))
+        assertFalse(r.body.contains(SECRET))
+    }
+
+    @Test
+    fun `control page uses a real em dash where javascript sets textContent`() {
+        val r = Harness().control().handle("/charger", GET, emptyMap(), "")
+        // setErr writes textContent, where an HTML entity would show up literally
+        // as "&mdash;". Entities stay only in the HTML markup itself.
+        assertTrue(r.body.contains("Wrong secret \u2014 enter it again."))
+        assertFalse(r.body.contains("Wrong secret &mdash;"))
+    }
+
+    @Test
+    fun `post returns 503 when the command could not be dispatched`() {
+        // A flip that never reached the service must not look accepted (#26).
+        val h = Harness()
+        h.sink.succeed = false
+        val r = h.control().handle("/charger", POST, headers(SECRET), """{"action":"on"}""")
+        assertEquals(503, r.statusCode)
+        assertTrue(r.body.contains("service unavailable"))
+        assertFalse(r.body.contains("\"accepted\":true"))
+        assertEquals(listOf(true to "AA:BB:CC:DD:EE:FF"), h.sink.calls)
+    }
+
+    @Test
+    fun `status renders the window in 12-hour form with an epoch to count down`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(
+            scheduleEnabled = true,
+            enableTime = "06:45",
+            disableTime = "17:30",
+            scheduleWantsOn = true,
+            nextTransition = "17:30",
+            nextTransitionAt = 1_800_000_000_000L,
+        )
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\"enableTimeText\":\"6:45 AM\""))
+        assertTrue(r.body.contains("\"disableTimeText\":\"5:30 PM\""))
+        assertTrue(r.body.contains("\"nextTransitionText\":\"5:30 PM\""))
+        assertTrue(r.body.contains("\"nextTransitionAt\":1800000000000"))
+        // The 24-hour values stay too: they are what POST /charger/schedule takes.
+        assertTrue(r.body.contains("\"enableTime\":\"06:45\""))
+        assertTrue(r.body.contains("\"disableTime\":\"17:30\""))
+    }
+
+    @Test
+    fun `json escape handles control characters per rfc 8259`() {
+        assertEquals("""a\u0001b""", RemoteChargerHttpJson.escape("a\u0001b"))
+        assertEquals("""a\u001fb""", RemoteChargerHttpJson.escape("a\u001fb"))
+        assertEquals("""a\bb""", RemoteChargerHttpJson.escape("a\bb"))
+        assertEquals("""a\fb""", RemoteChargerHttpJson.escape("a\u000Cb"))
+        assertEquals("""a\nb\tc""", RemoteChargerHttpJson.escape("a\nb\tc"))
+        assertEquals("""a\\b\"c""", RemoteChargerHttpJson.escape("""a\b"c"""))
+        assertEquals("plain text", RemoteChargerHttpJson.escape("plain text"))
+    }
+
+    @Test
+    fun `a raw control character in a debug line cannot break the status json`() {
+        val h = Harness()
+        h.snapshot = h.snapshot.copy(debug = listOf("gatt\u0000write", "tab\u0009here"))
+        val r = h.control().handle("/charger/status", GET, headers(SECRET), "")
+        assertEquals(200, r.statusCode)
+        assertTrue(r.body.contains("\\u0000"))
+        assertTrue(r.body.contains("\\t"))
+        assertFalse(r.body.contains("\u0000"))
+        assertFalse(r.body.contains("\u0009"))
     }
 
     @Test

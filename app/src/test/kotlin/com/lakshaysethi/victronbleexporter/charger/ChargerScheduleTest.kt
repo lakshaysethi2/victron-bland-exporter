@@ -136,6 +136,42 @@ class ChargerScheduleTest {
     }
 
     @Test
+    fun `humanTime renders the window the way issue 67 phrases it`() {
+        // "enable charger at 645 am ... disable charger at 530pm"
+        assertEquals("6:45 AM", ChargerSchedule.humanTime("06:45"))
+        assertEquals("5:30 PM", ChargerSchedule.humanTime("17:30"))
+        assertEquals("7:45 AM", ChargerSchedule.humanTime(ChargerSchedule.DEFAULT_ENABLE))
+        assertEquals("6:00 PM", ChargerSchedule.humanTime(ChargerSchedule.DEFAULT_DISABLE))
+        // midnight and noon are the two easy ones to get wrong
+        assertEquals("12:00 AM", ChargerSchedule.humanTime("00:00"))
+        assertEquals("12:05 AM", ChargerSchedule.humanTime("00:05"))
+        assertEquals("12:00 PM", ChargerSchedule.humanTime("12:00"))
+        assertEquals("12:59 PM", ChargerSchedule.humanTime("12:59"))
+        assertEquals("11:59 PM", ChargerSchedule.humanTime("23:59"))
+        assertEquals("1:00 PM", ChargerSchedule.humanTime("13:00"))
+    }
+
+    @Test
+    fun `humanTime passes malformed input through instead of throwing`() {
+        assertEquals("", ChargerSchedule.humanTime(null))
+        assertEquals("", ChargerSchedule.humanTime(""))
+        assertEquals("teatime", ChargerSchedule.humanTime("teatime"))
+        assertEquals("25:00", ChargerSchedule.humanTime("25:00"))
+    }
+
+    @Test
+    fun `windowSummary is one readable line`() {
+        assertEquals(
+            "ON 6:45 AM \u2192 OFF 5:30 PM daily",
+            ChargerSchedule.windowSummary("06:45", "17:30"),
+        )
+        assertEquals(
+            "ON 7:45 AM \u2192 OFF 6:00 PM daily",
+            ChargerSchedule.windowSummary(ChargerSchedule.DEFAULT_ENABLE, ChargerSchedule.DEFAULT_DISABLE),
+        )
+    }
+
+    @Test
     fun `formatMinutes wraps and zero-pads`() {
         assertEquals("08:30", ChargerSchedule.formatMinutes(8 * 60 + 30))
         assertEquals("00:00", ChargerSchedule.formatMinutes(0))
