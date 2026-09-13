@@ -1,6 +1,12 @@
-"""Remote charger page for `mppt_ble serve` (https://mppt.lak.nz/charger)."""
+"""Remote charger page for `mppt_ble serve` (`GET /charger`).
+
+The hostname is whatever `MPPT_PUBLIC_HOST` says; nothing site-specific belongs
+in this file (see AGENTS.md → public-repo privacy).
+"""
 
 from __future__ import annotations
+
+from .schedule import DEFAULT_OFF, DEFAULT_ON, is_valid_time
 
 
 def _window_label(seconds: float) -> str:
@@ -14,11 +20,21 @@ def _window_label(seconds: float) -> str:
     return f"{s}s"
 
 
-def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrema_s: float = 7200) -> str:
+def render_page(
+    host: str,
+    max_per_hour: int = 4,
+    gap_avg_s: float = 120,
+    extrema_s: float = 7200,
+    schedule_on: str = DEFAULT_ON,
+    schedule_off: str = DEFAULT_OFF,
+) -> str:
     host = "".join(c for c in host if c.isalnum() or c in ".-") or "local"
     n = max(1, int(max_per_hour))
     avg_w = _window_label(gap_avg_s)
     voc_w = _window_label(extrema_s)
+    # Placeholders only — the real window comes from /charger/status after unlock.
+    sched_on = schedule_on if is_valid_time(schedule_on) else DEFAULT_ON
+    sched_off = schedule_off if is_valid_time(schedule_off) else DEFAULT_OFF
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -69,6 +85,16 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
   .rules {{ background: var(--card); border-radius: 14px; padding: 4px 14px; margin-bottom: 12px; }}
   .rules div {{ font-size: 13px; color: var(--muted); padding: 8px 0; border-bottom: 1px solid #1a2436; line-height: 1.45; }}
   .rules div:last-child {{ border: 0; }}
+  .sched {{ background: var(--card); border-radius: 14px; padding: 14px; margin-bottom: 12px; }}
+  .sched.wantson {{ outline: 1px solid #3f6d2a; }}
+  .schedsum {{ font-size: 15px; font-weight: 650; margin-bottom: 2px; }}
+  .schednext {{ font-size: 12px; color: var(--muted); margin: 0 0 10px; line-height: 1.45; font-variant-numeric: tabular-nums; }}
+  .schednote {{ font-size: 12px; color: var(--wait); margin: 8px 0 0; line-height: 1.45; }}
+  .chk {{ display: flex; align-items: center; gap: 8px; font-size: 14px; margin: 0 0 10px; }}
+  .chk input {{ width: 18px; height: 18px; }}
+  .fld {{ flex: 1; min-width: 0; }}
+  .fld span {{ display: block; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }}
+  input[type=time] {{ width: 100%; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: #0d1626; color: var(--text); font-size: 16px; }}
   @media (prefers-reduced-motion: reduce) {{ * {{ animation: none !important; }} }}
 </style>
 </head>
@@ -106,14 +132,29 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
     <button class="btn off" id="btnOff" type="button" disabled>Disable</button>
   </div>
   <button class="btn ghost" id="btnRead" type="button" disabled>Read charger</button>
+  <div class="kicker" style="margin:16px 0 6px">Automatic ON / OFF <span class="tag rule">schedule</span></div>
+  <div class="sched" id="schedBox">
+    <div class="schedsum" id="schedSum">Unlock to load the window.</div>
+    <div class="schednext" id="schedNext"></div>
+    <label class="chk" for="schedOn"><input type="checkbox" id="schedOn"> Enforce this window every day</label>
+    <div class="row">
+      <label class="fld" for="schedOnTime"><span>Turn ON at</span><input type="time" id="schedOnTime" value="{sched_on}" step="60"></label>
+      <label class="fld" for="schedOffTime"><span>Turn OFF at</span><input type="time" id="schedOffTime" value="{sched_off}" step="60"></label>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn ghost" id="btnSchedSave" type="button" disabled>Save window</button>
+      <button class="btn ghost" id="btnSchedResume" type="button" disabled>Resume window</button>
+    </div>
+    <div class="schednote" id="schedNote"></div>
+  </div>
   <div class="kicker" style="margin:16px 0 4px">Recent pulses</div>
   <ul class="hist" id="hist"><li>None yet this run</li></ul>
-  <p class="hint">Panel is GATT 0xEDBB (live). Out is the bus into the next MPPT, not the cells. Gap now = panel − out (calc). {avg_w} avg, {voc_w} Voc, and the out band are calculated (0xEDEF or 2h max out). Rate limit, fractions, and cooldown are hardcoded in yield_config. Secret stays in this tab only. At most {n} auto-pulses per hour.</p>
+  <p class="hint">Panel is GATT 0xEDBB (live). Out is the bus into the next MPPT, not the cells. Gap now = panel − out (calc). {avg_w} avg, {voc_w} Voc, and the out band are calculated (0xEDEF or 2h max out). Rate limit, fractions, and cooldown are hardcoded in yield_config. Automatic ON / OFF uses the host clock and is saved in ~/.config/mppt/devices.json; a hand flip pauses it until the next edge. Secret stays in this tab only. At most {n} auto-pulses per hour.</p>
 </div>
 <script>
 (function () {{
   var KEY = "mppt_remote_secret";
-  var secret = null, coolUntil = 0, last = null, ticking = false;
+  var secret = null, coolUntil = 0, last = null, ticking = false, schedFilled = false;
   try {{ secret = sessionStorage.getItem(KEY); }} catch (e) {{}}
   var banner = document.getElementById("banner");
   var kicker = document.getElementById("kicker");
@@ -122,7 +163,14 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
   var err = document.getElementById("err");
   var gate = document.getElementById("gate");
   var secretInput = document.getElementById("secret");
-  var btns = ["btnPulse","btnOn","btnOff","btnRead"].map(function (id) {{ return document.getElementById(id); }});
+  var schedBox = document.getElementById("schedBox");
+  var schedSum = document.getElementById("schedSum");
+  var schedNext = document.getElementById("schedNext");
+  var schedNote = document.getElementById("schedNote");
+  var schedOn = document.getElementById("schedOn");
+  var schedOnTime = document.getElementById("schedOnTime");
+  var schedOffTime = document.getElementById("schedOffTime");
+  var btns = ["btnPulse","btnOn","btnOff","btnRead","btnSchedSave","btnSchedResume"].map(function (id) {{ return document.getElementById(id); }});
   function setErr(t) {{ err.textContent = t || ""; }}
   function setBusy(b) {{
     btns.forEach(function (el) {{ el.disabled = !secret || b; }});
@@ -199,6 +247,78 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
     headline.textContent = head;
     why.textContent = line;
   }}
+  function paintSchedule(d) {{
+    var s = d.schedule;
+    if (!s) {{
+      schedBox.className = "sched";
+      schedSum.textContent = "This host has no automatic ON/OFF window.";
+      schedNext.textContent = "";
+      schedNote.textContent = "";
+      return;
+    }}
+    schedBox.className = "sched" + (s.enabled && s.wantsOn ? " wantson" : "");
+    if (s.enabled) {{
+      schedSum.textContent = "ON " + (s.onTimeText || s.onTime) + " \u2192 OFF " + (s.offTimeText || s.offTime) + " daily";
+    }} else {{
+      schedSum.textContent = "Automatic ON/OFF is switched off";
+    }}
+    if (!schedFilled) {{
+      schedOn.checked = !!s.enabled;
+      if (s.onTime) schedOnTime.value = s.onTime;
+      if (s.offTime) schedOffTime.value = s.offTime;
+      schedFilled = true;
+    }}
+    if (s.overridden) {{
+      schedNote.textContent = "Paused by a manual ON/OFF \u2014 the window resumes by itself at " +
+        (s.nextTransitionText || s.nextTransition) + ". Resume window hands control back now.";
+    }} else if (!s.enabled) {{
+      schedNote.textContent = "Nothing will change the charger automatically until you tick the box and save.";
+    }} else {{
+      schedNote.textContent = "Auto-pulse is " + (d.pulseBlocked ? ("held: " + d.pulseBlocked) : "allowed inside this window");
+    }}
+    tickSchedule(s);
+  }}
+  function tickSchedule(s) {{
+    if (!s) return;
+    if (!s.enabled) {{ schedNext.textContent = "Hand control only \u2014 no scheduled changes."; return; }}
+    if (s.overridden) {{ schedNext.textContent = "Window paused. " + (s.summary || ""); return; }}
+    var left = Math.max(0, (s.nextTransitionTs || 0) - Date.now() / 1000);
+    var label = s.nextTransitionText || (s.nextTransition || "");
+    schedNext.textContent = (s.wantsOn ? "Charger should be ON now. " : "Charger should be OFF now. ") +
+      "Next change: " + label + " \u00b7 " + countdown(left) + " \u00b7 host clock " + (s.zone || "");
+  }}
+  function countdown(secs) {{
+    secs = Math.max(0, Math.floor(secs));
+    if (secs < 60) return "in under a minute";
+    var mins = Math.floor(secs / 60), h = Math.floor(mins / 60), m = mins % 60;
+    if (h && m) return "in " + h + "h " + m + "m";
+    if (h) return "in " + h + "h";
+    return "in " + m + "m";
+  }}
+  function saveSchedule(resumeOnly) {{
+    if (!secret) return;
+    var s = (last && last.schedule) || null;
+    var body;
+    if (resumeOnly) {{
+      // Resume = hand the charger back to the saved window right now, so send
+      // what is stored rather than whatever is half-typed in the inputs.
+      if (!s) {{ setErr("Nothing saved to resume yet."); return; }}
+      body = {{ enabled: !!s.enabled, on: s.onTime, off: s.offTime }};
+    }} else {{
+      var on = (schedOnTime.value || "").trim(), off = (schedOffTime.value || "").trim();
+      if (!on || !off) {{ setErr("Pick both an ON and an OFF time."); return; }}
+      body = {{ enabled: schedOn.checked, on: on, off: off }};
+    }}
+    setBusy(true); setErr("");
+    api("/charger/schedule", {{ method: "POST", headers: {{ "Content-Type": "application/json" }}, body: JSON.stringify(body) }})
+      .then(function (r) {{ return r.json().then(function (d) {{ return {{ r: r, d: d }}; }}); }})
+      .then(function (x) {{
+        if (x.r.status === 401) return;
+        if (x.r.ok) {{ schedFilled = true; load(); }}
+        else {{ setBusy(false); setErr(x.d.error || ("Save failed " + x.r.status)); }}
+      }})
+      .catch(function () {{ setBusy(false); setErr("Could not reach the host."); }});
+  }}
   function render(d) {{
     last = d;
     coolUntil = Date.now() + Math.max(0, (d.cooldownRemainingS || 0) * 1000);
@@ -220,6 +340,7 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
     document.getElementById("tDv").className = "tile" + (d.pulseCandidate ? " warn" : "");
     document.getElementById("tAvg").className = "tile" + (d.pulseCandidate ? " warn" : "");
     paintBanner(d);
+    paintSchedule(d);
     var hist = document.getElementById("hist");
     var rows = (d.pulses || []).slice().reverse();
     hist.innerHTML = rows.length ? rows.map(function (p) {{
@@ -232,6 +353,7 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
   }}
   function tick() {{
     if (last) paintBanner(last);
+    if (last && last.schedule) tickSchedule(last.schedule);
   }}
   function load() {{
     if (!secret) {{ setBusy(true); setErr("Enter the remote secret."); return; }}
@@ -271,6 +393,8 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
   document.getElementById("btnOn").onclick = function () {{ cmd("on"); }};
   document.getElementById("btnOff").onclick = function () {{ cmd("off"); }};
   document.getElementById("btnRead").onclick = function () {{ cmd("read"); }};
+  document.getElementById("btnSchedSave").onclick = function () {{ saveSchedule(false); }};
+  document.getElementById("btnSchedResume").onclick = function () {{ saveSchedule(true); }};
   if (secret) load();
   setInterval(function () {{ if (secret) load(); }}, 4000);
   setInterval(tick, 250);

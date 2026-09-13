@@ -7,12 +7,28 @@ import logging
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from . import client, protocol as P
 from .metrics import panel_sample, render_metrics
 from .node_metrics import fetch_node_metrics, node_exporter_url
 from .restart import pulse
+from .schedule import (
+    CHECK_S as SCHEDULE_CHECK_S,
+    START_DELAY_S as SCHEDULE_START_DELAY_S,
+    ScheduleState,
+    allows_pulse,
+    due_action,
+    is_valid_time,
+    load_schedule,
+    note_attempt,
+    parse_request,
+    pulse_blocked_reason,
+    save_schedule,
+    status_payload as schedule_status,
+    with_override,
+)
 from .watchdog_store import WatchdogStore, default_path as watchdog_db_path
 from .yield_reset import (
     ResetState,
@@ -85,7 +101,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     from bleak import BleakScanner
 
     from .auth import configured_secret, secret_ok
-    from .config import FRESH_MS, load_devices, public_host
+    from .config import DEFAULT_PATH as devices_path, FRESH_MS, load_devices, public_host
     from .readout import VICTRON_COMPANY_ID, parse_advertisement
 
     cfg = load_devices()
@@ -93,6 +109,20 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     if not mac:
         print("set MPPT_MAC or ~/.config/mppt/devices.json mac", file=sys.stderr)
         return 2
+    # Automatic daily ON/OFF window (issue #67). File < env < CLI, and the page
+    # can rewrite it at runtime through POST /charger/schedule.
+    sched_cfg = load_schedule(cfg=cfg, path=devices_path)
+    for label, value in (("on", args.schedule_on), ("off", args.schedule_off)):
+        if value and not is_valid_time(value):
+            print(f"--schedule-{label} must look like HH:MM (got {value!r})", file=sys.stderr)
+            return 2
+    if args.schedule_on:
+        sched_cfg = replace(sched_cfg, on_time=args.schedule_on.strip(), source="cli")
+    if args.schedule_off:
+        sched_cfg = replace(sched_cfg, off_time=args.schedule_off.strip(), source="cli")
+    if args.no_schedule:
+        sched_cfg = replace(sched_cfg, enabled=False, source="cli")
+    sched_state = ScheduleState()
     policy_path = str(Path(__file__).resolve().parent.parent / "yield_config.json")
     policy = load_policy(policy_path if Path(policy_path).is_file() else None)
     try:
@@ -103,6 +133,8 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             max_per_hour=policy.local_mpp_max_per_hour,
             gap_avg_s=policy.local_mpp_gap_avg_s,
             extrema_s=policy.local_mpp_extrema_s,
+            schedule_on=sched_cfg.on_time,
+            schedule_off=sched_cfg.off_time,
         )
     except Exception:
         page_html = "<p>mppt_ble</p>"
@@ -188,6 +220,15 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             return None
         return row
 
+    def charger_is_on() -> bool | None:
+        """Last known charger mode from any GATT session, or None when unknown."""
+        text = P.mode_text(last.get("mode"))
+        if text == "ON":
+            return True
+        if text == "OFF":
+            return False
+        return None
+
     async def do_pulse(target: str, reason: str) -> client.SessionResult:
         nonlocal control_busy
         control_busy = True
@@ -257,6 +298,10 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                     candidate,
                 )
                 reset_state.last_status_log_at = ts
+            if not allows_pulse(sched_cfg, ts, charger_is_on()):
+                # The daily window (or a hand OFF) owns the charger right now.
+                # A pulse always ends ON, so pulsing here would undo it.
+                continue
             if not should_pulse(
                 reset_state, ts, float(watts), policy, panel_v=panel_v, battery_v=battery_v
             ):
@@ -346,13 +391,16 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         snap["panelError"] = None if panel_v is not None else panel.get("last_error")
         snap["outputVoltage"] = battery_v
         snap["deltaVoltage"] = voltage_delta(panel_v, battery_v)
+        snap["schedule"] = schedule_status(sched_cfg, sched_state, now)
+        blocked = pulse_blocked_reason(sched_cfg, now, charger_is_on())
+        snap["pulseBlocked"] = blocked
         snap["pulseCandidate"] = (
             local_mpp_stuck(
                 float(watts), panel_v, battery_v, policy, state=reset_state, ts=now
             )
             if watts is not None
             else False
-        )
+        ) and blocked is None
         snap["lastPulseReason"] = reset_state.pulse_reason or None
         if reset_state.last_pulse_at:
             remain = policy.cooldown_s - (now - reset_state.last_pulse_at)
@@ -366,6 +414,8 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         snap["pulseWhy"] = pulse_why(
             watts, panel_v, battery_v, policy, now, reset_state.last_pulse_at, reset_state
         )
+        if blocked:
+            snap["pulseWhy"] = f"Automatic ON/OFF: {blocked}, so no auto-pulse. {snap['pulseWhy']}"
         if panel_v is None and panel.get("last_error"):
             snap["pulseWhy"] = f"{snap['pulseWhy']}: {panel['last_error']}"
         hold_left = 0
@@ -421,6 +471,59 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             finally:
                 scan_paused.clear()
 
+    async def schedule_loop() -> None:
+        """Automatic daily ON/OFF (issue #67): flip at the window boundaries.
+
+        Cheap by design — [due_action] is pure clock arithmetic, so a tick that
+        has nothing to do opens no GATT session and writes no log line. The
+        window is also re-asserted when the charger is found disagreeing with it
+        (a hand flip, a lost write, or a restart), at most every REAPPLY_S.
+        """
+        nonlocal control_busy
+        await asyncio.sleep(SCHEDULE_START_DELAY_S)
+        log.info("automatic ON/OFF: %s", sched_cfg.describe(time.time()))
+        while True:
+            try:
+                now = time.time()
+                action = due_action(sched_cfg, sched_state, now, actual_on=charger_is_on())
+                if action:
+                    control_busy = True
+                    try:
+                        r = await _charger_cmd(mac, action)
+                    finally:
+                        control_busy = False
+                    done = time.time()
+                    note_attempt(sched_state, action, r.success, r.message, done)
+                    last.update(
+                        {
+                            "action": action,
+                            "success": r.success,
+                            "mode": r.mode,
+                            "modeText": P.mode_text(r.mode),
+                            "message": f"schedule {action}: {r.message}",
+                        }
+                    )
+                    log.warning(
+                        "automatic ON/OFF: %s charger -> %s (%s)",
+                        action.upper(),
+                        "ok" if r.success else "FAILED",
+                        r.message,
+                    )
+            except Exception:
+                log.exception("automatic ON/OFF loop")
+            await asyncio.sleep(SCHEDULE_CHECK_S)
+
+    async def pause_for_manual(action: str) -> None:
+        """A hand flip owns the charger until the next window boundary."""
+        nonlocal sched_cfg
+        sched_cfg = with_override(sched_cfg, time.time())
+        save_schedule(sched_cfg, devices_path)
+        log.warning(
+            "automatic ON/OFF: paused by manual %s until %s",
+            action,
+            time.strftime("%H:%M", time.localtime(sched_cfg.override_until)),
+        )
+
     async def handle_charger(request: web.Request) -> web.Response:
         nonlocal control_busy
         await require(request)
@@ -440,6 +543,10 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                 control_busy = False
         else:
             return web.json_response({"error": "action must be on|off|read|restart"}, status=400)
+        if action != "read" and r.success and sched_cfg.enabled:
+            # A hand flip (or a manual pulse, which ends ON) pauses the window
+            # until the next boundary instead of being undone 15 s later.
+            await pause_for_manual(action)
         payload = {
             "accepted": True,
             "success": r.success,
@@ -452,6 +559,31 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         }
         last.update(payload)
         return web.json_response(payload, status=200 if r.success else 502)
+
+    async def handle_schedule(request: web.Request) -> web.Response:
+        """Save the automatic ON/OFF window: {"enabled":true,"on":"06:45","off":"17:30"}."""
+        nonlocal sched_cfg
+        await require(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        incoming, error = parse_request(body, sched_cfg)
+        if error or incoming is None:
+            return web.json_response({"error": error or "invalid schedule"}, status=400)
+        sched_cfg = save_schedule(incoming, devices_path)
+        # Forget what we last pushed so the loop applies the new window on its
+        # next tick (15 s) instead of waiting for the following boundary.
+        sched_state.applied = None
+        now = time.time()
+        log.warning("automatic ON/OFF saved: %s", sched_cfg.describe(now))
+        payload = {
+            "accepted": True,
+            "host": "linux",
+            "schedule": schedule_status(sched_cfg, sched_state, now),
+        }
+        last.update({"action": "schedule", "success": True, "message": payload["schedule"]["summary"]})
+        return web.json_response(payload, status=202)
 
     async def handle_metrics(_request: web.Request) -> web.Response:
         now = time.time()
@@ -477,16 +609,25 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     app.router.add_get("/charger", handle_page)
     app.router.add_get("/charger/status", handle_status)
     app.router.add_post("/charger", handle_charger)
+    app.router.add_post("/charger/schedule", handle_schedule)
     app.router.add_get("/metrics", handle_metrics)
     app.router.add_get("/node/metrics", handle_node_metrics)
     node_flag = "on" if node_url else "off"
-    print(f"listening on http://{host}:{port}/ watchdog=on node={node_flag} keys={len(keys)}", flush=True)
+    sched_flag = (
+        f"{sched_cfg.on_time}-{sched_cfg.off_time}" if sched_cfg.enabled else "off"
+    )
+    print(
+        f"listening on http://{host}:{port}/ watchdog=on node={node_flag} "
+        f"keys={len(keys)} auto-on-off={sched_flag}",
+        flush=True,
+    )
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, host, port).start()
     asyncio.create_task(scan_loop())
     asyncio.create_task(watchdog())
     asyncio.create_task(panel_poll())
+    asyncio.create_task(schedule_loop())
     while True:
         await asyncio.sleep(3600)
     return 0
@@ -509,6 +650,21 @@ def main() -> None:
     sp = sub.add_parser("serve")
     with_mac(sp)
     sp.add_argument("--bind", default="127.0.0.1:5338")
+    sp.add_argument(
+        "--schedule-on",
+        default="",
+        help="automatic ON time HH:MM (default 06:45, or the saved window)",
+    )
+    sp.add_argument(
+        "--schedule-off",
+        default="",
+        help="automatic OFF time HH:MM (default 17:30, or the saved window)",
+    )
+    sp.add_argument(
+        "--no-schedule",
+        action="store_true",
+        help="serve without the automatic ON/OFF window (hand control only)",
+    )
     args = p.parse_args()
     cmds = {
         "scan": _cmd_scan,
