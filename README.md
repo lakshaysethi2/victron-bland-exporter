@@ -18,6 +18,26 @@ Victron MPPT (BLE) → Android phone (this app) → cloudflared tunnel → Prome
 
 ---
 
+## Repository layout (two halves)
+
+This repo ships **two independent products** that talk to the same Victron over the
+same BLE protocol. They do not share a build, a dependency, or a runtime.
+
+| Path | What it is | Runs on | Toolchain | Tests |
+| --- | --- | --- | --- | --- |
+| [`app/`](app/) | The Android exporter described above — BLE → Prometheus, Cloudflare Tunnel, remote `/charger` + `/voltage` | An old Android phone (8+) beside the MPPT | Kotlin, Gradle, JDK 17 + Android SDK | `make test-android` |
+| [`linux/`](linux/) | A host service for a Linux box with BlueZ — Instant Readout, charger on/off, an **automatic daily ON/OFF window**, a yield watchdog, `/metrics` | A Linux machine with a USB BLE adapter | Python 3.11, `bleak`/`aiohttp` | `make test-linux` |
+| [`deploy/`](deploy/) | Grafana dashboard consumed by either half | — | — | — |
+| [`docs/`](docs/), [`guide.md`](guide.md) | Setup guide + screenshots for both halves | — | — | — |
+
+`docker-compose.yml` and `make build` are **Android build tooling only** (an
+Android build-box container) — they are not how you run `linux/`, which is a venv
+plus systemd units. See [`linux/README.md`](linux/README.md) for the host service
+and [`guide.md`](guide.md) for the phone. `make test` runs both suites;
+[`AGENTS.md`](AGENTS.md) records the boundary rules for contributors and agents.
+
+---
+
 ## Screenshots
 
 **Grafana dashboard** — imported in one click from [`deploy/grafana-dashboard.json`](deploy/grafana-dashboard.json):
@@ -59,7 +79,7 @@ The full, beginner-friendly walkthrough is in **[`guide.md`](guide.md)** — bui
 - 🔄 **BLE → Prometheus in real time** — full [keshavdv/victron-ble](https://github.com/keshavdv/victron-ble) Instant Readout parser (AES-128-CTR) for MPPT solar chargers and SmartShunt battery monitors
 - 🌐 **Cloudflare Tunnel with working child DNS** — embedded `cloudflared`, rebuilt with cgo/NDK so DNS resolves through Android's netd instead of dying on the loopback `[::1]:53` trap
 - 📈 **Prometheus `/metrics` endpoint** (OpenMetrics, port 5338) — voltage, current, solar power, yield today, **panel voltage**, state of charge, charge state, RSSI, device count; Instant Readout gauges and `victron_devices_total` drop after 90s without a new advertisement (`victron_up` / `victron_last_seen_timestamp` stay so a lost BLE link is visible)
-- ⚡ **Charger control over BLE** — enable/disable the MPPT charger (register `0x0200` device mode via the VictronConnect GATT service) with visible state, readback verification, and a configurable daily on/off schedule (default 08:30 → 18:00, re-applied every 10 minutes while the exporter is up, plus an exact alarm at each window boundary so a killed process still flips on time; Android 14+ uses USE_EXACT_ALARM so that alarm is not silently delayed; a 15-minute keep-alive alarm also restarts the exporter between those boundaries unless you tapped Stop)
+- ⚡ **Charger control over BLE** — enable/disable the MPPT charger (register `0x0200` device mode via the VictronConnect GATT service) with visible state, readback verification, and a configurable **Automatic ON / OFF** daily window (default 07:45 → 18:00, re-applied every 10 minutes while the exporter is up, plus an exact alarm at each window boundary so a killed process still flips on time; Android 14+ uses USE_EXACT_ALARM so that alarm is not silently delayed; a 15-minute keep-alive alarm also restarts the exporter between those boundaries unless you tapped Stop)
 - 🔋 **Battery / voltage control over BLE** — read and set battery system voltage (register `0xEDEF`, e.g. 12/24/48 V), absorption / float / equalisation voltages (`0xEDF7`/`0xEDF6`/`0xEDF4`) and live charger voltage (`0xEDD5`) over the same GATT service, with confirmation dialogs and metrics
 - 🌐 **Remote charger + voltage control** — flip the charger, set voltages, paste an Instant Readout key, save/start/stop the named Cloudflare tunnel, or restart BLE scanning from any browser at the named tunnel hostname (`/` , `/charger`, `/voltage`) or `http://<phone-ip>:5338/` (LAN), protected by a shared secret you set in the app; the control page shows whether the named tunnel is up and how long since the last BLE advertisement
 - 🖥️ **Importable Grafana dashboard** — [`deploy/grafana-dashboard.json`](deploy/grafana-dashboard.json): solar power, battery voltage/current, **panel voltage**, yield, devices online, and downstairs laptop CPU/temp/RAM when Prometheus scrapes `/node/metrics`
@@ -68,6 +88,7 @@ The full, beginner-friendly walkthrough is in **[`guide.md`](guide.md)** — bui
 - 🔍 **DNS Self-Test button** — verifies on-device that the bundled binary is the dynamic cgo build (fails hard if a static binary sneaks back in)
 - 📱 **Easy discovery UX** — auto-scans nearby Victron devices, tap to auto-fill the MAC, paste the key
 - 🔋 **Runs unattended** — foreground service, auto-start on boot, named-tunnel restore after a cloudflared crash, battery-optimization handling, multi-device support
+- 🐧 **Linux host service too** — [`linux/`](linux/README.md) runs the same Instant Readout + charger on/off on a BlueZ box instead of a phone, with its own `/charger` page (automatic ON/OFF window, panel voltage, yield watchdog) and `/metrics`; `python -m mppt_ble serve`
 - 🌳 **Open source (MIT)** — no cloud dependency for the app itself; quick tunnels need no account at all
 
 ---
@@ -84,7 +105,7 @@ In the app's **Charger Control** section:
 1. Enter the MPPT's MAC (auto-filled from your saved devices).
 2. Tap **Enable Charger** / **Disable Charger** — the app connects, runs the session handshake, writes the mode and reads the value back so you see the resulting device state (also in **Share/Copy Debug Logs** under "Charger control").
 3. **Read Current State** refreshes the displayed state without writing.
-4. Optionally enable the **daily schedule** (on time / off time, defaults 08:30 / 18:00). The service re-checks and applies it every 30 seconds while running, and an exact alarm at the next 08:30/18:00-style boundary restarts the exporter if Android killed it. A manual Enable/Disable pauses the schedule until the next window boundary (shown in the UI).
+4. Optionally switch on **Automatic ON / OFF** and pick the two times (defaults 07:45 / 18:00) — e.g. ON at 6:45 AM, OFF at 5:30 PM. The card restates the window in plain language ("ON 6:45 AM → OFF 5:30 PM daily · charger ON now · next change OFF at 5:30 PM") so you are not reading two opaque 24-hour strings. The service re-checks and applies it every 30 seconds while running, and an exact alarm at the next boundary restarts the exporter if Android killed it. A manual Enable/Disable pauses the window until the next boundary (shown in the UI); **Save Schedule** hands control back.
 
 The current state is exposed as the `victron_charger_enabled` metric (`1` = charger on, `0` = off, `-1` = unknown). Voltage settings are exposed as `victron_battery_voltage_setting_volts`, `victron_absorption_voltage_volts`, `victron_float_voltage_volts`, `victron_equalisation_voltage_volts`, `victron_charger_voltage_volts`. While the exporter is running it also reads solar **panel voltage** (register `0xEDBB`, ~every 60 s) and serves it as `victron_panel_voltage_volts` — Instant Readout does not carry it; a night-time `0xFFFF` or a value older than 5 minutes is omitted rather than left stale.
 
@@ -101,10 +122,10 @@ All writes go over the same BLE GATT service as charger on/off, with a confirmat
 
 In the app's **Remote Charger Control** section, enable remote control and set a secret (min 8 chars). The app then serves:
 
-- `GET  /charger` — mobile control page (login shell; everything on it requires the secret)
-- `GET  /charger/status` — JSON state (`mode`, schedule times, phone local time/zone, live Instant Readout watts/volts, sighted BLE devices with needs-key / wrong-key, last charger debug lines, app version, last GATT voltages, `lastBleAdAt`, `overrideUntilText` when a manual on/off is pausing the window, `batteryIgnored`, …); kicks a live ON/OFF read when mode is still unknown after a reboot
+- `GET  /charger` — mobile control page (login shell; everything on it requires the secret) with an **Automatic ON / OFF** card: native time pickers, an enforce toggle, the window restated in plain language, a live countdown to the next change, and Save/Resume
+- `GET  /charger/status` — JSON state (`mode`, schedule times, phone local time/zone, live Instant Readout watts/volts, sighted BLE devices with needs-key / wrong-key, last charger debug lines, app version, last GATT voltages, `lastBleAdAt`, `overrideUntilText` when a manual on/off is pausing the window, `batteryIgnored`, `enableTimeText`/`disableTimeText`/`nextTransitionText` (12-hour renderings of the window) and `nextTransitionAt` (epoch millis, for the page's countdown), …); kicks a live ON/OFF read when mode is still unknown after a reboot
 - `POST /charger` — `{"action":"on"|"off"|"read", "mac"?: "AA:BB:..."}` flips the charger or reads live ON/OFF over GATT (body mac, else stored, else first live Instant Readout)
-- `POST /charger/schedule` — `{"enabled":true,"enable":"08:30","disable":"18:00", "mac"?: "AA:BB:..."}` saves the daily window and clears a manual on/off override so the window runs again
+- `POST /charger/schedule` — `{"enabled":true,"enable":"07:45","disable":"18:00", "mac"?: "AA:BB:..."}` saves the automatic ON/OFF window and clears a manual on/off override so the window runs again (the page's **Resume window** button posts the stored window for exactly that)
 - `POST /charger/key` — `{"mac":"AA:BB:...","key":"<32 hex>"}` saves an Instant Readout key on the phone (never echoed)
 - `POST /charger/tunnel` — `{"token":"..."}` saves and starts the named Cloudflare tunnel, or `{"action":"start"|"stop"}` uses the token already on the phone (never echoed)
 - `POST /charger/scan` — restarts BLE scanning so a quiet Instant Readout can be poked without opening the phone
@@ -114,7 +135,39 @@ Auth: every status/command call must send the secret as an `X-Remote-Secret` (or
 
 Pairing: the first connection prompts for a Bluetooth PIN. Use the PIN printed on the product sticker, or `000000` (the common Victron default).
 
-> The daily charger schedule runs while the exporter notification is showing. Leave the app open or swipe it away — the service stays up (disable battery optimizations for overnight). Manual Enable/Disable still pauses the schedule until the next window boundary.
+> The automatic ON/OFF window runs while the exporter notification is showing. Leave the app open or swipe it away — the service stays up (disable battery optimizations for overnight). Manual Enable/Disable still pauses the window until the next boundary.
+>
+> A remote flip that cannot be dispatched to the service answers **503** rather than reporting success, so a page that says "accepted" really did reach the phone.
+
+---
+
+## Linux host service (`linux/`)
+
+Prefer a small Linux box with a USB BLE adapter to a phone? [`linux/`](linux/README.md)
+is a self-contained Python service that speaks the same protocol — no Gradle, no
+Android SDK, no shared code with `app/`.
+
+```bash
+python3 -m venv ~/.venv/mppt-ble && ~/.venv/mppt-ble/bin/pip install -r linux/requirements.txt
+mkdir -p ~/.config/mppt && cp linux/secrets.env.example ~/.config/mppt/secrets.env && chmod 600 ~/.config/mppt/secrets.env
+set -a && source ~/.config/mppt/secrets.env && set +a
+~/.venv/mppt-ble/bin/python -m mppt_ble serve --bind 127.0.0.1:5338
+```
+
+It serves `/metrics` for Prometheus, `/charger` for a phone-friendly control page,
+and `/node/metrics` as an optional node-exporter proxy. Beyond hand control it can:
+
+- **turn the charger on and off on a daily window you set** — the *Automatic ON / OFF*
+  card on `/charger` (or `serve --schedule-on 06:45 --schedule-off 17:30`, or
+  `MPPT_SCHEDULE_WINDOW`), stored in `~/.config/mppt/devices.json`, with the same
+  overnight / 24 h / manual-override semantics as the Android app
+- poll panel voltage (`0xEDBB`) every 10 s, which Instant Readout does not carry
+- run a yield watchdog that pulses the cascade when panel voltage sits near Voc
+  while watts stay low — and which stands down whenever the ON/OFF window wants the
+  charger off, because a pulse always ends with the charger on
+
+systemd user units (`mppt-ble.service`, `cloudflared-mppt.service`,
+`mppt-yield-reset.service`) are in `linux/`. Run the suite with `make test-linux`.
 
 ---
 
@@ -159,7 +212,7 @@ app/src/main/jniLibs/arm64-v8a/libcloudflared.so                        (bundled
 
 ## Project status
 
-Core functionality is complete and battle-tested on real hardware: BLE parsing, Prometheus export, tunnel with working child DNS, named-token restore, charger schedule, remote `/charger` management, and the Grafana dashboard. Community help welcome on:
+Core functionality is complete and battle-tested on real hardware: BLE parsing, Prometheus export, tunnel with working child DNS, named-token restore, the automatic charger ON/OFF window, remote `/charger` management, and the Grafana dashboard — on both the Android app and the Linux host service. Community help welcome on:
 
 - More device types (Inverter, DC/DC converters, etc.)
 - F-Droid packaging / signed release APKs (debug APK already ships on [GitHub Releases](https://github.com/lakshaysethi2/victron-bland-exporter/releases/latest))
@@ -167,7 +220,22 @@ Core functionality is complete and battle-tested on real hardware: BLE parsing, 
 
 ## Contributing
 
-PRs welcome — see [`guide.md`](guide.md) for the build and the cgo/NDK cloudflared recipe if you touch the tunnel binary. Please run the JVM unit tests (`./gradlew testDebugUnitTest`) before opening a PR. `TunnelBinaryInspectorTest` guards the bundled binary's linkage. Open issues with the bug template; never paste a tunnel token, Instant Readout key, or remote secret — see [`SECURITY.md`](SECURITY.md).
+PRs welcome. Two ground rules, because this repo holds two products and is public:
+
+1. **Change one half at a time.** Touching `app/` (Android/Kotlin) and `linux/`
+   (Python/BlueZ) in the same PR makes both harder to review — split them, and
+   prefix commits `feat(app):` / `fix(linux):`. Run the suite for the half you
+   changed: `make test-android` (JVM unit tests, needs a JDK + Android SDK) or
+   `make test-linux` (pytest). `make test` runs both. `TunnelBinaryInspectorTest`
+   guards the bundled cloudflared binary's linkage.
+2. **Nothing site-identifying.** Never paste a tunnel token, Instant Readout key,
+   remote secret, device MAC, or real hostname into code, tests, docs, commit
+   messages, branch names, or issues — see [`SECURITY.md`](SECURITY.md) and the
+   privacy rules in [`AGENTS.md`](AGENTS.md). Use `charger.example.com` and
+   `AA:BB:CC:DD:EE:FF` in examples and tests.
+
+See [`guide.md`](guide.md) for the build and the cgo/NDK cloudflared recipe if you
+touch the tunnel binary, and [`AGENTS.md`](AGENTS.md) for architecture notes.
 
 ## License
 
