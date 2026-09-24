@@ -13,6 +13,7 @@ from . import client, protocol as P
 from .metrics import panel_sample, render_metrics
 from .node_metrics import fetch_node_metrics, node_exporter_url
 from .restart import pulse
+from .schedule import ModeResult, ScheduleController, normalize_config, validated_config
 from .watchdog_store import WatchdogStore, default_path as watchdog_db_path
 from .yield_reset import (
     ResetState,
@@ -85,7 +86,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     from bleak import BleakScanner
 
     from .auth import configured_secret, secret_ok
-    from .config import FRESH_MS, load_devices, public_host
+    from .config import FRESH_MS, load_devices, public_host, save_schedule
     from .readout import VICTRON_COMPANY_ID, parse_advertisement
 
     cfg = load_devices()
@@ -363,6 +364,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             snap["lastPulseAt"] = None
         snap["busy"] = control_busy
         snap["host"] = "linux"
+        snap["schedule"] = schedule_ctl.snapshot(now)
         snap["pulseWhy"] = pulse_why(
             watts, panel_v, battery_v, policy, now, reset_state.last_pulse_at, reset_state
         )
@@ -418,8 +420,44 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                 if action == "off":
                     return await client.set_mode(target, False)
                 return await client.read_mode(target)
+            except Exception as e:
+                log.warning("charger %s failed: %s", action, e)
+                return client.SessionResult(False, None, str(e), [])
             finally:
                 scan_paused.clear()
+
+    def _mode_on(mode: int | None) -> bool | None:
+        if mode is None:
+            return None
+        return P.mode_matches(mode, True)
+
+    async def schedule_read() -> ModeResult:
+        r = await _charger_cmd(mac, "read")
+        return ModeResult(r.success, _mode_on(r.mode), r.message, r.mode)
+
+    async def schedule_apply(on: bool) -> ModeResult:
+        nonlocal control_busy
+        control_busy = True
+        try:
+            r = await _charger_cmd(mac, "on" if on else "off")
+        finally:
+            control_busy = False
+        if r.success:
+            last.update(
+                {
+                    "action": "schedule",
+                    "mac": mac,
+                    "mode": r.mode,
+                    "modeText": P.mode_text(r.mode),
+                    "message": r.message,
+                    "success": True,
+                }
+            )
+        return ModeResult(r.success, _mode_on(r.mode), r.message, r.mode)
+
+    schedule_ctl = ScheduleController(
+        normalize_config(cfg.get("schedule")), schedule_read, schedule_apply
+    )
 
     async def handle_charger(request: web.Request) -> web.Response:
         nonlocal control_busy
@@ -440,6 +478,8 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                 control_busy = False
         else:
             return web.json_response({"error": "action must be on|off|read|restart"}, status=400)
+        if action in ("on", "off") and r.success and target.upper() == mac.upper():
+            schedule_ctl.note_manual(action == "on")
         payload = {
             "accepted": True,
             "success": r.success,
@@ -452,6 +492,43 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         }
         last.update(payload)
         return web.json_response(payload, status=200 if r.success else 502)
+
+    async def handle_schedule_get(request: web.Request) -> web.Response:
+        await require(request)
+        snap = schedule_ctl.snapshot()
+        snap.update({"ok": True, "host": "linux"})
+        return web.json_response(snap)
+
+    async def handle_schedule_set(request: web.Request) -> web.Response:
+        await require(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            return web.json_response(
+                {"ok": False, "error": "JSON object required"}, status=400
+            )
+        current = schedule_ctl.config
+        try:
+            entry = validated_config(
+                body.get("enabled", current["enabled"]),
+                body.get("enableTime", body.get("enable_time", current["enable_time"])),
+                body.get("disableTime", body.get("disable_time", current["disable_time"])),
+            )
+        except ValueError as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+        try:
+            saved = save_schedule(entry["enabled"], entry["enable_time"], entry["disable_time"])
+        except OSError as e:
+            log.exception("schedule save failed")
+            return web.json_response(
+                {"ok": False, "error": f"cannot write devices.json: {e}"}, status=500
+            )
+        schedule_ctl.update_config(saved)
+        snap = schedule_ctl.snapshot()
+        snap.update({"ok": True, "host": "linux"})
+        return web.json_response(snap)
 
     async def handle_metrics(_request: web.Request) -> web.Response:
         now = time.time()
@@ -476,17 +553,23 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     app.router.add_get("/", handle_page)
     app.router.add_get("/charger", handle_page)
     app.router.add_get("/charger/status", handle_status)
+    app.router.add_get("/charger/schedule", handle_schedule_get)
+    app.router.add_post("/charger/schedule", handle_schedule_set)
     app.router.add_post("/charger", handle_charger)
     app.router.add_get("/metrics", handle_metrics)
     app.router.add_get("/node/metrics", handle_node_metrics)
     node_flag = "on" if node_url else "off"
-    print(f"listening on http://{host}:{port}/ watchdog=on node={node_flag} keys={len(keys)}", flush=True)
+    print(
+        f"listening on http://{host}:{port}/ watchdog=on schedule=on node={node_flag} keys={len(keys)}",
+        flush=True,
+    )
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, host, port).start()
     asyncio.create_task(scan_loop())
     asyncio.create_task(watchdog())
     asyncio.create_task(panel_poll())
+    asyncio.create_task(schedule_ctl.run())
     while True:
         await asyncio.sleep(3600)
     return 0

@@ -69,6 +69,13 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
   .rules {{ background: var(--card); border-radius: 14px; padding: 4px 14px; margin-bottom: 12px; }}
   .rules div {{ font-size: 13px; color: var(--muted); padding: 8px 0; border-bottom: 1px solid #1a2436; line-height: 1.45; }}
   .rules div:last-child {{ border: 0; }}
+  .sched {{ background: var(--card); border-radius: 14px; padding: 14px; margin-bottom: 12px; }}
+  .sched label {{ display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }}
+  .sched input[type=time] {{ width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: #0d1626; color: var(--text); font-size: 16px; }}
+  .sched .field {{ margin-bottom: 10px; }}
+  .sched .chk {{ display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 15px; margin: 0 0 10px; }}
+  .sched .chk input {{ width: 20px; height: 20px; flex: 0 0 auto; }}
+  .sched .why {{ min-height: 16px; }}
   @media (prefers-reduced-motion: reduce) {{ * {{ animation: none !important; }} }}
 </style>
 </head>
@@ -106,6 +113,14 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
     <button class="btn off" id="btnOff" type="button" disabled>Disable</button>
   </div>
   <button class="btn ghost" id="btnRead" type="button" disabled>Read charger</button>
+  <div class="kicker" style="margin:16px 0 6px">Daily schedule <span class="tag rule">server clock</span></div>
+  <div class="sched">
+    <label class="chk"><input type="checkbox" id="schEnabled" checked> Charge during the daily window</label>
+    <div class="field"><label for="schOn">Charger ON at</label><input type="time" id="schOn" value="07:00" step="60"></div>
+    <div class="field"><label for="schOff">Charger OFF at</label><input type="time" id="schOff" value="18:00" step="60"></div>
+    <button class="btn ghost" id="btnSaveSched" type="button" disabled>Save schedule</button>
+    <div class="why" id="schSummary">Unlock to load the schedule.</div>
+  </div>
   <div class="kicker" style="margin:16px 0 4px">Recent pulses</div>
   <ul class="hist" id="hist"><li>None yet this run</li></ul>
   <p class="hint">Panel is GATT 0xEDBB (live). Out is the bus into the next MPPT, not the cells. Gap now = panel − out (calc). {avg_w} avg, {voc_w} Voc, and the out band are calculated (0xEDEF or 2h max out). Rate limit, fractions, and cooldown are hardcoded in yield_config. Secret stays in this tab only. At most {n} auto-pulses per hour.</p>
@@ -122,10 +137,15 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
   var err = document.getElementById("err");
   var gate = document.getElementById("gate");
   var secretInput = document.getElementById("secret");
-  var btns = ["btnPulse","btnOn","btnOff","btnRead"].map(function (id) {{ return document.getElementById(id); }});
+  var schEnabled = document.getElementById("schEnabled");
+  var schOn = document.getElementById("schOn");
+  var schOff = document.getElementById("schOff");
+  var schSummary = document.getElementById("schSummary");
+  var btns = ["btnPulse","btnOn","btnOff","btnRead","btnSaveSched"].map(function (id) {{ return document.getElementById(id); }});
   function setErr(t) {{ err.textContent = t || ""; }}
   function setBusy(b) {{
     btns.forEach(function (el) {{ el.disabled = !secret || b; }});
+    [schEnabled, schOn, schOff].forEach(function (el) {{ el.disabled = !secret; }});
   }}
   function fmt(n, d, u) {{
     if (n == null) return "—";
@@ -142,6 +162,32 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
     s = Math.max(0, Math.floor(s));
     var m = Math.floor(s / 60), r = s % 60;
     return m + ":" + (r < 10 ? "0" : "") + r;
+  }}
+  function countdownTo(ts) {{
+    var s = Math.max(0, Math.floor(ts - Date.now() / 1000));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    if (h > 0) return h + "h " + m + "m";
+    if (m > 0) return m + "m";
+    return s + "s";
+  }}
+  function paintSchedule(s) {{
+    s = s || {{}};
+    if (!s.enabled) {{
+      schSummary.textContent = "Schedule off — charger only changes when you tap Enable / Disable / Pulse.";
+      return;
+    }}
+    var text = "ON " + (s.enableTime || "?") + " → OFF " + (s.disableTime || "?")
+      + " (server " + (s.serverTime || "?") + ")";
+    text += s.inWindow ? " · in window now" : " · outside window now";
+    if (s.overrideUntil) {{
+      text += " · manual override until " + (s.overrideUntilTime || "next flip");
+    }}
+    if (s.nextTransitionAt) {{
+      text += " · next flip " + (s.nextTransitionOn ? "ON" : "OFF") + " at "
+        + (s.nextTransitionTime || "?") + " in " + countdownTo(s.nextTransitionAt);
+    }}
+    if (s.lastError) text += " · last BLE error: " + s.lastError;
+    schSummary.textContent = text;
   }}
   function clock(ts) {{
     if (!ts) return "";
@@ -229,9 +275,15 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
     }}).join("") : "<li>None yet this run</li>";
     setBusy(!!d.busy);
     gate.style.display = "none";
+    var s = d.schedule || {{}};
+    if (document.activeElement !== schEnabled) schEnabled.checked = !!s.enabled;
+    if (document.activeElement !== schOn) schOn.value = s.enableTime || "07:00";
+    if (document.activeElement !== schOff) schOff.value = s.disableTime || "18:00";
+    paintSchedule(s);
   }}
   function tick() {{
     if (last) paintBanner(last);
+    if (last && last.schedule) paintSchedule(last.schedule);
   }}
   function load() {{
     if (!secret) {{ setBusy(true); setErr("Enter the remote secret."); return; }}
@@ -265,12 +317,39 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
     secretInput.value = "";
     load();
   }}
+  function saveSchedule() {{
+    if (!secret) return;
+    setBusy(true);
+    setErr("");
+    api("/charger/schedule", {{
+      method: "POST",
+      headers: {{ "Content-Type": "application/json" }},
+      body: JSON.stringify({{
+        enabled: schEnabled.checked,
+        enableTime: schOn.value,
+        disableTime: schOff.value
+      }})
+    }})
+      .then(function (r) {{ return r.json().then(function (d) {{ return {{ r: r, d: d }}; }}); }})
+      .then(function (x) {{
+        if (x.r.status === 401) return;
+        if (!x.r.ok) {{
+          setErr(x.d.error || ("Save failed (" + x.r.status + ")"));
+          setBusy(false);
+          return;
+        }}
+        paintSchedule(x.d);
+        load();
+      }})
+      .catch(function () {{ setErr("Save failed."); setBusy(false); }});
+  }}
   document.getElementById("btnUnlock").onclick = unlock;
   secretInput.addEventListener("keydown", function (e) {{ if (e.key === "Enter") unlock(); }});
   document.getElementById("btnPulse").onclick = function () {{ cmd("restart"); }};
   document.getElementById("btnOn").onclick = function () {{ cmd("on"); }};
   document.getElementById("btnOff").onclick = function () {{ cmd("off"); }};
   document.getElementById("btnRead").onclick = function () {{ cmd("read"); }};
+  document.getElementById("btnSaveSched").onclick = saveSchedule;
   if (secret) load();
   setInterval(function () {{ if (secret) load(); }}, 4000);
   setInterval(tick, 250);

@@ -34,6 +34,18 @@ class HttpPageTest(unittest.TestCase):
         self.assertIn("panelError", html)
         self.assertIn("GATT", html)
 
+    def test_page_has_editable_daily_schedule(self):
+        html = render_page("mppt.lak.nz")
+        self.assertIn("Daily schedule", html)
+        self.assertIn('id="schEnabled"', html)
+        self.assertIn('id="schOn"', html)
+        self.assertIn('id="schOff"', html)
+        self.assertIn('id="btnSaveSched"', html)
+        self.assertIn("schSummary", html)
+        self.assertIn("/charger/schedule", html)
+        self.assertIn("paintSchedule", html)
+        self.assertIn("server clock", html)
+
     def test_max_per_hour_in_hint(self):
         html = render_page("mppt.lak.nz", max_per_hour=6)
         self.assertIn("At most 6 auto-pulses per hour", html)

@@ -16,7 +16,7 @@ If this Linux box is destroyed, a replacement host can restore **https://mppt.la
 - `~/.config/mppt/secrets.env` (mode 600)
 - `~/.config/mppt/tunnel.token` (Cloudflare named-tunnel token file)
 - `~/.config/mppt/ble-pin` (pairing PIN from the SmartSolar sticker)
-- `~/.config/mppt/devices.json` (Instant Readout encryption keys, if used)
+- `~/.config/mppt/devices.json` (Instant Readout encryption keys, if used, and the daily charger schedule; a replacement host falls back to the default 07:00–18:00 window)
 - `~/.config/mppt/watchdog.sqlite` — **non-critical**. Do not block restore on this file. A new box starts with an empty 2 h fill; auto-pulse is conservative until samples exist.
 - systemd enablement: user linger, `mppt-ble` + `node-exporter` user units, `cloudflared-mppt` + `display-idle` system units
 - `/etc/systemd/logind.conf.d/10-no-sleep.conf` (sleep/suspend left disabled)

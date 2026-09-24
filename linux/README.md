@@ -52,6 +52,36 @@ curl -sS -H "X-Remote-Secret: $MPPT_REMOTE_SECRET" \
 
 `MPPT_REMOTE_SECRET` is required for `serve`. Instant Readout keys go in `~/.config/mppt/devices.json` (`{"mac":"…","keys":{"AA:BB:…":"32hex"}}`).
 
+## Charger schedule
+
+`serve` enforces a daily window in the host's local time (default **ON 07:00, OFF 18:00**).
+It persists in `~/.config/mppt/devices.json` under `schedule` (mode 600):
+
+```json
+"schedule": {"enabled": true, "enable_time": "07:00", "disable_time": "18:00"}
+```
+
+Edit it from the **Daily schedule** card on `GET /charger`, or with the JSON API
+(same `X-Remote-Secret` as every other `/charger*` route):
+
+```bash
+set -a && source ~/.config/mppt/secrets.env && set +a
+curl -sS -H "X-Remote-Secret: $MPPT_REMOTE_SECRET" \
+  http://127.0.0.1:5338/charger/schedule
+curl -sS -H "X-Remote-Secret: $MPPT_REMOTE_SECRET" -H "Content-Type: application/json" \
+  -X POST http://127.0.0.1:5338/charger/schedule \
+  -d '{"enabled":true,"enableTime":"07:00","disableTime":"18:00"}'
+```
+
+Semantics match the Android bridge (`ChargerSchedule.kt`): ON inside
+`[enable, disable)`, an overnight window when enable > disable, and equal times
+mean always ON (a degenerate config never locks the charger off). A manual
+Enable/Disable pauses the window until the next boundary, then the schedule
+re-asserts itself. The enforcer reads before it writes, re-verifies every 10
+minutes, re-applies after a restart, and backs off 2–15 min on BLE failure; a
+boundary flip retries immediately. `/charger/status` includes the live schedule
+(`inWindow`, next flip, override, last error).
+
 `serve` polls PV panel voltage over GATT register `0xEDBB` at least every 10 seconds and exposes `victron_panel_voltage_volts` on `/metrics` while a 2-byte value is fresh (30 s). Instant Readout does not carry panel voltage. Night-time `0xFFFF` is omitted. If a poll fails, back off 20–120 s. Always GET `0xEDBB` after STREAM_ENABLE even if no `08` frame arrived yet. Do not USB-reset the adapter from that loop.
 
 Handshake on this SmartSolar: `01` / `0300` / `f980` / `060082189342102703010303` (VictronConnect stream-enable). That last frame is what switches the radio to type-03 `08 03 19` value notifies, including `0xEDBB`. Without the trailing `03010303`, GET returns `09 00 19 ed bb 01` (unknown id, not volts). Do not send `fa80ff` or `f941` after the blob — those drop this unit.
