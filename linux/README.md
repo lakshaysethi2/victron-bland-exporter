@@ -77,7 +77,8 @@ Semantics match the Android bridge (`ChargerSchedule.kt`): ON inside
 `[enable, disable)`, an overnight window when enable > disable, and equal times
 mean always ON (a degenerate config never locks the charger off). A manual
 Enable/Disable pauses the window until the next boundary, then the schedule
-re-asserts itself. The enforcer reads before it writes, re-verifies every 10
+re-asserts itself. The enforcer reads before it writes (falling back to a blind
+idempotent apply when the mode register is not echoed), re-verifies every 10
 minutes, re-applies after a restart, and backs off 2–15 min on BLE failure; a
 boundary flip retries immediately. `/charger/status` includes the live schedule
 (`inWindow`, next flip, override, last error).

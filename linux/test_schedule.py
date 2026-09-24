@@ -39,10 +39,17 @@ class FakeClock:
 class FakeBle:
     """Records BLE traffic; ``mode`` is the device's current bool state."""
 
-    def __init__(self, mode: bool | None = None, read_ok: bool = True, apply_ok: bool = True):
+    def __init__(
+        self,
+        mode: bool | None = None,
+        read_ok: bool = True,
+        apply_ok: bool = True,
+        apply_echo: bool = True,
+    ):
         self.mode = mode
         self.read_ok = read_ok
         self.apply_ok = apply_ok
+        self.apply_echo = apply_echo
         self.reads = 0
         self.applies: list[bool] = []
 
@@ -57,6 +64,8 @@ class FakeBle:
         if not self.apply_ok:
             return ModeResult(False, None, "write failed")
         self.mode = on
+        if not self.apply_echo:
+            return ModeResult(True, None, "wrote mode; no GATT echo — treat write as accepted")
         return ModeResult(True, on, "ok")
 
 
@@ -280,6 +289,25 @@ class ScheduleControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(ctl.snapshot()["overrideUntil"])
         self.assertEqual([True], ble.applies)  # already OFF at the boundary
 
+    async def test_read_failure_blind_applies(self):
+        # This SmartSolar often does not echo the mode register; the window
+        # must still be enforced with an idempotent write.
+        ble = FakeBle(mode=None, read_ok=False)
+        ctl, _ = make_controller(ble)
+        await ctl.tick()
+        self.assertEqual(1, ble.reads)
+        self.assertEqual([False], ble.applies)  # 03:00 wants OFF
+        self.assertIs(False, ctl.last_mode)
+        self.assertIsNone(ctl.last_error)
+
+    async def test_blind_apply_without_gatt_echo_is_success(self):
+        ble = FakeBle(mode=None, read_ok=False, apply_echo=False)
+        ctl, _ = make_controller(ble)
+        await ctl.tick()
+        self.assertEqual([False], ble.applies)
+        self.assertIs(False, ctl.last_mode)  # trust the accepted write
+        self.assertIsNone(ctl.last_error)
+
     async def test_config_update_clears_override_and_enforces(self):
         ble = FakeBle(mode=True)
         clock = FakeClock(utc_ts(12))
@@ -293,39 +321,45 @@ class ScheduleControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0.0, ctl.override_until)
         self.assertEqual([False], ble.applies)  # noon is outside the new window
 
-    async def test_failure_backs_off_then_retries(self):
-        ble = FakeBle(mode=True, read_ok=False)
-        clock = FakeClock(utc_ts(3))
+    async def test_blind_apply_failure_backs_off_then_retries(self):
+        ble = FakeBle(mode=None, read_ok=False, apply_ok=False)
+        clock = FakeClock(utc_ts(8))  # window wants ON
         ctl, _ = make_controller(ble, clock, retry_s=120)
         await ctl.tick()
         self.assertEqual(1, ble.reads)
+        self.assertEqual([True], ble.applies)  # read failed -> blind apply attempt
         self.assertIsNotNone(ctl.last_error)
         clock.now += 60
         await ctl.tick()
         self.assertEqual(1, ble.reads)  # still backing off
+        self.assertEqual([True], ble.applies)
         ble.read_ok = True
+        ble.apply_ok = True
+        ble.mode = False  # device is back, charger still off
         clock.now += 61
         await ctl.tick()
         self.assertEqual(2, ble.reads)
-        self.assertEqual([False], ble.applies)
+        self.assertEqual([True, True], ble.applies)
         self.assertIsNone(ctl.last_error)
 
     async def test_boundary_resets_backoff_after_failure(self):
-        ble = FakeBle(mode=None, read_ok=False)
+        ble = FakeBle(mode=None, read_ok=False, apply_ok=False)
         clock = FakeClock(utc_ts(3))
         ctl, _ = make_controller(ble, clock)
         await ctl.tick()
         self.assertEqual(1, ble.reads)
+        self.assertEqual([False], ble.applies)  # blind OFF attempt fails too
         self.assertIsNotNone(ctl.last_error)
         clock.now += 60
         await ctl.tick()
         self.assertEqual(1, ble.reads)  # backing off
         ble.read_ok = True
+        ble.apply_ok = True
         ble.mode = False  # charger is off at 7am; window wants ON
         clock.now = utc_ts(7, 0)  # boundary resets backoff -> immediate retry
         await ctl.tick()
         self.assertEqual(2, ble.reads)
-        self.assertEqual([True], ble.applies)
+        self.assertEqual([False, True], ble.applies)
         self.assertIsNone(ctl.last_error)
 
     async def test_periodic_verify_catches_external_change(self):

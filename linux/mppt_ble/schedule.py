@@ -10,7 +10,9 @@ Mirrors ``app/.../charger/ChargerSchedule.kt`` so both bridges agree:
 
 The controller reads before it writes, so a restart does not cost a GATT
 session when the charger already matches the window, and a BLE failure backs
-off instead of hammering the adapter every poll.
+off instead of hammering the adapter every poll. When the mode cannot be read
+back (this SmartSolar does not always echo the mode register), it falls back
+to a blind idempotent apply so the window is still enforced.
 """
 
 from __future__ import annotations
@@ -302,12 +304,12 @@ class ScheduleController:
             self._last_verify_at = ts
             if result.success and result.on is not None:
                 self.last_mode = result.on
-            elif self.last_mode is None:
-                self._fail(f"read: {result.message}")
-                return
-            else:
+            elif self.last_mode is not None:
                 self._fail(f"verify: {result.message}")
                 return
+            # else: mode unknown and the read failed. This unit does not always
+            # echo the mode register, so fall through to a blind (idempotent)
+            # apply instead of leaving the window unenforced.
 
         if self.last_mode == desired:
             self.last_error = None
