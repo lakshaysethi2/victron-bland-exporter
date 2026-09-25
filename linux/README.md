@@ -61,7 +61,7 @@ It persists in `~/.config/mppt/devices.json` under `schedule` (mode 600):
 "schedule": {"enabled": true, "enable_time": "07:00", "disable_time": "18:00"}
 ```
 
-Edit it from the **Daily schedule** card on `GET /charger`, or with the JSON API
+Edit it from the **Daily window** section of the **Charger schedule** card on `GET /charger`, or with the JSON API
 (same `X-Remote-Secret` as every other `/charger*` route):
 
 ```bash
@@ -83,15 +83,16 @@ minutes, re-applies after a restart, and backs off 2–15 min on BLE failure; a
 boundary flip retries immediately. `/charger/status` includes the live schedule
 (`inWindow`, next flip, override, last error).
 
-The daytime window is optionally extended by PV. Edit the **PV rules** sub-block
-of the Daily schedule card (or the same `/charger/schedule` API): the charger
-wakes early once the local time is past *Wake after* (default `05:00`) and the
-`0xEDBB` panel voltage is at least *Wake panel voltage* (default 60 V), and
-sleeps early once the local time is past *Sleep after* (default `17:00`) and
-fresh Instant Readout output drops below *Sleep below* (default 40 W). Both
-latches reset at local midnight. The 07:00–18:00 window stays the fallback, so
-a stale or missing reading never leaves the charger off; uncheck the PV box to
-keep the pure daily window. Stored alongside the window as `schedule.pv` in
+The daytime window is optionally extended by PV. Edit the **Sunlight boost**
+section of the Charger schedule card (or the same `/charger/schedule` API): with
+it on, the charger wakes early once the local time is past the start rule's
+*not before* time (default `05:00`) and the `0xEDBB` panel voltage reaches the
+start threshold (default 60 V), and sleeps early once the local time is past
+the stop rule's *not before* time (default `17:00`) and fresh Instant Readout
+output drops below the stop threshold (default 40 W). Both latches reset at
+local midnight. The 07:00–18:00 window stays the fallback, so a stale or missing
+reading never leaves the charger off; uncheck **Use sunlight boost** to keep the
+pure daily window. Stored alongside the window as `schedule.pv` in
 `~/.config/mppt/devices.json`; `/charger/status` and `/charger/schedule` expose
 a `pv` block with the thresholds and latch state.
 

@@ -36,15 +36,21 @@ class HttpPageTest(unittest.TestCase):
 
     def test_page_has_editable_daily_schedule(self):
         html = render_page("mppt.lak.nz")
-        self.assertIn("Daily schedule", html)
+        self.assertIn("Charger schedule", html)
+        self.assertIn("Daily window", html)
+        self.assertIn("Sunlight boost", html)
         self.assertIn('id="schEnabled"', html)
         self.assertIn('id="schOn"', html)
         self.assertIn('id="schOff"', html)
         self.assertIn('id="btnSaveSched"', html)
+        self.assertIn('id="schedClock"', html)
+        self.assertIn('id="schedPill"', html)
+        self.assertIn('id="schedTrack"', html)
         self.assertIn("schSummary", html)
         self.assertIn("/charger/schedule", html)
         self.assertIn("paintSchedule", html)
-        self.assertIn("server clock", html)
+        self.assertIn("serverZone", html)
+        self.assertIn("Unsaved changes", html)
 
     def test_max_per_hour_in_hint(self):
         html = render_page("mppt.lak.nz", max_per_hour=6)
