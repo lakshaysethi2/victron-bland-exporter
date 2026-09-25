@@ -13,7 +13,12 @@ from . import client, protocol as P
 from .metrics import panel_sample, render_metrics
 from .node_metrics import fetch_node_metrics, node_exporter_url
 from .restart import pulse
-from .schedule import ModeResult, ScheduleController, normalize_config, validated_config
+from .schedule import (
+    ModeResult,
+    ScheduleController,
+    normalize_config,
+    validated_config,
+)
 from .watchdog_store import WatchdogStore, default_path as watchdog_db_path
 from .yield_reset import (
     ResetState,
@@ -431,6 +436,17 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             return None
         return P.mode_matches(mode, True)
 
+    def schedule_watts() -> float | None:
+        row = fresh_row(mac)
+        if not row:
+            return None
+        watts = row.get("solar_power_w")
+        return float(watts) if isinstance(watts, (int, float)) else None
+
+    def schedule_panel_v() -> float | None:
+        sample = panel_sample(panel, time.time())
+        return sample[1] if sample else None
+
     async def schedule_read() -> ModeResult:
         r = await _charger_cmd(mac, "read")
         return ModeResult(r.success, _mode_on(r.mode), r.message, r.mode)
@@ -456,7 +472,11 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         return ModeResult(r.success, _mode_on(r.mode), r.message, r.mode)
 
     schedule_ctl = ScheduleController(
-        normalize_config(cfg.get("schedule")), schedule_read, schedule_apply
+        normalize_config(cfg.get("schedule")),
+        schedule_read,
+        schedule_apply,
+        watts=schedule_watts,
+        panel_v=schedule_panel_v,
     )
 
     async def handle_charger(request: web.Request) -> web.Response:
@@ -510,16 +530,24 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                 {"ok": False, "error": "JSON object required"}, status=400
             )
         current = schedule_ctl.config
+        current_pv = current.get("pv") if isinstance(current.get("pv"), dict) else None
+        body_pv = body.get("pv")
         try:
             entry = validated_config(
                 body.get("enabled", current["enabled"]),
                 body.get("enableTime", body.get("enable_time", current["enable_time"])),
                 body.get("disableTime", body.get("disable_time", current["disable_time"])),
+                body_pv if isinstance(body_pv, dict) else current_pv,
             )
         except ValueError as e:
             return web.json_response({"ok": False, "error": str(e)}, status=400)
         try:
-            saved = save_schedule(entry["enabled"], entry["enable_time"], entry["disable_time"])
+            saved = save_schedule(
+                entry["enabled"],
+                entry["enable_time"],
+                entry["disable_time"],
+                pv=entry["pv"],
+            )
         except OSError as e:
             log.exception("schedule save failed")
             return web.json_response(

@@ -14,6 +14,7 @@ from mppt_ble.schedule import (
     DEFAULT_DISABLE,
     DEFAULT_ENABLE,
     ModeResult,
+    PvSchedule,
     ScheduleController,
     coerce_enabled,
     format_minutes,
@@ -21,8 +22,12 @@ from mppt_ble.schedule import (
     next_transition,
     next_transition_at,
     normalize_config,
+    normalize_pv_config,
     parse_hhmm,
+    pv_sleep_due,
+    pv_wake_ready,
     validated_config,
+    validated_pv_config,
 )
 
 UTC = dt.timezone.utc
@@ -154,22 +159,49 @@ class WindowMathTest(unittest.TestCase):
             validated_config(True, "25:00", "18:00")
         with self.assertRaises(ValueError):
             validated_config(True, "07:00", "07:61")
+        with self.assertRaises(ValueError):
+            validated_config(True, "07:00", "18:00", {"wakeAfter": "nope"})
         entry = validated_config("false", "6:30", "18:00")
-        self.assertEqual(
-            {"enabled": False, "enable_time": "06:30", "disable_time": "18:00"}, entry
+        self.assertFalse(entry["enabled"])
+        self.assertEqual("06:30", entry["enable_time"])
+        self.assertEqual("18:00", entry["disable_time"])
+        self.assertEqual(normalize_pv_config(None), entry["pv"])
+
+    def test_validated_pv_config_roundtrip(self):
+        pv = validated_pv_config(
+            {
+                "enabled": "false",
+                "wakeAfter": "05:15",
+                "wakePanelV": 75,
+                "sleepAfter": "16:45",
+                "sleepWatts": 35,
+            }
         )
+        self.assertFalse(pv["enabled"])
+        self.assertEqual("05:15", pv["wake_after"])
+        self.assertEqual(75.0, pv["wake_panel_v"])
+        self.assertEqual("16:45", pv["sleep_after"])
+        self.assertEqual(35.0, pv["sleep_watts"])
 
     def test_normalize_config_falls_back_to_defaults(self):
-        self.assertEqual(
-            {"enabled": True, "enable_time": "07:00", "disable_time": "18:00"},
-            normalize_config({"enabled": "nonsense", "enable_time": "nope"}),
+        defaults = normalize_config({"enabled": "nonsense", "enable_time": "nope"})
+        self.assertTrue(defaults["enabled"])
+        self.assertEqual("07:00", defaults["enable_time"])
+        self.assertEqual("18:00", defaults["disable_time"])
+        self.assertEqual(normalize_pv_config(None), defaults["pv"])
+        configured = normalize_config(
+            {
+                "enabled": False,
+                "enableTime": "05:15",
+                "disableTime": "21:45",
+                "pv": {"wakeAfter": "05:30", "wakePanelV": 70, "sleepAfter": "16:00", "sleepWatts": 30},
+            }
         )
-        self.assertEqual(
-            {"enabled": False, "enable_time": "05:15", "disable_time": "21:45"},
-            normalize_config(
-                {"enabled": False, "enableTime": "05:15", "disableTime": "21:45"}
-            ),
-        )
+        self.assertFalse(configured["enabled"])
+        self.assertEqual("05:15", configured["enable_time"])
+        self.assertEqual("21:45", configured["disable_time"])
+        self.assertEqual("05:30", configured["pv"]["wake_after"])
+        self.assertEqual(70.0, configured["pv"]["wake_panel_v"])
 
 
 class ConfigPersistenceTest(unittest.TestCase):
@@ -177,12 +209,28 @@ class ConfigPersistenceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "devices.json"
             path.write_text(json.dumps({"mac": "AA:BB", "keys": {"AA:BB": "00"}}))
-            saved = save_schedule(True, "6:30", "18:00", path=path)
+            saved = save_schedule(
+                True,
+                "6:30",
+                "18:00",
+                pv={
+                    "enabled": True,
+                    "wakeAfter": "05:15",
+                    "wakePanelV": 70,
+                    "sleepAfter": "16:30",
+                    "sleepWatts": 35,
+                },
+                path=path,
+            )
             self.assertEqual("06:30", saved["enable_time"])
+            self.assertEqual("05:15", saved["pv"]["wake_after"])
             data = json.loads(path.read_text())
             self.assertEqual("AA:BB", data["mac"])
             self.assertEqual("00", data["keys"]["AA:BB"])
-            self.assertEqual("18:00", load_schedule(path)["disable_time"])
+            loaded = load_schedule(path)
+            self.assertEqual("18:00", loaded["disable_time"])
+            self.assertEqual("16:30", loaded["pv"]["sleep_after"])
+            self.assertEqual(35.0, loaded["pv"]["sleep_watts"])
             self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
 
     def test_missing_file_returns_defaults(self):
@@ -397,6 +445,195 @@ class ScheduleControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(snap["inWindow"])
         self.assertEqual("07:00", snap["nextTransitionTime"])
         self.assertTrue(snap["nextTransitionOn"])
+
+
+class PvGateTest(unittest.TestCase):
+    def test_helpers(self):
+        pv = PvSchedule(
+            wake_after=5 * 60,
+            wake_panel_v=60.0,
+            sleep_after=17 * 60,
+            sleep_watts=40.0,
+        )
+        self.assertTrue(pv_wake_ready(5 * 60, 60.0, pv))
+        self.assertFalse(pv_wake_ready(5 * 60 - 1, 100.0, pv))
+        self.assertFalse(pv_wake_ready(5 * 60, 59.9, pv))
+        self.assertFalse(pv_wake_ready(5 * 60, None, pv))
+        self.assertTrue(pv_sleep_due(17 * 60, 0.0, pv))
+        self.assertFalse(pv_sleep_due(17 * 60 - 1, 0.0, pv))
+        self.assertFalse(pv_sleep_due(17 * 60, 40.0, pv))
+        self.assertFalse(pv_sleep_due(17 * 60, None, pv))
+
+    def test_from_mapping_parses_and_defaults(self):
+        pv = PvSchedule.from_mapping(
+            {
+                "enabled": "false",
+                "wake_after": "06:30",
+                "wakePanelV": 75,
+                "sleepAfter": "16:45",
+                "sleepWatts": 30,
+            }
+        )
+        self.assertFalse(pv.enabled)
+        self.assertEqual(6 * 60 + 30, pv.wake_after)
+        self.assertEqual(75.0, pv.wake_panel_v)
+        self.assertEqual(16 * 60 + 45, pv.sleep_after)
+        self.assertEqual(30.0, pv.sleep_watts)
+        defaults = PvSchedule.from_mapping({"wake_after": "nonsense"})
+        self.assertEqual(5 * 60, defaults.wake_after)
+        self.assertEqual(17 * 60, defaults.sleep_after)
+
+    def test_bad_numbers_are_clamped(self):
+        pv = normalize_pv_config({"wakePanelV": float("nan"), "sleepWatts": -10})
+        self.assertEqual(60.0, pv["wake_panel_v"])  # NaN -> default
+        self.assertEqual(0.0, pv["sleep_watts"])  # negative -> 0
+
+
+class PvControllerTest(unittest.IsolatedAsyncioTestCase):
+    def _ctl(self, ble, clock, *, panel=80.0, watts=300.0, pv=None, **kwargs):
+        holder = {"panel": panel, "watts": watts}
+        ctl = ScheduleController(
+            {"enabled": True, "enable_time": "07:00", "disable_time": "18:00"},
+            ble.read,
+            ble.apply,
+            tz=UTC,
+            now_fn=clock,
+            pv=pv
+            or PvSchedule(
+                wake_after=5 * 60,
+                wake_panel_v=60.0,
+                sleep_after=17 * 60,
+                sleep_watts=40.0,
+            ),
+            watts=lambda: holder["watts"],
+            panel_v=lambda: holder["panel"],
+            **kwargs,
+        )
+        return ctl, holder
+
+    async def test_wakes_before_base_window_on_panel_voltage(self):
+        ble = FakeBle(mode=False)
+        clock = FakeClock(utc_ts(5, 30))
+        ctl, _ = self._ctl(ble, clock, panel=70.0)
+        await ctl.tick()
+        self.assertEqual([True], ble.applies)
+        self.assertTrue(ctl.snapshot()["inWindow"])
+        self.assertTrue(ctl.snapshot()["pv"]["morningStarted"])
+
+    async def test_does_not_wake_before_0500_or_below_threshold(self):
+        ble = FakeBle(mode=False)
+        clock = FakeClock(utc_ts(4, 30))
+        ctl, _ = self._ctl(ble, clock, panel=90.0)
+        await ctl.tick()
+        self.assertEqual([], ble.applies)
+        self.assertFalse(ctl.snapshot()["inWindow"])
+        clock.now = utc_ts(5, 30)
+        ctl2 = ScheduleController(
+            {"enabled": True, "enable_time": "07:00", "disable_time": "18:00"},
+            ble.read,
+            ble.apply,
+            tz=UTC,
+            now_fn=clock,
+            pv=PvSchedule(wake_panel_v=60.0),
+            panel_v=lambda: 40.0,
+            watts=lambda: 0.0,
+        )
+        await ctl2.tick()
+        self.assertFalse(ctl2.snapshot()["inWindow"])
+
+    async def test_sleeps_early_once_output_collapses(self):
+        ble = FakeBle(mode=True)
+        clock = FakeClock(utc_ts(17, 30))
+        ctl, _ = self._ctl(ble, clock, panel=80.0, watts=10.0)
+        await ctl.tick()
+        self.assertEqual([False], ble.applies)
+        self.assertFalse(ctl.snapshot()["inWindow"])  # base window still ON
+        self.assertTrue(ctl.snapshot()["pv"]["eveningEnded"])
+        self.assertFalse(ctl.snapshot()["pv"]["morningStarted"])
+
+    async def test_keeps_base_window_while_still_generating(self):
+        ble = FakeBle(mode=False)
+        clock = FakeClock(utc_ts(17, 30))
+        ctl, _ = self._ctl(ble, clock, panel=80.0, watts=500.0)
+        await ctl.tick()
+        self.assertEqual([True], ble.applies)
+        self.assertFalse(ctl.snapshot()["pv"]["eveningEnded"])
+        self.assertFalse(ctl.snapshot()["pv"]["morningStarted"])
+
+    async def test_missing_readings_never_latch(self):
+        ble = FakeBle(mode=False)
+        clock = FakeClock(utc_ts(5, 30))
+        ctl, holder = self._ctl(ble, clock, panel=None, watts=None)
+        await ctl.tick()
+        self.assertEqual([], ble.applies)
+        self.assertFalse(ctl.snapshot()["pv"]["morningStarted"])
+        clock.now = utc_ts(17, 30)
+        await ctl.tick()
+        self.assertEqual([True], ble.applies)  # base ON, no sleep latch
+        self.assertFalse(ctl.snapshot()["pv"]["eveningEnded"])
+
+    async def test_latches_reset_next_local_day(self):
+        ble = FakeBle(mode=True)
+        clock = FakeClock(utc_ts(17, 30, day=24))
+        ctl, holder = self._ctl(ble, clock, panel=80.0, watts=10.0)
+        await ctl.tick()  # PV sleep
+        self.assertFalse(ctl.snapshot()["inWindow"])
+        clock.now = utc_ts(18, 30, day=24)
+        await ctl.tick()  # base OFF; latch still holds
+        self.assertEqual([False], ble.applies)
+        holder["panel"] = 80.0
+        clock.now = utc_ts(5, 30, day=25)
+        await ctl.tick()  # new day, PV wake
+        self.assertEqual([False, True], ble.applies)
+        self.assertTrue(ctl.snapshot()["inWindow"])
+
+    async def test_overnight_window_ignores_pv_gating(self):
+        ble = FakeBle(mode=False)
+        clock = FakeClock(utc_ts(20))
+        ctl = ScheduleController(
+            {"enabled": True, "enable_time": "18:00", "disable_time": "07:00"},
+            ble.read,
+            ble.apply,
+            tz=UTC,
+            now_fn=clock,
+            pv=PvSchedule(wake_panel_v=60.0, sleep_watts=40.0),
+            panel_v=lambda: 200.0,
+            watts=lambda: 0.0,
+        )
+        await ctl.tick()
+        self.assertEqual([True], ble.applies)  # overnight ON, not trimmed by PV
+
+    async def test_disabled_pv_falls_back_to_base_window(self):
+        ble = FakeBle(mode=False)
+        clock = FakeClock(utc_ts(5, 30))
+        ctl, _ = self._ctl(ble, clock, panel=200.0, pv=PvSchedule(enabled=False))
+        await ctl.tick()
+        self.assertEqual([], ble.applies)
+        self.assertFalse(ctl.snapshot()["inWindow"])
+
+    async def test_config_update_applies_pv_rules(self):
+        ble = FakeBle(mode=False)
+        clock = FakeClock(utc_ts(5, 30))
+        ctl, _ = self._ctl(ble, clock, panel=90.0, pv=PvSchedule(enabled=False))
+        await ctl.tick()
+        self.assertEqual([], ble.applies)  # PV disabled -> base OFF at 05:30
+        ctl.update_config(
+            {
+                "enabled": True,
+                "enable_time": "07:00",
+                "disable_time": "18:00",
+                "pv": {
+                    "enabled": True,
+                    "wake_after": "05:00",
+                    "wake_panel_v": 60.0,
+                    "sleep_after": "17:00",
+                    "sleep_watts": 40.0,
+                },
+            }
+        )
+        await ctl.tick()
+        self.assertEqual([True], ble.applies)  # newly enabled PV rules wake it
+        self.assertTrue(ctl.snapshot()["pv"]["morningStarted"])
 
 
 if __name__ == "__main__":

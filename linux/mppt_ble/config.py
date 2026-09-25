@@ -29,10 +29,11 @@ def save_schedule(
     enabled: object,
     enable_time: object,
     disable_time: object,
+    pv: object = None,
     path: Path = DEFAULT_PATH,
 ) -> dict:
-    """Validate and atomically persist the window; raises ValueError/OSError."""
-    entry = validated_config(enabled, enable_time, disable_time)
+    """Validate and atomically persist the window (and PV rules); raises ValueError/OSError."""
+    entry = validated_config(enabled, enable_time, disable_time, pv)
     data: dict = {}
     if path.is_file():
         try:

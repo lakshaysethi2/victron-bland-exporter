@@ -71,7 +71,8 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
   .rules div:last-child {{ border: 0; }}
   .sched {{ background: var(--card); border-radius: 14px; padding: 14px; margin-bottom: 12px; }}
   .sched label {{ display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }}
-  .sched input[type=time] {{ width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: #0d1626; color: var(--text); font-size: 16px; }}
+  .sched input[type=time], .sched input[type=number] {{ width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: #0d1626; color: var(--text); font-size: 16px; }}
+  .sched .sub {{ margin: 14px 0 8px; padding-top: 12px; border-top: 1px solid #1a2436; color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }}
   .sched .field {{ margin-bottom: 10px; }}
   .sched .chk {{ display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 15px; margin: 0 0 10px; }}
   .sched .chk input {{ width: 20px; height: 20px; flex: 0 0 auto; }}
@@ -118,6 +119,12 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
     <label class="chk"><input type="checkbox" id="schEnabled" checked> Charge during the daily window</label>
     <div class="field"><label for="schOn">Charger ON at</label><input type="time" id="schOn" value="07:00" step="60"></div>
     <div class="field"><label for="schOff">Charger OFF at</label><input type="time" id="schOff" value="18:00" step="60"></div>
+    <div class="sub">PV rules</div>
+    <label class="chk"><input type="checkbox" id="pvEnabled" checked> Wake early / sleep early on panel voltage</label>
+    <div class="field"><label for="pvWakeAfter">Wake after</label><input type="time" id="pvWakeAfter" value="05:00" step="60"></div>
+    <div class="field"><label for="pvWakePanelV">Wake panel voltage (V)</label><input type="number" id="pvWakePanelV" value="60" step="1" min="0" inputmode="decimal"></div>
+    <div class="field"><label for="pvSleepAfter">Sleep after</label><input type="time" id="pvSleepAfter" value="17:00" step="60"></div>
+    <div class="field"><label for="pvSleepWatts">Sleep below (W)</label><input type="number" id="pvSleepWatts" value="40" step="1" min="0" inputmode="decimal"></div>
     <button class="btn ghost" id="btnSaveSched" type="button" disabled>Save schedule</button>
     <div class="why" id="schSummary">Unlock to load the schedule.</div>
   </div>
@@ -141,11 +148,17 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
   var schOn = document.getElementById("schOn");
   var schOff = document.getElementById("schOff");
   var schSummary = document.getElementById("schSummary");
+  var pvEnabled = document.getElementById("pvEnabled");
+  var pvWakeAfter = document.getElementById("pvWakeAfter");
+  var pvWakePanelV = document.getElementById("pvWakePanelV");
+  var pvSleepAfter = document.getElementById("pvSleepAfter");
+  var pvSleepWatts = document.getElementById("pvSleepWatts");
+  var schedInputs = [schEnabled, schOn, schOff, pvEnabled, pvWakeAfter, pvWakePanelV, pvSleepAfter, pvSleepWatts];
   var btns = ["btnPulse","btnOn","btnOff","btnRead","btnSaveSched"].map(function (id) {{ return document.getElementById(id); }});
   function setErr(t) {{ err.textContent = t || ""; }}
   function setBusy(b) {{
     btns.forEach(function (el) {{ el.disabled = !secret || b; }});
-    [schEnabled, schOn, schOff].forEach(function (el) {{ el.disabled = !secret; }});
+    schedInputs.forEach(function (el) {{ el.disabled = !secret; }});
   }}
   function fmt(n, d, u) {{
     if (n == null) return "—";
@@ -178,7 +191,13 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
     }}
     var text = "ON " + (s.enableTime || "?") + " → OFF " + (s.disableTime || "?")
       + " (server " + (s.serverTime || "?") + ")";
-    text += s.inWindow ? " · in window now" : " · outside window now";
+    text += s.inWindow ? " · wants ON now" : " · wants OFF now";
+    if (s.pv && s.pv.enabled) {{
+      text += " · PV wake ≥ " + s.pv.wakePanelV + "V after " + s.pv.wakeAfter
+        + ", sleep < " + s.pv.sleepWatts + "W after " + s.pv.sleepAfter;
+      if (s.pv.eveningEnded) text += " · slept early";
+      else if (s.pv.morningStarted) text += " · woke early";
+    }}
     if (s.overrideUntil) {{
       text += " · manual override until " + (s.overrideUntilTime || "next flip");
     }}
@@ -279,6 +298,12 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
     if (document.activeElement !== schEnabled) schEnabled.checked = !!s.enabled;
     if (document.activeElement !== schOn) schOn.value = s.enableTime || "07:00";
     if (document.activeElement !== schOff) schOff.value = s.disableTime || "18:00";
+    var pv = s.pv || {{}};
+    if (document.activeElement !== pvEnabled) pvEnabled.checked = pv.enabled !== false;
+    if (document.activeElement !== pvWakeAfter) pvWakeAfter.value = pv.wakeAfter || "05:00";
+    if (document.activeElement !== pvWakePanelV && pv.wakePanelV != null) pvWakePanelV.value = pv.wakePanelV;
+    if (document.activeElement !== pvSleepAfter) pvSleepAfter.value = pv.sleepAfter || "17:00";
+    if (document.activeElement !== pvSleepWatts && pv.sleepWatts != null) pvSleepWatts.value = pv.sleepWatts;
     paintSchedule(s);
   }}
   function tick() {{
@@ -327,7 +352,14 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
       body: JSON.stringify({{
         enabled: schEnabled.checked,
         enableTime: schOn.value,
-        disableTime: schOff.value
+        disableTime: schOff.value,
+        pv: {{
+          enabled: pvEnabled.checked,
+          wakeAfter: pvWakeAfter.value,
+          wakePanelV: parseFloat(pvWakePanelV.value),
+          sleepAfter: pvSleepAfter.value,
+          sleepWatts: parseFloat(pvSleepWatts.value)
+        }}
       }})
     }})
       .then(function (r) {{ return r.json().then(function (d) {{ return {{ r: r, d: d }}; }}); }})

@@ -83,6 +83,18 @@ minutes, re-applies after a restart, and backs off 2–15 min on BLE failure; a
 boundary flip retries immediately. `/charger/status` includes the live schedule
 (`inWindow`, next flip, override, last error).
 
+The daytime window is optionally extended by PV. Edit the **PV rules** sub-block
+of the Daily schedule card (or the same `/charger/schedule` API): the charger
+wakes early once the local time is past *Wake after* (default `05:00`) and the
+`0xEDBB` panel voltage is at least *Wake panel voltage* (default 60 V), and
+sleeps early once the local time is past *Sleep after* (default `17:00`) and
+fresh Instant Readout output drops below *Sleep below* (default 40 W). Both
+latches reset at local midnight. The 07:00–18:00 window stays the fallback, so
+a stale or missing reading never leaves the charger off; uncheck the PV box to
+keep the pure daily window. Stored alongside the window as `schedule.pv` in
+`~/.config/mppt/devices.json`; `/charger/status` and `/charger/schedule` expose
+a `pv` block with the thresholds and latch state.
+
 `serve` polls PV panel voltage over GATT register `0xEDBB` at least every 10 seconds and exposes `victron_panel_voltage_volts` on `/metrics` while a 2-byte value is fresh (30 s). Instant Readout does not carry panel voltage. Night-time `0xFFFF` is omitted. If a poll fails, back off 20–120 s. Always GET `0xEDBB` after STREAM_ENABLE even if no `08` frame arrived yet. Do not USB-reset the adapter from that loop.
 
 Handshake on this SmartSolar: `01` / `0300` / `f980` / `060082189342102703010303` (VictronConnect stream-enable). That last frame is what switches the radio to type-03 `08 03 19` value notifies, including `0xEDBB`. Without the trailing `03010303`, GET returns `09 00 19 ed bb 01` (unknown id, not volts). Do not send `fa80ff` or `f941` after the blob — those drop this unit.

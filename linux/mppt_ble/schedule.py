@@ -13,6 +13,14 @@ session when the charger already matches the window, and a BLE failure backs
 off instead of hammering the adapter every poll. When the mode cannot be read
 back (this SmartSolar does not always echo the mode register), it falls back
 to a blind idempotent apply so the window is still enforced.
+
+Optional PV gating (:class:`PvSchedule`) expands the daytime window: once
+``wake_after`` has passed and panel voltage reaches ``wake_panel_v`` the
+charger turns ON early, and once ``sleep_after`` has passed and output falls
+below ``sleep_watts`` it turns OFF early. Both decisions latch for the local
+day, and the base window stays the fallback, so the charger is never left off
+because of a missing/odd BLE reading. PV gating is ignored for overnight or
+24 h windows where the base window is already the intent.
 """
 
 from __future__ import annotations
@@ -20,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -30,6 +39,46 @@ log = logging.getLogger("mppt_ble")
 DEFAULT_ENABLED = True
 DEFAULT_ENABLE = "07:00"
 DEFAULT_DISABLE = "18:00"
+DEFAULT_PV_ENABLED = True
+DEFAULT_PV_WAKE_AFTER = "05:00"
+DEFAULT_PV_WAKE_PANEL_V = 60.0
+DEFAULT_PV_SLEEP_AFTER = "17:00"
+DEFAULT_PV_SLEEP_WATTS = 40.0
+
+
+def _number(value: object, default: float) -> float:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+@dataclass
+class PvSchedule:
+    """PV-based early wake / early sleep layered on top of the daily window.
+
+    ``wake_after``/``sleep_after`` are minutes since local midnight. A reading
+    of ``None`` (stale Instant Readout, night-NA panel voltage) never latches.
+    """
+
+    enabled: bool = True
+    wake_after: int = 5 * 60
+    wake_panel_v: float = 60.0
+    sleep_after: int = 17 * 60
+    sleep_watts: float = 40.0
+
+    @classmethod
+    def from_mapping(cls, raw: object) -> "PvSchedule":
+        src = raw if isinstance(raw, dict) else {}
+        return cls(
+            enabled=coerce_enabled(src.get("enabled", True)),
+            wake_after=_minutes_or(src.get("wake_after", src.get("wakeAfter")), 5 * 60),
+            wake_panel_v=_number(src.get("wake_panel_v", src.get("wakePanelV")), 60.0),
+            sleep_after=_minutes_or(src.get("sleep_after", src.get("sleepAfter")), 17 * 60),
+            sleep_watts=_number(src.get("sleep_watts", src.get("sleepWatts")), 40.0),
+        )
+
 
 _HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
@@ -46,6 +95,7 @@ class ModeResult:
 
 ReadFn = Callable[[], Awaitable[ModeResult]]
 ApplyFn = Callable[[bool], Awaitable[ModeResult]]
+SampleFn = Callable[[], float | None]
 
 
 def parse_hhmm(value: object) -> int | None:
@@ -61,6 +111,31 @@ def parse_hhmm(value: object) -> int | None:
 def format_minutes(minutes: int) -> str:
     clamped = ((int(minutes) % 1440) + 1440) % 1440
     return f"{clamped // 60:02d}:{clamped % 60:02d}"
+
+
+def _minutes_or(value: object, default: int) -> int:
+    parsed = parse_hhmm(value)
+    return default if parsed is None else parsed
+
+
+def pv_wake_ready(now_minutes: int, panel_v: float | None, pv: PvSchedule) -> bool:
+    """True once past ``wake_after`` and panel voltage is high enough."""
+    return (
+        pv.enabled
+        and now_minutes >= pv.wake_after
+        and panel_v is not None
+        and panel_v >= pv.wake_panel_v
+    )
+
+
+def pv_sleep_due(now_minutes: int, watts: float | None, pv: PvSchedule) -> bool:
+    """True when it is past ``sleep_after`` and PV output has collapsed."""
+    return (
+        pv.enabled
+        and now_minutes >= pv.sleep_after
+        and watts is not None
+        and watts < pv.sleep_watts
+    )
 
 
 def coerce_enabled(value: object) -> bool:
@@ -103,7 +178,9 @@ def next_transition_at(
     return boundary
 
 
-def validated_config(enabled: object, enable_time: object, disable_time: object) -> dict:
+def validated_config(
+    enabled: object, enable_time: object, disable_time: object, pv: object = None
+) -> dict:
     """Strict parse for user input; raises ValueError on a malformed time."""
     enable_minutes = parse_hhmm(enable_time)
     if enable_minutes is None:
@@ -115,6 +192,7 @@ def validated_config(enabled: object, enable_time: object, disable_time: object)
         "enabled": coerce_enabled(enabled),
         "enable_time": format_minutes(enable_minutes),
         "disable_time": format_minutes(disable_minutes),
+        "pv": validated_pv_config(pv),
     }
 
 
@@ -132,6 +210,69 @@ def normalize_config(raw: object) -> dict:
         "enabled": enabled,
         "enable_time": format_minutes(enable_minutes),
         "disable_time": format_minutes(disable_minutes),
+        "pv": normalize_pv_config(src.get("pv")),
+    }
+
+
+def normalize_pv_config(raw: object) -> dict:
+    """Lenient parse for the PV wake/sleep rules; bad fields fall back."""
+    src = raw if isinstance(raw, dict) else {}
+    wake = parse_hhmm(src.get("wake_after", src.get("wakeAfter")))
+    if wake is None:
+        wake = parse_hhmm(DEFAULT_PV_WAKE_AFTER)
+    sleep = parse_hhmm(src.get("sleep_after", src.get("sleepAfter")))
+    if sleep is None:
+        sleep = parse_hhmm(DEFAULT_PV_SLEEP_AFTER)
+    return {
+        "enabled": coerce_enabled(src.get("enabled", DEFAULT_PV_ENABLED)),
+        "wake_after": format_minutes(wake),
+        "wake_panel_v": max(
+            0.0,
+            _number(
+                src.get("wake_panel_v", src.get("wakePanelV")), DEFAULT_PV_WAKE_PANEL_V
+            ),
+        ),
+        "sleep_after": format_minutes(sleep),
+        "sleep_watts": max(
+            0.0,
+            _number(
+                src.get("sleep_watts", src.get("sleepWatts")), DEFAULT_PV_SLEEP_WATTS
+            ),
+        ),
+    }
+
+
+def validated_pv_config(raw: object) -> dict:
+    """Strict parse for user input; raises ValueError on a malformed time."""
+    src = raw if isinstance(raw, dict) else {}
+    wake_raw = src.get("wake_after", src.get("wakeAfter"))
+    wake = parse_hhmm(wake_raw)
+    if wake is None:
+        if wake_raw is not None:
+            raise ValueError("pv wakeAfter must be HH:MM")
+        wake = parse_hhmm(DEFAULT_PV_WAKE_AFTER)
+    sleep_raw = src.get("sleep_after", src.get("sleepAfter"))
+    sleep = parse_hhmm(sleep_raw)
+    if sleep is None:
+        if sleep_raw is not None:
+            raise ValueError("pv sleepAfter must be HH:MM")
+        sleep = parse_hhmm(DEFAULT_PV_SLEEP_AFTER)
+    return {
+        "enabled": coerce_enabled(src.get("enabled", DEFAULT_PV_ENABLED)),
+        "wake_after": format_minutes(wake),
+        "wake_panel_v": max(
+            0.0,
+            _number(
+                src.get("wake_panel_v", src.get("wakePanelV")), DEFAULT_PV_WAKE_PANEL_V
+            ),
+        ),
+        "sleep_after": format_minutes(sleep),
+        "sleep_watts": max(
+            0.0,
+            _number(
+                src.get("sleep_watts", src.get("sleepWatts")), DEFAULT_PV_SLEEP_WATTS
+            ),
+        ),
     }
 
 
@@ -155,11 +296,23 @@ class ScheduleController:
         retry_s: float = 120.0,
         retry_max_s: float = 900.0,
         now_fn: Callable[[], float] = time.time,
+        pv: PvSchedule | object | None = None,
+        watts: SampleFn | None = None,
+        panel_v: SampleFn | None = None,
     ) -> None:
         self.config = normalize_config(config)
         self._read = read
         self._apply = apply
         self._tz = tz
+        if pv is not None:
+            self.pv = pv if isinstance(pv, PvSchedule) else PvSchedule.from_mapping(pv)
+        else:
+            self.pv = PvSchedule.from_mapping(self.config["pv"])
+        self._watts = watts
+        self._panel_v = panel_v
+        self._pv_day: dt.date | None = None
+        self._morning_started = False
+        self._evening_ended = False
         self._poll_s = poll_s
         self._verify_s = verify_s
         self._retry_s = retry_s
@@ -193,12 +346,59 @@ class ScheduleController:
             disable if disable is not None else parse_hhmm(DEFAULT_DISABLE),
         )
 
+    def _sample(self, fn: SampleFn | None) -> float | None:
+        if fn is None:
+            return None
+        try:
+            value = fn()
+        except Exception:
+            log.exception("schedule: PV sample failed")
+            return None
+        if isinstance(value, bool):
+            return None
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def _reset_pv_day(self, local: dt.datetime) -> None:
+        day = local.date()
+        if day != self._pv_day:
+            self._pv_day = day
+            self._morning_started = False
+            self._evening_ended = False
+
     def desired_on(self, now: float | None = None) -> bool | None:
         if not self.config["enabled"]:
             return None
         local = self._local(now)
+        now_minutes = local.hour * 60 + local.minute
         enable, disable = self._minutes()
-        return is_in_window(local.hour * 60 + local.minute, enable, disable)
+        base = is_in_window(now_minutes, enable, disable)
+        pv = self.pv
+        # PV gating only makes sense for a daytime window; an overnight / 24 h
+        # window is an explicit intent that should not be trimmed by sunshine.
+        if pv is None or not pv.enabled or enable >= disable:
+            return base
+        self._reset_pv_day(local)
+        if not self._evening_ended:
+            if pv_sleep_due(now_minutes, self._sample(self._watts), pv):
+                self._evening_ended = True
+                log.info(
+                    "schedule: PV sleep after %s (watts < %.0fW)",
+                    format_minutes(pv.sleep_after),
+                    pv.sleep_watts,
+                )
+        if not self._evening_ended and not self._morning_started and not base:
+            if pv_wake_ready(now_minutes, self._sample(self._panel_v), pv):
+                self._morning_started = True
+                log.info(
+                    "schedule: PV wake after %s (panel ≥ %.1fV)",
+                    format_minutes(pv.wake_after),
+                    pv.wake_panel_v,
+                )
+        if self._evening_ended:
+            return False
+        if self._morning_started:
+            return True
+        return base
 
     def _fail(self, message: str) -> None:
         self.last_error = message or "schedule apply failed"
@@ -237,8 +437,12 @@ class ScheduleController:
     def update_config(self, config: object) -> None:
         """Replace the window, clear any manual override, and enforce now."""
         self.config = normalize_config(config)
+        self.pv = PvSchedule.from_mapping(self.config["pv"])
         self.override_until = 0.0
         self._desired_memo = None
+        self._pv_day = None
+        self._morning_started = False
+        self._evening_ended = False
         self._backoff = 0.0
         self._next_attempt_at = 0.0
         self.wake()
@@ -253,11 +457,25 @@ class ScheduleController:
         override_time = None
         if override_until:
             override_time = self._local(override_until).strftime("%H:%M")
+        pv_snap = None
+        if self.pv is not None and self.pv.enabled:
+            pv_snap = {
+                "enabled": True,
+                "wakeAfter": format_minutes(self.pv.wake_after),
+                "wakePanelV": self.pv.wake_panel_v,
+                "sleepAfter": format_minutes(self.pv.sleep_after),
+                "sleepWatts": self.pv.sleep_watts,
+                "morningStarted": self._morning_started,
+                "eveningEnded": self._evening_ended,
+                "watts": self._sample(self._watts),
+                "panelV": self._sample(self._panel_v),
+            }
         return {
             "enabled": self.config["enabled"],
             "enableTime": self.config["enable_time"],
             "disableTime": self.config["disable_time"],
             "inWindow": desired,
+            "pv": pv_snap,
             "desiredOn": desired,
             "nextTransitionAt": int(nxt.timestamp()) if nxt else None,
             "nextTransitionTime": nxt.strftime("%H:%M") if nxt else None,
