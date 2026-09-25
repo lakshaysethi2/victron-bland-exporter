@@ -96,6 +96,9 @@ pure daily window. Stored alongside the window as `schedule.pv` in
 `~/.config/mppt/devices.json`; `/charger/status` and `/charger/schedule` expose
 a `pv` block with the thresholds and latch state.
 
+Full operator notes (rules, status/log lines, deploy):
+[`docs/pv-charger-schedule.md`](../docs/pv-charger-schedule.md).
+
 `serve` polls PV panel voltage over GATT register `0xEDBB` at least every 10 seconds and exposes `victron_panel_voltage_volts` on `/metrics` while a 2-byte value is fresh (30 s). Instant Readout does not carry panel voltage. Night-time `0xFFFF` is omitted. If a poll fails, back off 20–120 s. Always GET `0xEDBB` after STREAM_ENABLE even if no `08` frame arrived yet. Do not USB-reset the adapter from that loop.
 
 Handshake on this SmartSolar: `01` / `0300` / `f980` / `060082189342102703010303` (VictronConnect stream-enable). That last frame is what switches the radio to type-03 `08 03 19` value notifies, including `0xEDBB`. Without the trailing `03010303`, GET returns `09 00 19 ed bb 01` (unknown id, not volts). Do not send `fa80ff` or `f941` after the blob — those drop this unit.
