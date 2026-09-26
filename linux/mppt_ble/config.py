@@ -21,19 +21,18 @@ def load_devices(path: Path = DEFAULT_PATH) -> dict:
 
 
 def load_schedule(path: Path = DEFAULT_PATH) -> dict:
-    """Persisted daily window, defaults applied for missing/bad fields."""
+    """Persisted sun rules, defaults applied for missing/bad fields."""
     return normalize_config(load_devices(path).get("schedule"))
 
 
 def save_schedule(
     enabled: object,
-    enable_time: object,
-    disable_time: object,
-    pv: object = None,
+    wake_frac: object = None,
+    sleep_frac: object = None,
     path: Path = DEFAULT_PATH,
 ) -> dict:
-    """Validate and atomically persist the window (and PV rules); raises ValueError/OSError."""
-    entry = validated_config(enabled, enable_time, disable_time, pv)
+    """Validate and atomically persist the sun rules; raises ValueError/OSError."""
+    entry = validated_config(enabled, wake_frac, sleep_frac)
     data: dict = {}
     if path.is_file():
         try:

@@ -1,3 +1,8 @@
+import os
+import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 from mppt_ble.http_page import render_page
@@ -34,23 +39,42 @@ class HttpPageTest(unittest.TestCase):
         self.assertIn("panelError", html)
         self.assertIn("GATT", html)
 
-    def test_page_has_editable_daily_schedule(self):
+    def test_page_has_editable_sun_schedule(self):
         html = render_page("mppt.lak.nz")
         self.assertIn("Charger schedule", html)
-        self.assertIn("Daily window", html)
-        self.assertIn("Sunlight boost", html)
+        self.assertIn("Sun rules", html)
+        self.assertIn("Learned", html)
         self.assertIn('id="schEnabled"', html)
-        self.assertIn('id="schOn"', html)
-        self.assertIn('id="schOff"', html)
+        self.assertIn('id="schWakeFrac"', html)
+        self.assertIn('id="schSleepFrac"', html)
+        self.assertIn('id="schLearned"', html)
         self.assertIn('id="btnSaveSched"', html)
         self.assertIn('id="schedClock"', html)
         self.assertIn('id="schedPill"', html)
-        self.assertIn('id="schedTrack"', html)
         self.assertIn("schSummary", html)
+        self.assertIn("wakeFrac", html)
+        self.assertIn("sleepFrac", html)
         self.assertIn("/charger/schedule", html)
         self.assertIn("paintSchedule", html)
         self.assertIn("serverZone", html)
         self.assertIn("Unsaved changes", html)
+
+    def test_page_script_parses(self):
+        # A syntax error anywhere in the card script leaves the page dead (no unlock, no buttons).
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available")
+        script = re.findall(r"<script>(.*?)</script>", render_page("mppt.lak.nz"), re.S)[0]
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+            fh.write(script)
+            path = fh.name
+        try:
+            done = subprocess.run(
+                [node, "--check", path], capture_output=True, text=True, timeout=30
+            )
+        finally:
+            os.unlink(path)
+        self.assertEqual(0, done.returncode, done.stderr)
 
     def test_max_per_hour_in_hint(self):
         html = render_page("mppt.lak.nz", max_per_hour=6)

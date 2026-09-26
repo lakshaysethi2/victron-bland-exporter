@@ -78,25 +78,14 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
   .sched-state.off .dot {{ background: var(--bad); box-shadow: 0 0 0 4px rgba(239,68,68,.16); }}
   .sched-state .st {{ font-weight: 700; font-size: 15px; }}
   .sched-state .sr {{ color: var(--muted); font-size: 12px; line-height: 1.35; }}
-  .track {{ position: relative; height: 14px; border-radius: 7px; background: #0d1626; overflow: hidden; border: 1px solid var(--line); }}
-  .seg {{ position: absolute; top: 0; bottom: 0; }}
-  .seg.fixed {{ background: rgba(34,197,94,.55); }}
-  .seg.pv {{ background: repeating-linear-gradient(45deg, rgba(56,189,248,.5) 0 4px, rgba(56,189,248,.12) 4px 8px); }}
-  .now {{ position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; box-shadow: 0 0 3px rgba(255,255,255,.9); }}
-  .tl-labels {{ display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }}
-  .tl-legend {{ display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin: 8px 0 4px; }}
-  .tl-legend i {{ display: inline-block; width: 18px; height: 8px; border-radius: 3px; margin-right: 5px; vertical-align: middle; }}
-  .tl-legend i.fixed {{ background: rgba(34,197,94,.55); }}
-  .tl-legend i.pv {{ background: repeating-linear-gradient(45deg, rgba(56,189,248,.5) 0 4px, rgba(56,189,248,.12) 4px 8px); }}
-  .tl-legend i.now {{ background: #fff; width: 3px; height: 12px; }}
+  .track {{ display: none; }}
   .sect {{ margin-top: 14px; padding-top: 12px; border-top: 1px solid #1a2436; }}
   .sect h4 {{ margin: 0 0 2px; font-size: 13px; color: var(--text); }}
   .sect p {{ margin: 0 0 10px; font-size: 12px; color: var(--muted); line-height: 1.45; }}
   .frow {{ display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; margin-bottom: 8px; font-size: 13px; color: var(--muted); }}
   .sched .chk {{ display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 14px; margin: 0 0 10px; }}
   .sched .chk input {{ width: 20px; height: 20px; flex: 0 0 auto; }}
-  .sched input[type=time], .sched input[type=number] {{ padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: #0d1626; color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }}
-  .sched input[type=time] {{ width: 96px; }}
+  .sched input[type=number] {{ padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: #0d1626; color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }}
   .sched input[type=number] {{ width: 76px; }}
   .sched-foot {{ display: flex; align-items: center; gap: 10px; margin-top: 14px; }}
   .sched-foot .btn {{ flex: 1; margin: 0; }}
@@ -150,24 +139,15 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
       <span class="dot"></span>
       <div><div class="st" id="schedStateMain">—</div><div class="sr" id="schedStateWhy">Unlock to load the schedule.</div></div>
     </div>
-    <div class="track" id="schedTrack"></div>
-    <div class="tl-labels"><span>00:00</span><span>12:00</span><span>24:00</span></div>
-    <div class="tl-legend">
-      <span><i class="fixed"></i>Daily window</span>
-      <span><i class="pv"></i>Sunlight boost</span>
-      <span><i class="now"></i>Now</span>
+    <div class="sect">
+      <h4>Sun rules</h4>
+      <p>No clock. Charger starts when panel voltage says the sun is up, and stops when output has collapsed while the panel is dark. Both levels come from this array's own history below, so they follow the season on their own.</p>
+      <div class="frow">Start at <input type="number" id="schWakeFrac" value="50" step="5" min="5" max="95" inputmode="decimal"> % up the night-to-peak span</div>
+      <div class="frow">Stop when output &lt; <input type="number" id="schSleepFrac" value="5" step="1" min="1" max="50" inputmode="decimal"> % of today's peak</div>
     </div>
     <div class="sect">
-      <h4>Daily window</h4>
-      <p>Charger turns on between these times every day, whatever the weather.</p>
-      <div class="frow">On at <input type="time" id="schOn" value="07:00" step="60"> off at <input type="time" id="schOff" value="18:00" step="60"></div>
-    </div>
-    <div class="sect">
-      <h4>Sunlight boost</h4>
-      <p>Start early once the panel wakes up, stop early once output fades. The daily window above stays the fallback, so a missing reading never leaves the charger off.</p>
-      <label class="chk"><input type="checkbox" id="pvEnabled" checked> Use sunlight boost</label>
-      <div class="frow">Start when panel ≥ <input type="number" id="pvWakePanelV" value="60" step="1" min="0" inputmode="decimal"> V, not before <input type="time" id="pvWakeAfter" value="05:00" step="60"></div>
-      <div class="frow">Stop when output &lt; <input type="number" id="pvSleepWatts" value="40" step="1" min="0" inputmode="decimal"> W, not before <input type="time" id="pvSleepAfter" value="17:00" step="60"></div>
+      <h4>Learned</h4>
+      <p id="schLearned">Unlock to load what the array has shown so far.</p>
     </div>
     <div class="sched-foot">
       <button class="btn ghost" id="btnSaveSched" type="button" disabled>Save changes</button>
@@ -192,21 +172,16 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
   var gate = document.getElementById("gate");
   var secretInput = document.getElementById("secret");
   var schEnabled = document.getElementById("schEnabled");
-  var schOn = document.getElementById("schOn");
-  var schOff = document.getElementById("schOff");
   var schSummary = document.getElementById("schSummary");
   var schedClock = document.getElementById("schedClock");
   var schedPill = document.getElementById("schedPill");
   var schedStateMain = document.getElementById("schedStateMain");
   var schedStateWhy = document.getElementById("schedStateWhy");
-  var schedTrack = document.getElementById("schedTrack");
+  var schLearned = document.getElementById("schLearned");
   var schedDirty = document.getElementById("schedDirty");
-  var pvEnabled = document.getElementById("pvEnabled");
-  var pvWakeAfter = document.getElementById("pvWakeAfter");
-  var pvWakePanelV = document.getElementById("pvWakePanelV");
-  var pvSleepAfter = document.getElementById("pvSleepAfter");
-  var pvSleepWatts = document.getElementById("pvSleepWatts");
-  var schedInputs = [schEnabled, schOn, schOff, pvEnabled, pvWakeAfter, pvWakePanelV, pvSleepAfter, pvSleepWatts];
+  var schWakeFrac = document.getElementById("schWakeFrac");
+  var schSleepFrac = document.getElementById("schSleepFrac");
+  var schedInputs = [schEnabled, schWakeFrac, schSleepFrac];
   var btnSaveSched = document.getElementById("btnSaveSched");
   var schedSaved = null, schedBusy = false, schedClockBase = null;
   var btns = ["btnPulse","btnOn","btnOff","btnRead"].map(function (id) {{ return document.getElementById(id); }});
@@ -233,46 +208,19 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
     var m = Math.floor(s / 60), r = s % 60;
     return m + ":" + (r < 10 ? "0" : "") + r;
   }}
-  function countdownTo(ts) {{
-    var s = Math.max(0, Math.floor(ts - Date.now() / 1000));
-    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-    if (h > 0) return h + "h " + m + "m";
-    if (m > 0) return m + "m";
-    return s + "s";
-  }}
   function toMin(v) {{
     var m = /^(\d{{1,2}}):(\d{{2}})$/.exec(String(v || ""));
     if (!m) return null;
     return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
   }}
   function pad2(n) {{ return (n < 10 ? "0" : "") + n; }}
-  function segments(a, b) {{
-    a = ((a % 1440) + 1440) % 1440;
-    b = ((b % 1440) + 1440) % 1440;
-    if (a === b) return [[0, 1440]];
-    if (a < b) return [[a, b]];
-    return [[a, 1440], [0, b]];
-  }}
-  function segHtml(r, cls) {{
-    var left = r[0] / 1440 * 100, width = (r[1] - r[0]) / 1440 * 100;
-    if (width <= 0) return "";
-    return "<div class='seg " + cls + "' style='left:" + left.toFixed(3) + "%;width:" + width.toFixed(3) + "%'></div>";
-  }}
+  function pct(v, fallback) {{ return String(Math.round((v == null ? fallback : v) * 100)); }}
   function schedCurrent() {{
-    return JSON.stringify({{
-      e: schEnabled.checked, on: schOn.value, off: schOff.value,
-      pe: pvEnabled.checked, pw: pvWakeAfter.value, pv: pvWakePanelV.value,
-      ps: pvSleepAfter.value, psw: pvSleepWatts.value
-    }});
+    return JSON.stringify({{ e: schEnabled.checked, wf: schWakeFrac.value, sf: schSleepFrac.value }});
   }}
   function schedFromServer(s) {{
-    var pv = (s && s.pv) || {{}};
-    return JSON.stringify({{
-      e: !!s.enabled, on: s.enableTime || "07:00", off: s.disableTime || "18:00",
-      pe: pv.enabled !== false, pw: pv.wakeAfter || "05:00",
-      pv: pv.wakePanelV != null ? String(pv.wakePanelV) : "60",
-      ps: pv.sleepAfter || "17:00", psw: pv.sleepWatts != null ? String(pv.sleepWatts) : "40"
-    }});
+    s = s || {{}};
+    return JSON.stringify({{ e: !!s.enabled, wf: pct(s.wakeFrac, 0.5), sf: pct(s.sleepFrac, 0.05) }});
   }}
   function updateDirty() {{
     if (schedSaved == null) {{ schedDirty.textContent = ""; btnSaveSched.disabled = true; return; }}
@@ -283,64 +231,46 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
   }}
   function paintSchedule(s) {{
     s = s || {{}};
-    var pv = s.pv || {{}};
-    var en = toMin(s.enableTime), dis = toMin(s.disableTime), nowM = toMin(s.serverTime);
+    var L = s.learned || {{}};
     schedClock.textContent = (s.serverTime || "—") + (s.serverZone ? (" " + s.serverZone) : "");
-    var base = null;
-    if (en != null && dis != null && nowM != null) {{
-      if (en === dis) base = true;
-      else if (en < dis) base = nowM >= en && nowM < dis;
-      else base = nowM >= en || nowM < dis;
-    }}
-    var on = !!s.inWindow;
+    var on = s.desiredOn === true;
+    var unknown = s.desiredOn == null;
     var main, why;
     if (!s.enabled) {{
       main = "Manual control";
       why = "Schedule is off — the charger only changes when you tap a button.";
-    }} else if (s.overrideUntil) {{
-      main = on ? "On · manual override" : "Off · manual override";
-      why = "Your manual tap pauses the schedule until " + (s.overrideUntilTime || "the next change") + ".";
-    }} else if (on && base === false) {{
-      main = "On · sunlight boost";
-      why = "Started early because the panel was above " + (pv.wakePanelV != null ? pv.wakePanelV : "?") + " V.";
-    }} else if (!on && base === true) {{
-      main = "Off · sunlight boost";
-      why = "Stopped early because output fell below " + (pv.sleepWatts != null ? pv.sleepWatts : "?") + " W.";
+    }} else if (s.override) {{
+      main = on ? "On · manual" : "Off · manual";
+      why = "You set this by hand; the schedule takes over when the sun changes. " + (s.reason || "");
+    }} else if (unknown) {{
+      main = "Holding";
+      why = "No panel reading yet, so the charger is left as it is. " + (s.reason || "");
     }} else if (on) {{
-      main = "On · daily window";
-      why = "Inside the " + (s.enableTime || "?") + "–" + (s.disableTime || "?") + " window.";
+      main = "On · sun up";
+      why = s.reason || "";
     }} else {{
-      main = "Off · outside window";
-      why = "Waiting for the window or the sunlight boost.";
+      main = "Off · sun down";
+      why = s.reason || "";
     }}
     schedPill.className = "sched-state " + (on ? "on" : "off");
     schedStateMain.textContent = main;
     schedStateWhy.textContent = why;
-    var html = "";
-    if (s.enabled && en != null && dis != null && en < dis) {{
-      if (pv.enabled && pv.wakeAfter != null) {{
-        var wa = toMin(pv.wakeAfter);
-        if (wa != null && wa < en) segments(wa, en).forEach(function (r) {{ html += segHtml(r, "pv"); }});
-      }}
-      segments(en, dis).forEach(function (r) {{ html += segHtml(r, "fixed"); }});
-      if (pv.enabled && pv.sleepAfter != null) {{
-        var sa = toMin(pv.sleepAfter);
-        if (sa != null && sa < dis) segments(sa, dis).forEach(function (r) {{ html += segHtml(r, "pv"); }});
-      }}
-    }}
-    if (nowM != null) {{
-      html += "<div class='now' style='left:" + (nowM / 1440 * 100).toFixed(3) + "%'></div>";
-    }}
-    schedTrack.innerHTML = html;
-    var bits = [];
-    if (s.enabled && !s.overrideUntil && s.nextTransitionAt) {{
-      bits.push("Next daily change: " + (s.nextTransitionOn ? "on" : "off") + " at " + (s.nextTransitionTime || "?") + " (" + countdownTo(s.nextTransitionAt) + ")");
-    }}
-    if (s.enabled && pv.enabled) {{
-      bits.push("Boost: on above " + (pv.wakePanelV != null ? pv.wakePanelV : "?") + " V after " + (pv.wakeAfter || "?") + ", off below " + (pv.sleepWatts != null ? pv.sleepWatts : "?") + " W after " + (pv.sleepAfter || "?"));
-    }}
-    if (s.lastError) bits.push("Last BLE error: " + s.lastError);
-    schSummary.textContent = bits.join(" · ");
+    var span = (L.pvMax != null && L.pvNight != null) ? fmt(L.pvMax - L.pvNight, 0, " V") : "—";
+    var bits = [
+      (L.pvMax != null && L.pvNight != null)
+        ? ("array: floor " + fmt(L.pvNight, 0, " V") + " to peak " + fmt(L.pvMax, 0, " V") + ", span " + span + ", " + (L.days || 0) + " day(s) of history")
+        : (L.bootstrap ? "no history yet — waking on 2× bus voltage" : "no history yet"),
+      "start above " + (L.bootstrap ? "2× bus (learning)" : fmt(L.wakeV, 0, " V")) + " every day",
+      "stop below " + fmt(L.sleepW, 0, " W") + " (today's peak " + fmt(L.wattsPeakToday, 0, " W") + ") while the panel is dark",
+      "now: panel " + fmt(s.panelV, 0, " V") + ", bus " + fmt(s.busV, 0, " V") + ", output " + fmt(s.watts, 0, " W")
+    ];
+    schLearned.textContent = bits.join(". ") + ".";
+    var notes = [];
+    if (s.sunriseLatched) notes.push("sunrise latched");
+    if (s.sunsetLatched) notes.push("sunset latched");
+    if (s.lastAppliedAt) notes.push("last write " + clock(s.lastAppliedAt) + " → " + (s.lastAppliedOn ? "on" : "off"));
+    if (s.lastError) notes.push("last BLE error: " + s.lastError);
+    schSummary.textContent = notes.join(" · ");
   }}
   function clock(ts) {{
     if (!ts) return "";
@@ -430,14 +360,8 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
     gate.style.display = "none";
     var s = d.schedule || {{}};
     if (document.activeElement !== schEnabled) schEnabled.checked = !!s.enabled;
-    if (document.activeElement !== schOn) schOn.value = s.enableTime || "07:00";
-    if (document.activeElement !== schOff) schOff.value = s.disableTime || "18:00";
-    var pv = s.pv || {{}};
-    if (document.activeElement !== pvEnabled) pvEnabled.checked = pv.enabled !== false;
-    if (document.activeElement !== pvWakeAfter) pvWakeAfter.value = pv.wakeAfter || "05:00";
-    if (document.activeElement !== pvWakePanelV && pv.wakePanelV != null) pvWakePanelV.value = pv.wakePanelV;
-    if (document.activeElement !== pvSleepAfter) pvSleepAfter.value = pv.sleepAfter || "17:00";
-    if (document.activeElement !== pvSleepWatts && pv.sleepWatts != null) pvSleepWatts.value = pv.sleepWatts;
+    if (document.activeElement !== schWakeFrac) schWakeFrac.value = pct(s.wakeFrac, 0.5);
+    if (document.activeElement !== schSleepFrac) schSleepFrac.value = pct(s.sleepFrac, 0.05);
     schedSaved = schedFromServer(s);
     if (s.serverTime != null && toMin(s.serverTime) != null) {{
       schedClockBase = {{ secs: toMin(s.serverTime) * 60, at: Date.now() }};
@@ -496,15 +420,8 @@ def render_page(host: str, max_per_hour: int = 4, gap_avg_s: float = 120, extrem
       headers: {{ "Content-Type": "application/json" }},
       body: JSON.stringify({{
         enabled: schEnabled.checked,
-        enableTime: schOn.value,
-        disableTime: schOff.value,
-        pv: {{
-          enabled: pvEnabled.checked,
-          wakeAfter: pvWakeAfter.value,
-          wakePanelV: parseFloat(pvWakePanelV.value),
-          sleepAfter: pvSleepAfter.value,
-          sleepWatts: parseFloat(pvSleepWatts.value)
-        }}
+        wakeFrac: (parseFloat(schWakeFrac.value) || 50) / 100,
+        sleepFrac: (parseFloat(schSleepFrac.value) || 5) / 100
       }})
     }})
       .then(function (r) {{ return r.json().then(function (d) {{ return {{ r: r, d: d }}; }}); }})

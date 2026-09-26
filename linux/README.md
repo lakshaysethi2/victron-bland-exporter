@@ -54,14 +54,15 @@ curl -sS -H "X-Remote-Secret: $MPPT_REMOTE_SECRET" \
 
 ## Charger schedule
 
-`serve` enforces a daily window in the host's local time (default **ON 07:00, OFF 18:00**).
-It persists in `~/.config/mppt/devices.json` under `schedule` (mode 600):
+`serve` runs the charger off the array, not the clock. It persists in
+`~/.config/mppt/devices.json` under `schedule` (mode 600):
 
 ```json
-"schedule": {"enabled": true, "enable_time": "07:00", "disable_time": "18:00"}
+"schedule": {"enabled": true, "wake_frac": 0.5, "sleep_frac": 0.05}
 ```
 
-Edit it from the **Daily window** section of the **Charger schedule** card on `GET /charger`, or with the JSON API
+Edit the two fractions from the **Sun rules** section of the **Charger schedule**
+card on `GET /charger`, or with the JSON API
 (same `X-Remote-Secret` as every other `/charger*` route):
 
 ```bash
@@ -70,31 +71,30 @@ curl -sS -H "X-Remote-Secret: $MPPT_REMOTE_SECRET" \
   http://127.0.0.1:5338/charger/schedule
 curl -sS -H "X-Remote-Secret: $MPPT_REMOTE_SECRET" -H "Content-Type: application/json" \
   -X POST http://127.0.0.1:5338/charger/schedule \
-  -d '{"enabled":true,"enableTime":"07:00","disableTime":"18:00"}'
+  -d '{"enabled":true,"wakeFrac":0.5,"sleepFrac":0.05}'
 ```
 
-Semantics match the Android bridge (`ChargerSchedule.kt`): ON inside
-`[enable, disable)`, an overnight window when enable > disable, and equal times
-mean always ON (a degenerate config never locks the charger off). A manual
-Enable/Disable pauses the window until the next boundary, then the schedule
-re-asserts itself. The enforcer reads before it writes (falling back to a blind
-idempotent apply when the mode register is not echoed), re-verifies every 10
-minutes, re-applies after a restart, and backs off 2–15 min on BLE failure; a
-boundary flip retries immediately. `/charger/status` includes the live schedule
-(`inWindow`, next flip, override, last error).
+A manual Enable/Disable parks the schedule until the sun changes its mind, then
+the schedule re-asserts itself. The enforcer reads before it writes (falling back
+to a blind idempotent apply when the mode register is not echoed), re-verifies
+every 10 minutes, re-applies after a restart, and backs off 2–15 min on BLE
+failure; a state flip retries immediately. `/charger/status` includes the live
+schedule (`desiredOn`, learned levels, latches, override, last error).
 
-The daytime window is optionally extended by PV. Edit the **Sunlight boost**
-section of the Charger schedule card (or the same `/charger/schedule` API): with
-it on, the charger wakes early once the local time is past the start rule's
-*not before* time (default `05:00`) and the `0xEDBB` panel voltage reaches the
-start threshold (default 60 V), and sleeps early once the local time is past
-the stop rule's *not before* time (default `17:00`) and fresh Instant Readout
-output drops below the stop threshold (default 40 W). Both latches reset at
-local midnight. The 07:00–18:00 window stays the fallback, so a stale or missing
-reading never leaves the charger off; uncheck **Use sunlight boost** to keep the
-pure daily window. Stored alongside the window as `schedule.pv` in
-`~/.config/mppt/devices.json`; `/charger/status` and `/charger/schedule` expose
-a `pv` block with the thresholds and latch state.
+The schedule has no clock: the charger follows the array. It turns ON once the
+`0xEDBB` panel voltage reaches the wake level and OFF once output has collapsed
+*and* the panel voltage is below that level — a full battery also reads ~0 W at
+noon, so watts alone are not a sunset. Both levels are learned from this array's
+own history (`days` table in `~/.config/mppt/watchdog.sqlite`): the wake level is
+`pv_night + wake_frac × (pv_max − pv_night)` over the last 7 days and the sleep
+level is `sleep_frac × today's peak output`. Edit the two fractions in the **Sun
+rules** section of the Charger schedule card (or POST the same values to
+`/charger/schedule`); the card's **Learned** section shows the numbers they come
+from. Values are fractions 0–1, stored as `schedule.wake_frac`/`schedule.sleep_frac`
+in `~/.config/mppt/devices.json`. Before a day of history exists the wake level
+falls back to `2 × bus` (`0xEDEF`). Both decisions latch for the local day,
+sunrise clears a sunset latch, and with no panel reading at all the charger is
+left as it is.
 
 Full operator notes (rules, status/log lines, deploy):
 [`docs/pv-charger-schedule.md`](../docs/pv-charger-schedule.md).

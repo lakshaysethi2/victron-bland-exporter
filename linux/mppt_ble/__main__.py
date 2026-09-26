@@ -132,6 +132,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     scan_paused.clear()
     scan_idle.set()
     reset_state = ResetState()
+    store: WatchdogStore | None = None
     try:
         store = WatchdogStore(watchdog_db_path())
         n = hydrate_state(reset_state, store, time.time())
@@ -143,6 +144,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             int(reset_state.last_pulse_at) if reset_state.last_pulse_at else 0,
         )
     except Exception:
+        store = None
         log.exception("watchdog db unavailable; in-memory only")
     panel: dict = {
         "mac": mac.upper(),
@@ -234,6 +236,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
 
     async def watchdog() -> None:
         """Read live Instant Readout; do not HTTP-fetch /metrics."""
+        started = time.time()
         while True:
             await asyncio.sleep(10)
             row = fresh_row(mac)
@@ -263,6 +266,10 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                     candidate,
                 )
                 reset_state.last_status_log_at = ts
+            if ts - started < policy.local_mpp_gap_avg_s:
+                # Restored samples can look stuck on the first tick after a restart, so wait for a
+                # full average window of samples this process collected before pulsing.
+                continue
             if not should_pulse(
                 reset_state, ts, float(watts), policy, panel_v=panel_v, battery_v=battery_v
             ):
@@ -447,6 +454,12 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         sample = panel_sample(panel, time.time())
         return sample[1] if sample else None
 
+    def schedule_bus_v() -> float | None:
+        return reset_state.system_voltage_v
+
+    def schedule_history() -> dict:
+        return store.learned_inputs(time.time()) if store is not None else {}
+
     async def schedule_read() -> ModeResult:
         r = await _charger_cmd(mac, "read")
         return ModeResult(r.success, _mode_on(r.mode), r.message, r.mode)
@@ -477,6 +490,8 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         schedule_apply,
         watts=schedule_watts,
         panel_v=schedule_panel_v,
+        bus_v=schedule_bus_v,
+        history=schedule_history,
     )
 
     async def handle_charger(request: web.Request) -> web.Response:
@@ -490,6 +505,9 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         target = str((body.get("mac") if isinstance(body, dict) else None) or mac)
         if action == "restart":
             r = await do_pulse(target, "manual restart")
+            if r.success and target.upper() == mac.upper():
+                # Arm the same cooldown as the watchdog, or it pulses again on its next tick.
+                note_pulse(reset_state, time.time())
         elif action in ("on", "off", "read"):
             control_busy = True
             try:
@@ -530,24 +548,16 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
                 {"ok": False, "error": "JSON object required"}, status=400
             )
         current = schedule_ctl.config
-        current_pv = current.get("pv") if isinstance(current.get("pv"), dict) else None
-        body_pv = body.get("pv")
         try:
             entry = validated_config(
                 body.get("enabled", current["enabled"]),
-                body.get("enableTime", body.get("enable_time", current["enable_time"])),
-                body.get("disableTime", body.get("disable_time", current["disable_time"])),
-                body_pv if isinstance(body_pv, dict) else current_pv,
+                body.get("wakeFrac", body.get("wake_frac", current["wake_frac"])),
+                body.get("sleepFrac", body.get("sleep_frac", current["sleep_frac"])),
             )
         except ValueError as e:
             return web.json_response({"ok": False, "error": str(e)}, status=400)
         try:
-            saved = save_schedule(
-                entry["enabled"],
-                entry["enable_time"],
-                entry["disable_time"],
-                pv=entry["pv"],
-            )
+            saved = save_schedule(entry["enabled"], entry["wake_frac"], entry["sleep_frac"])
         except OSError as e:
             log.exception("schedule save failed")
             return web.json_response(

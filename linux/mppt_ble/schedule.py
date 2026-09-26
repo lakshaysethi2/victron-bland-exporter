@@ -1,26 +1,38 @@
-"""Daily charger window: pure logic plus an enforcing asyncio loop.
+"""Sun-driven charger schedule: pure PV logic plus an enforcing asyncio loop.
 
-Mirrors ``app/.../charger/ChargerSchedule.kt`` so both bridges agree:
+There is no clock here. The charger follows the array:
 
-- ``enable < disable`` -> ON inside ``[enable, disable)`` (daytime window).
-- ``enable > disable`` -> overnight window, ON from ``enable`` until ``disable``.
-- ``enable == disable`` -> 24 h window (a degenerate config never forces OFF).
-- A manual on/off pauses the window until the next boundary; the schedule then
-  re-asserts itself.
+- ON once panel voltage says the sun is up.
+- OFF once output has collapsed *and* panel voltage says the sun is down. The
+  conjunction matters: a full battery also reads ~0 W at noon, and that is not
+  a sunset.
 
-The controller reads before it writes, so a restart does not cost a GATT
-session when the charger already matches the window, and a BLE failure backs
-off instead of hammering the adapter every poll. When the mode cannot be read
-back (this SmartSolar does not always echo the mode register), it falls back
-to a blind idempotent apply so the window is still enforced.
+Both levels are inferred from this array's own history (``days`` table in the
+watchdog store, see :class:`Learned`) instead of hardcoded volts and watts:
 
-Optional PV gating (:class:`PvSchedule`) expands the daytime window: once
-``wake_after`` has passed and panel voltage reaches ``wake_panel_v`` the
-charger turns ON early, and once ``sleep_after`` has passed and output falls
-below ``sleep_watts`` it turns OFF early. Both decisions latch for the local
-day, and the base window stays the fallback, so the charger is never left off
-because of a missing/odd BLE reading. PV gating is ignored for overnight or
-24 h windows where the base window is already the intent.
+- ``wake_panel_v = pv_night + wake_frac × (pv_max − pv_night)`` over the last
+  ``LEARN_DAYS`` days, so the level follows the season and the array itself.
+- ``sleep_watts = sleep_frac × today's peak output``.
+
+``wake_frac``/``sleep_frac`` are the only knobs. Until a day of history exists
+the wake level falls back to ``BOOTSTRAP_VOC_BUS_MULT × bus`` (the "panel must
+clear the bus by 2×" rule the pulse rules already use) and "sun down" falls back
+to panel below the bus.
+
+Sunrise clears a sunset latch, so a restart after dark cannot wedge the charger
+out of a day, and a heavy cloud band that trips the sunset rule un-trips itself
+when the sun returns. A sunset needs a panel reading: a missing one is not
+evidence of anything, and if there is no reading at all before the first latch
+the charger is left exactly as it is. Decisions latch per local day.
+
+The controller reads before it writes, so a restart does not cost a GATT session
+when the charger already matches the sun, and a BLE failure backs off instead of
+hammering the adapter every poll. When the mode cannot be read back (this
+SmartSolar does not always echo the mode register), it falls back to a blind
+idempotent apply so the decision is still enforced.
+
+The phone app still runs the older time-window schedule, so the two bridges
+disagree while it is not being developed.
 """
 
 from __future__ import annotations
@@ -29,7 +41,6 @@ import asyncio
 import datetime as dt
 import logging
 import math
-import re
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable
@@ -37,16 +48,14 @@ from typing import Awaitable, Callable
 log = logging.getLogger("mppt_ble")
 
 DEFAULT_ENABLED = True
-DEFAULT_ENABLE = "07:00"
-DEFAULT_DISABLE = "18:00"
-DEFAULT_PV_ENABLED = True
-DEFAULT_PV_WAKE_AFTER = "05:00"
-DEFAULT_PV_WAKE_PANEL_V = 60.0
-DEFAULT_PV_SLEEP_AFTER = "17:00"
-DEFAULT_PV_SLEEP_WATTS = 40.0
+DEFAULT_WAKE_FRAC = 0.5
+DEFAULT_SLEEP_FRAC = 0.05
+LEARN_DAYS = 7
+LEARN_REFRESH_S = 60.0
+BOOTSTRAP_VOC_BUS_MULT = 2.0
 
 
-def _number(value: object, default: float) -> float:
+def _number(value: object, default: float | None = None) -> float | None:
     try:
         number = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
@@ -54,33 +63,81 @@ def _number(value: object, default: float) -> float:
     return number if math.isfinite(number) else default
 
 
+def _frac(value: object, default: float) -> float:
+    number = _number(value)
+    if number is None or not 0.0 <= number <= 1.0:
+        return default
+    return number
+
+
+def _strict_frac(value: object, default: float, field: str) -> float:
+    if value is None or value == "":
+        return default
+    number = _number(value)
+    if number is None or not 0.0 <= number <= 1.0:
+        raise ValueError(f"{field} must be a number between 0 and 1")
+    return number
+
+
+def coerce_enabled(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "off", "disabled")
+    return bool(value)
+
+
 @dataclass
-class PvSchedule:
-    """PV-based early wake / early sleep layered on top of the daily window.
+class Learned:
+    """Levels inferred from stored history; every field is optional."""
 
-    ``wake_after``/``sleep_after`` are minutes since local midnight. A reading
-    of ``None`` (stale Instant Readout, night-NA panel voltage) never latches.
-    """
-
-    enabled: bool = True
-    wake_after: int = 5 * 60
-    wake_panel_v: float = 60.0
-    sleep_after: int = 17 * 60
-    sleep_watts: float = 40.0
+    pv_max: float | None = None
+    pv_night: float | None = None
+    watts_peak_today: float | None = None
+    days: int = 0
 
     @classmethod
-    def from_mapping(cls, raw: object) -> "PvSchedule":
+    def from_mapping(cls, raw: object) -> "Learned":
         src = raw if isinstance(raw, dict) else {}
+        days = _number(src.get("days"), 0.0) or 0.0
         return cls(
-            enabled=coerce_enabled(src.get("enabled", True)),
-            wake_after=_minutes_or(src.get("wake_after", src.get("wakeAfter")), 5 * 60),
-            wake_panel_v=_number(src.get("wake_panel_v", src.get("wakePanelV")), 60.0),
-            sleep_after=_minutes_or(src.get("sleep_after", src.get("sleepAfter")), 17 * 60),
-            sleep_watts=_number(src.get("sleep_watts", src.get("sleepWatts")), 40.0),
+            pv_max=_number(src.get("pv_max")),
+            pv_night=_number(src.get("pv_night")),
+            watts_peak_today=_number(src.get("watts_peak_today")),
+            days=int(days),
         )
 
+    def wake_v(self, wake_frac: float) -> float | None:
+        """Panel voltage half way up the array's own night-to-peak span."""
+        if self.pv_max is None or self.pv_night is None or self.pv_max <= self.pv_night:
+            return None
+        return self.pv_night + wake_frac * (self.pv_max - self.pv_night)
 
-_HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+    def sleep_w(self, sleep_frac: float) -> float | None:
+        """Watts below which today's output counts as collapsed."""
+        if not self.watts_peak_today or self.watts_peak_today <= 0:
+            return None
+        return sleep_frac * self.watts_peak_today
+
+
+def sun_up(panel_v: float | None, bus_v: float | None, wake_v: float | None) -> bool:
+    """Panel voltage high enough to call the sun up (bootstrap scales off the bus)."""
+    if panel_v is None:
+        return False
+    if wake_v is not None:
+        return panel_v >= wake_v
+    if bus_v is None or bus_v <= 0:
+        return False  # nothing to scale against yet: keep the charger off
+    return panel_v >= BOOTSTRAP_VOC_BUS_MULT * bus_v
+
+
+def sun_down(panel_v: float | None, bus_v: float | None, wake_v: float | None) -> bool:
+    """Panel voltage low enough to call the sun down; unknown is never "down"."""
+    if panel_v is None:
+        return False
+    if wake_v is not None:
+        return panel_v < wake_v
+    if bus_v is None or bus_v <= 0:
+        return False
+    return panel_v < bus_v
 
 
 @dataclass
@@ -96,192 +153,39 @@ class ModeResult:
 ReadFn = Callable[[], Awaitable[ModeResult]]
 ApplyFn = Callable[[bool], Awaitable[ModeResult]]
 SampleFn = Callable[[], float | None]
-
-
-def parse_hhmm(value: object) -> int | None:
-    """``"HH:mm"`` (also ``"H:mm"``) -> minutes since midnight, else None."""
-    if value is None:
-        return None
-    match = _HHMM.match(str(value).strip())
-    if not match:
-        return None
-    return int(match.group(1)) * 60 + int(match.group(2))
-
-
-def format_minutes(minutes: int) -> str:
-    clamped = ((int(minutes) % 1440) + 1440) % 1440
-    return f"{clamped // 60:02d}:{clamped % 60:02d}"
-
-
-def _minutes_or(value: object, default: int) -> int:
-    parsed = parse_hhmm(value)
-    return default if parsed is None else parsed
-
-
-def pv_wake_ready(now_minutes: int, panel_v: float | None, pv: PvSchedule) -> bool:
-    """True once past ``wake_after`` and panel voltage is high enough."""
-    return (
-        pv.enabled
-        and now_minutes >= pv.wake_after
-        and panel_v is not None
-        and panel_v >= pv.wake_panel_v
-    )
-
-
-def pv_sleep_due(now_minutes: int, watts: float | None, pv: PvSchedule) -> bool:
-    """True when it is past ``sleep_after`` and PV output has collapsed."""
-    return (
-        pv.enabled
-        and now_minutes >= pv.sleep_after
-        and watts is not None
-        and watts < pv.sleep_watts
-    )
-
-
-def coerce_enabled(value: object) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() not in ("", "0", "false", "no", "off", "disabled")
-    return bool(value)
-
-
-def is_in_window(now_minutes: int, enable_minutes: int, disable_minutes: int) -> bool:
-    """True when the charger should be ON at the given minute-of-day."""
-    if enable_minutes == disable_minutes:
-        return True  # degenerate: 24 h window
-    if enable_minutes < disable_minutes:
-        return enable_minutes <= now_minutes < disable_minutes
-    return now_minutes >= enable_minutes or now_minutes < disable_minutes  # overnight
-
-
-def next_transition(
-    now_minutes: int, enable_minutes: int, disable_minutes: int
-) -> int | None:
-    """Minute-of-day of the next boundary strictly after now, or None (24 h)."""
-    if enable_minutes == disable_minutes:
-        return None
-    candidates = [m for m in (enable_minutes, disable_minutes) if m > now_minutes]
-    if candidates:
-        return min(candidates)
-    return min(enable_minutes, disable_minutes)  # both passed: first boundary tomorrow
-
-
-def next_transition_at(
-    now: dt.datetime, enable_minutes: int, disable_minutes: int
-) -> dt.datetime | None:
-    """Local datetime of the next boundary after ``now``, or None (24 h)."""
-    minutes = next_transition(now.hour * 60 + now.minute, enable_minutes, disable_minutes)
-    if minutes is None:
-        return None
-    boundary = now.replace(hour=minutes // 60, minute=minutes % 60, second=0, microsecond=0)
-    if boundary <= now:
-        boundary += dt.timedelta(days=1)
-    return boundary
+HistoryFn = Callable[[], dict]
 
 
 def validated_config(
-    enabled: object, enable_time: object, disable_time: object, pv: object = None
+    enabled: object, wake_frac: object = None, sleep_frac: object = None
 ) -> dict:
-    """Strict parse for user input; raises ValueError on a malformed time."""
-    enable_minutes = parse_hhmm(enable_time)
-    if enable_minutes is None:
-        raise ValueError("enableTime must be HH:MM")
-    disable_minutes = parse_hhmm(disable_time)
-    if disable_minutes is None:
-        raise ValueError("disableTime must be HH:MM")
+    """Strict parse for user input; raises ValueError on a malformed fraction."""
     return {
         "enabled": coerce_enabled(enabled),
-        "enable_time": format_minutes(enable_minutes),
-        "disable_time": format_minutes(disable_minutes),
-        "pv": validated_pv_config(pv),
+        "wake_frac": _strict_frac(wake_frac, DEFAULT_WAKE_FRAC, "wakeFrac"),
+        "sleep_frac": _strict_frac(sleep_frac, DEFAULT_SLEEP_FRAC, "sleepFrac"),
     }
 
 
 def normalize_config(raw: object) -> dict:
     """Lenient parse for stored config: bad/missing fields fall back to defaults."""
     src = raw if isinstance(raw, dict) else {}
-    enabled = coerce_enabled(src.get("enabled", DEFAULT_ENABLED))
-    enable_minutes = parse_hhmm(src.get("enable_time", src.get("enableTime")))
-    disable_minutes = parse_hhmm(src.get("disable_time", src.get("disableTime")))
-    if enable_minutes is None:
-        enable_minutes = parse_hhmm(DEFAULT_ENABLE)
-    if disable_minutes is None:
-        disable_minutes = parse_hhmm(DEFAULT_DISABLE)
     return {
-        "enabled": enabled,
-        "enable_time": format_minutes(enable_minutes),
-        "disable_time": format_minutes(disable_minutes),
-        "pv": normalize_pv_config(src.get("pv")),
-    }
-
-
-def normalize_pv_config(raw: object) -> dict:
-    """Lenient parse for the PV wake/sleep rules; bad fields fall back."""
-    src = raw if isinstance(raw, dict) else {}
-    wake = parse_hhmm(src.get("wake_after", src.get("wakeAfter")))
-    if wake is None:
-        wake = parse_hhmm(DEFAULT_PV_WAKE_AFTER)
-    sleep = parse_hhmm(src.get("sleep_after", src.get("sleepAfter")))
-    if sleep is None:
-        sleep = parse_hhmm(DEFAULT_PV_SLEEP_AFTER)
-    return {
-        "enabled": coerce_enabled(src.get("enabled", DEFAULT_PV_ENABLED)),
-        "wake_after": format_minutes(wake),
-        "wake_panel_v": max(
-            0.0,
-            _number(
-                src.get("wake_panel_v", src.get("wakePanelV")), DEFAULT_PV_WAKE_PANEL_V
-            ),
-        ),
-        "sleep_after": format_minutes(sleep),
-        "sleep_watts": max(
-            0.0,
-            _number(
-                src.get("sleep_watts", src.get("sleepWatts")), DEFAULT_PV_SLEEP_WATTS
-            ),
-        ),
-    }
-
-
-def validated_pv_config(raw: object) -> dict:
-    """Strict parse for user input; raises ValueError on a malformed time."""
-    src = raw if isinstance(raw, dict) else {}
-    wake_raw = src.get("wake_after", src.get("wakeAfter"))
-    wake = parse_hhmm(wake_raw)
-    if wake is None:
-        if wake_raw is not None:
-            raise ValueError("pv wakeAfter must be HH:MM")
-        wake = parse_hhmm(DEFAULT_PV_WAKE_AFTER)
-    sleep_raw = src.get("sleep_after", src.get("sleepAfter"))
-    sleep = parse_hhmm(sleep_raw)
-    if sleep is None:
-        if sleep_raw is not None:
-            raise ValueError("pv sleepAfter must be HH:MM")
-        sleep = parse_hhmm(DEFAULT_PV_SLEEP_AFTER)
-    return {
-        "enabled": coerce_enabled(src.get("enabled", DEFAULT_PV_ENABLED)),
-        "wake_after": format_minutes(wake),
-        "wake_panel_v": max(
-            0.0,
-            _number(
-                src.get("wake_panel_v", src.get("wakePanelV")), DEFAULT_PV_WAKE_PANEL_V
-            ),
-        ),
-        "sleep_after": format_minutes(sleep),
-        "sleep_watts": max(
-            0.0,
-            _number(
-                src.get("sleep_watts", src.get("sleepWatts")), DEFAULT_PV_SLEEP_WATTS
-            ),
+        "enabled": coerce_enabled(src.get("enabled", DEFAULT_ENABLED)),
+        "wake_frac": _frac(src.get("wake_frac", src.get("wakeFrac")), DEFAULT_WAKE_FRAC),
+        "sleep_frac": _frac(
+            src.get("sleep_frac", src.get("sleepFrac")), DEFAULT_SLEEP_FRAC
         ),
     }
 
 
 class ScheduleController:
-    """Applies the daily window through injected async read/apply callbacks.
+    """Applies the sun-driven decision through injected async read/apply callbacks.
 
     ``last_mode`` is the controller's belief about the device mode. It starts
-    unknown; the first tick reads (or applies blind if the read fails). Manual
-    on/off calls ``note_manual`` so the window pauses until the next boundary.
+    unknown; the first tick reads (or applies blind if the read fails). A manual
+    on/off calls ``note_manual``, which parks the schedule until the sun changes
+    its mind.
     """
 
     def __init__(
@@ -296,30 +200,32 @@ class ScheduleController:
         retry_s: float = 120.0,
         retry_max_s: float = 900.0,
         now_fn: Callable[[], float] = time.time,
-        pv: PvSchedule | object | None = None,
         watts: SampleFn | None = None,
         panel_v: SampleFn | None = None,
+        bus_v: SampleFn | None = None,
+        history: HistoryFn | None = None,
     ) -> None:
         self.config = normalize_config(config)
         self._read = read
         self._apply = apply
         self._tz = tz
-        if pv is not None:
-            self.pv = pv if isinstance(pv, PvSchedule) else PvSchedule.from_mapping(pv)
-        else:
-            self.pv = PvSchedule.from_mapping(self.config["pv"])
         self._watts = watts
         self._panel_v = panel_v
-        self._pv_day: dt.date | None = None
-        self._morning_started = False
-        self._evening_ended = False
+        self._bus_v = bus_v
+        self._history = history
+        self.learned = Learned()
+        self._learned_at = 0.0
+        self._day: dt.date | None = None
+        self._sunrise = False
+        self._sunset = False
         self._poll_s = poll_s
         self._verify_s = verify_s
         self._retry_s = retry_s
         self._retry_max_s = retry_max_s
         self._now = now_fn
         self._wake = asyncio.Event()
-        self.override_until = 0.0
+        self.override_desired: bool | None = None
+        self.last_reason = ""
         self.last_mode: bool | None = None
         self.last_applied_at = 0.0
         self.last_applied_on: bool | None = None
@@ -338,14 +244,6 @@ class ScheduleController:
             return dt.datetime.fromtimestamp(ts, self._tz)
         return dt.datetime.fromtimestamp(ts).astimezone()
 
-    def _minutes(self) -> tuple[int, int]:
-        enable = parse_hhmm(self.config["enable_time"])
-        disable = parse_hhmm(self.config["disable_time"])
-        return (
-            enable if enable is not None else parse_hhmm(DEFAULT_ENABLE),
-            disable if disable is not None else parse_hhmm(DEFAULT_DISABLE),
-        )
-
     def _sample(self, fn: SampleFn | None) -> float | None:
         if fn is None:
             return None
@@ -358,47 +256,79 @@ class ScheduleController:
             return None
         return float(value) if isinstance(value, (int, float)) else None
 
-    def _reset_pv_day(self, local: dt.datetime) -> None:
+    def _reset_day(self, local: dt.datetime) -> None:
         day = local.date()
-        if day != self._pv_day:
-            self._pv_day = day
-            self._morning_started = False
-            self._evening_ended = False
+        if day != self._day:
+            self._day = day
+            self._sunrise = False
+            self._sunset = False
+
+    def _learned_inputs(self) -> Learned:
+        if self._history is None:
+            return self.learned
+        ts = self._now()
+        if self._learned_at and ts - self._learned_at < LEARN_REFRESH_S:
+            return self.learned
+        self._learned_at = ts
+        try:
+            self.learned = Learned.from_mapping(self._history())
+        except Exception:
+            log.exception("schedule: learned levels failed")
+        return self.learned
 
     def desired_on(self, now: float | None = None) -> bool | None:
+        """True/False to enforce, or None when there is nothing to go on (or disabled)."""
         if not self.config["enabled"]:
             return None
-        local = self._local(now)
-        now_minutes = local.hour * 60 + local.minute
-        enable, disable = self._minutes()
-        base = is_in_window(now_minutes, enable, disable)
-        pv = self.pv
-        # PV gating only makes sense for a daytime window; an overnight / 24 h
-        # window is an explicit intent that should not be trimmed by sunshine.
-        if pv is None or not pv.enabled or enable >= disable:
-            return base
-        self._reset_pv_day(local)
-        if not self._evening_ended:
-            if pv_sleep_due(now_minutes, self._sample(self._watts), pv):
-                self._evening_ended = True
-                log.info(
-                    "schedule: PV sleep after %s (watts < %.0fW)",
-                    format_minutes(pv.sleep_after),
-                    pv.sleep_watts,
-                )
-        if not self._evening_ended and not self._morning_started and not base:
-            if pv_wake_ready(now_minutes, self._sample(self._panel_v), pv):
-                self._morning_started = True
-                log.info(
-                    "schedule: PV wake after %s (panel ≥ %.1fV)",
-                    format_minutes(pv.wake_after),
-                    pv.wake_panel_v,
-                )
-        if self._evening_ended:
-            return False
-        if self._morning_started:
+        self._reset_day(self._local(now))
+        panel_v = self._sample(self._panel_v)
+        bus_v = self._sample(self._bus_v)
+        watts = self._sample(self._watts)
+        learned = self._learned_inputs()
+        wake_v = learned.wake_v(self.config["wake_frac"])
+        sleep_w = learned.sleep_w(self.config["sleep_frac"])
+        panel_txt = "?" if panel_v is None else f"{panel_v:.0f}V"
+        wake_txt = (
+            f"{wake_v:.0f}V"
+            if wake_v is not None
+            else f"{BOOTSTRAP_VOC_BUS_MULT:g}× bus"
+        )
+
+        if sun_up(panel_v, bus_v, wake_v):
+            if self._sunset:
+                log.info("schedule: panel back up (%s) — clearing sunset latch", panel_txt)
+            self._sunset = False
+            if not self._sunrise:
+                log.info("schedule: sun up: panel %s ≥ %s — charger ON", panel_txt, wake_txt)
+            self._sunrise = True
+            self.last_reason = f"sun up: panel {panel_txt} ≥ {wake_txt}"
             return True
-        return base
+
+        if panel_v is None and not self._sunrise and not self._sunset:
+            # No evidence either way (BLE outage, or night with nothing reported): keep the
+            # charger exactly as it is rather than inventing a decision.
+            self.last_reason = "no panel reading yet"
+            return None
+
+        if sun_down(panel_v, bus_v, wake_v) and (
+            watts is None or (sleep_w is not None and watts < sleep_w)
+        ):
+            # Missing output counts as collapsed: it is what a sleeping unit reports.
+            counts = "no output" if watts is None else f"{watts:.0f}W < {sleep_w:.0f}W"
+            if not self._sunset:
+                log.info("schedule: sun down: panel %s, %s — charger OFF", panel_txt, counts)
+            self._sunset = True
+            self.last_reason = f"sun down: panel {panel_txt}, {counts}"
+            return False
+
+        if self._sunset:
+            self.last_reason = "sunset latched"
+            return False
+        if self._sunrise:
+            self.last_reason = f"sun up: panel {panel_txt}, waiting for output to collapse"
+            return True
+        self.last_reason = f"no sunrise yet: panel {panel_txt} < {wake_txt}"
+        return False
 
     def _fail(self, message: str) -> None:
         self.last_error = message or "schedule apply failed"
@@ -414,7 +344,7 @@ class ScheduleController:
         self._wake.set()
 
     def note_manual(self, on: bool | None) -> None:
-        """Record a manual on/off and pause the window until the next boundary."""
+        """Record a manual on/off and park the schedule until the sun changes its mind."""
         if on is None:
             return
         self.last_mode = bool(on)
@@ -425,24 +355,22 @@ class ScheduleController:
         self._next_attempt_at = 0.0
         if not self.config["enabled"]:
             return
-        nxt = next_transition_at(self._local(), *self._minutes())
-        if nxt is not None:
-            self.override_until = nxt.timestamp()
-            log.info(
-                "schedule: manual %s overrides window until %s",
-                "ON" if on else "OFF",
-                nxt.strftime("%H:%M"),
-            )
+        self.override_desired = self.desired_on()
+        log.info(
+            "schedule: manual %s overrides until the sun changes (%s)",
+            "ON" if on else "OFF",
+            self.last_reason,
+        )
 
     def update_config(self, config: object) -> None:
-        """Replace the window, clear any manual override, and enforce now."""
+        """Replace the sun rules, clear any manual override, and enforce now."""
         self.config = normalize_config(config)
-        self.pv = PvSchedule.from_mapping(self.config["pv"])
-        self.override_until = 0.0
+        self.override_desired = None
         self._desired_memo = None
-        self._pv_day = None
-        self._morning_started = False
-        self._evening_ended = False
+        self._day = None
+        self._sunrise = False
+        self._sunset = False
+        self._learned_at = 0.0
         self._backoff = 0.0
         self._next_attempt_at = 0.0
         self.wake()
@@ -450,38 +378,33 @@ class ScheduleController:
     def snapshot(self, now: float | None = None) -> dict:
         ts = self._now() if now is None else float(now)
         local = self._local(ts)
-        enable, disable = self._minutes()
         desired = self.desired_on(ts)
-        nxt = next_transition_at(local, enable, disable) if desired is not None else None
-        override_until = self.override_until if self.override_until > ts else 0.0
-        override_time = None
-        if override_until:
-            override_time = self._local(override_until).strftime("%H:%M")
-        pv_snap = None
-        if self.pv is not None and self.pv.enabled:
-            pv_snap = {
-                "enabled": True,
-                "wakeAfter": format_minutes(self.pv.wake_after),
-                "wakePanelV": self.pv.wake_panel_v,
-                "sleepAfter": format_minutes(self.pv.sleep_after),
-                "sleepWatts": self.pv.sleep_watts,
-                "morningStarted": self._morning_started,
-                "eveningEnded": self._evening_ended,
-                "watts": self._sample(self._watts),
-                "panelV": self._sample(self._panel_v),
-            }
+        learned = self._learned_inputs()
+        wake_v = learned.wake_v(self.config["wake_frac"])
+        sleep_w = learned.sleep_w(self.config["sleep_frac"])
         return {
             "enabled": self.config["enabled"],
-            "enableTime": self.config["enable_time"],
-            "disableTime": self.config["disable_time"],
-            "inWindow": desired,
-            "pv": pv_snap,
+            "wakeFrac": self.config["wake_frac"],
+            "sleepFrac": self.config["sleep_frac"],
             "desiredOn": desired,
-            "nextTransitionAt": int(nxt.timestamp()) if nxt else None,
-            "nextTransitionTime": nxt.strftime("%H:%M") if nxt else None,
-            "nextTransitionOn": (not desired) if (nxt and desired is not None) else None,
-            "overrideUntil": int(override_until) if override_until else None,
-            "overrideUntilTime": override_time,
+            "sunUp": self._sunrise and not self._sunset,
+            "sunriseLatched": self._sunrise,
+            "sunsetLatched": self._sunset,
+            "reason": self.last_reason,
+            "learned": {
+                "days": learned.days,
+                "pvMax": learned.pv_max,
+                "pvNight": learned.pv_night,
+                "wattsPeakToday": learned.watts_peak_today,
+                "wakeV": wake_v,
+                "sleepW": sleep_w,
+                "bootstrap": wake_v is None,
+            },
+            "panelV": self._sample(self._panel_v),
+            "busV": self._sample(self._bus_v),
+            "watts": self._sample(self._watts),
+            "override": self.override_desired is not None,
+            "overrideDesired": self.override_desired,
             "lastMode": self.last_mode,
             "lastAppliedOn": self.last_applied_on,
             "lastAppliedAt": int(self.last_applied_at) if self.last_applied_at else None,
@@ -497,17 +420,18 @@ class ScheduleController:
         ts = self._now() if now is None else float(now)
         self.last_checked_at = ts
         if not self.config["enabled"]:
-            self.override_until = 0.0
+            self.override_desired = None
             return
-        if self.override_until:
-            if ts < self.override_until:
-                return
-            self.override_until = 0.0
-            log.info("schedule: manual override ended; re-asserting window")
         desired = self.desired_on(ts)
-        assert desired is not None
+        if desired is None:
+            return  # no opinion: leave the charger alone
+        if self.override_desired is not None:
+            if desired == self.override_desired:
+                return  # the manual tap still matches the sun: leave the charger alone
+            log.info("schedule: sun changed its mind (%s)", self.last_reason)
+            self.override_desired = None
         if desired != self._desired_memo:
-            # boundary/config change: try immediately, even after a failure
+            # sun flipped or config changed: try immediately, even after a failure
             self._desired_memo = desired
             self._backoff = 0.0
             self._next_attempt_at = 0.0
@@ -523,11 +447,15 @@ class ScheduleController:
             if result.success and result.on is not None:
                 self.last_mode = result.on
             elif self.last_mode is not None:
-                self._fail(f"verify: {result.message}")
-                return
+                # A failed verify is not evidence the charger is on, so drop the belief and let the
+                # blind apply below re-assert the decision; otherwise one unreadable register keeps
+                # the charger off for the rest of the day.
+                self.last_error = f"verify: {result.message}"
+                log.warning("schedule: verify: %s — mode unknown, re-applying", result.message)
+                self.last_mode = None
             # else: mode unknown and the read failed. This unit does not always
             # echo the mode register, so fall through to a blind (idempotent)
-            # apply instead of leaving the window unenforced.
+            # apply instead of leaving the decision unenforced.
 
         if self.last_mode == desired:
             self.last_error = None
@@ -542,10 +470,9 @@ class ScheduleController:
             self._backoff = 0.0
             self._next_attempt_at = 0.0
             log.info(
-                "schedule: charger %s (window %s-%s)",
+                "schedule: charger %s (%s)",
                 "ON" if desired else "OFF",
-                self.config["enable_time"],
-                self.config["disable_time"],
+                self.last_reason,
             )
         else:
             self._fail(result.message or "apply failed")
